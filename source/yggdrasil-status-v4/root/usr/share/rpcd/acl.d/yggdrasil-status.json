@@ -1,0 +1,18 @@
+{
+	"yggdrasil-status": {
+		"description": "Read and manage Yggdrasil status LAN inventory",
+		"read": {
+			"ubus": {
+				"network.interface": [ "dump" ],
+				"luci.yggdrasil": [ "getPeers" ],
+				"luci.yggdrasil-status": [ "clients" ]
+			},
+			"uci": [ "network" ]
+		},
+		"write": {
+			"ubus": {
+				"luci.yggdrasil-status": [ "pin", "unpin" ]
+			}
+		}
+	}
+}
