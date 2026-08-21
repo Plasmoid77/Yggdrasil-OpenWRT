@@ -1,0 +1,13 @@
+{
+	"admin/status/yggdrasil": {
+		"title": "Yggdrasil",
+		"order": 5,
+		"action": {
+			"type": "view",
+			"path": "status/yggdrasil"
+		},
+		"depends": {
+			"acl": [ "yggdrasil-status" ]
+		}
+	}
+}
