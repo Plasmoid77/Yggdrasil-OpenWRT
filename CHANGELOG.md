@@ -77,6 +77,15 @@ This fixed real DHCP-only Windows and iPhone clients missing from the page.
 
 Added persistence management directly to `Status -> Yggdrasil`.
 
+Compact peer fields (`State`, `Dir`, `Pr`, and `Cost`) now use minimal,
+non-wrapping columns. Long URIs, addresses, and errors remain wrappable, so the
+table uses wide screens efficiently without splitting short values such as
+`Down` or `Out` across lines.
+
+The LAN-client `Persistence` cell now uses fixed label and action tracks, so
+all `Pin`, `Unpin`, and `Manage` buttons have equal width and align vertically
+regardless of the persistence label.
+
 ### Pin
 
 - creates a normal OpenWrt `config host`;
