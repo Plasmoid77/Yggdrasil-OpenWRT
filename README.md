@@ -2764,7 +2764,7 @@ function persistenceCell(client) {
 		label = E('span', { 'style': 'font-weight:600' }, _('Dynamic'));
 		button = E('button', {
 			'class': 'btn cbi-button-action',
-			'style': 'margin-left:.5em',
+			'style': 'width:100%',
 			'click': function(ev) {
 				ev.preventDefault();
 				showPinDialog(client);
@@ -2780,7 +2780,7 @@ function persistenceCell(client) {
 		if (client.protected_host) {
 			button = E('button', {
 				'class': 'btn cbi-button-action',
-				'style': 'margin-left:.5em',
+				'style': 'width:100%',
 				'click': function(ev) {
 					ev.preventDefault();
 					showProtectedHostDialog(client);
@@ -2790,7 +2790,7 @@ function persistenceCell(client) {
 		else {
 			button = E('button', {
 				'class': 'btn cbi-button-action',
-				'style': 'margin-left:.5em',
+				'style': 'width:100%',
 				'click': function(ev) {
 					ev.preventDefault();
 					showUnpinDialog(client);
@@ -2799,7 +2799,9 @@ function persistenceCell(client) {
 		}
 	}
 
-	return E('div', {}, [ label, button ]);
+	return E('div', {
+		'style': 'display:grid; grid-template-columns:6em 5.5em; gap:.5em; align-items:center; white-space:nowrap'
+	}, [ label, button ]);
 }
 
 
