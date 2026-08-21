@@ -1,0 +1,884 @@
+#!/bin/sh
+
+#
+# Dynamic Yggdrasil LAN inventory for OpenWrt.
+#
+# Lifetime model:
+#   - config host         -> persistent row
+#   - active DHCPv4 lease -> dynamic row for exactly the lease lifetime
+#   - neighbour entries   -> runtime IPv6 enrichment only; never persisted
+#   - config domain       -> optional canonical Ygg IPv6 + DNS alias
+#
+# Management model:
+#   - Pin   -> create a normal config host (name + MAC)
+#   - Pin + reserve IPv4 -> additionally store the current IPv4 reservation
+#   - Unpin -> remove the matching single-MAC config host
+#   - static IPv4 removal requires explicit confirmation
+#   - config domain records are never deleted by Pin/Unpin
+#
+# Online state:
+#   IPv4 ARP OR any known Ygg IPv6 response
+#
+# No daemon.
+# No cron.
+# No DB.
+# No persistent runtime cache.
+# No getHostHints as inventory source.
+#
+
+. /lib/functions.sh
+. /usr/share/libubox/jshn.sh
+
+LAN_NET='lan'
+DNS_SUFFIX='home.arpa'
+LEASE_FILE='/tmp/dhcp.leases'
+DHCP_CONFIG='/etc/config/dhcp'
+PIN_SECTION_PREFIX='ygg_status_'
+DHCP_LOCK_FILE='/var/lock/yggdrasil-status-dhcp.lock'
+
+
+lower() {
+	printf '%s' "$1" | tr 'A-Z' 'a-z'
+}
+
+
+normalize_mac() {
+	lower "${1%% *}"
+}
+
+
+valid_mac() {
+	printf '%s\n' "$1" | grep -Eq '^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$'
+}
+
+
+valid_hostname() {
+	local vh_name="$1"
+
+	[ -n "$vh_name" ] || return 1
+	[ "${#vh_name}" -le 63 ] || return 1
+
+	case "$vh_name" in
+		-*|*-|*[!A-Za-z0-9-]*) return 1 ;;
+	esac
+
+	return 0
+}
+
+
+first_ipv4() {
+	local fi_value="$1"
+	local fi_token
+
+	fi_value="$(printf '%s' "$fi_value" | tr ',' ' ')"
+
+	for fi_token in $fi_value; do
+		if valid_ipv4 "$fi_token"; then
+			printf '%s\n' "$fi_token"
+			return 0
+		fi
+	done
+
+	return 1
+}
+
+
+valid_ipv4() {
+	printf '%s\n' "$1" | awk -F. '
+		NF != 4 { exit 1 }
+		{
+			for (i = 1; i <= 4; i++) {
+				if ($i !~ /^[0-9]+$/ || $i < 0 || $i > 255)
+					exit 1
+			}
+		}
+	'
+}
+
+
+mac_was_emitted() {
+	local mwe_mac
+	mwe_mac="$(normalize_mac "$1")"
+
+	case "$EMITTED_MACS" in
+		*"|${mwe_mac}|"*) return 0 ;;
+	esac
+
+	return 1
+}
+
+
+remember_emitted_mac() {
+	local rem_mac
+	rem_mac="$(normalize_mac "$1")"
+	EMITTED_MACS="${EMITTED_MACS}|${rem_mac}|"
+}
+
+
+lease_is_active() {
+	local lia_expiry="$1"
+
+	case "$lia_expiry" in
+		''|*[!0-9]*) return 1 ;;
+		0) return 0 ;;
+	esac
+
+	[ "$lia_expiry" -gt "$NOW" ]
+}
+
+
+acquire_dhcp_lock() {
+	local adl_mode="$1"
+
+	exec 9>>"$DHCP_LOCK_FILE" || return 1
+	case "$adl_mode" in
+		shared) flock -s 9 ;;
+		*) flock -n 9 ;;
+	esac
+}
+
+
+# Return success when a config host contains options beyond the small set that
+# this page can safely reason about. Such sections are still shown as
+# persistent, but automatic Unpin is disabled so tags, DUID/hostid settings or
+# other DHCP policy cannot be removed accidentally.
+host_section_has_extra_options() {
+	local hse_selector="$1"
+	local hse_line
+
+	while IFS= read -r hse_line; do
+		[ -n "$hse_line" ] || continue
+
+		case "$hse_line" in
+			"dhcp.${hse_selector}=host"|\
+			"dhcp.${hse_selector}.name="*|\
+			"dhcp.${hse_selector}.mac="*|\
+			"dhcp.${hse_selector}.ip="*)
+				;;
+			*)
+				return 0
+				;;
+		esac
+	done <<EOF
+$(uci -q show "dhcp.${hse_selector}" 2>/dev/null)
+EOF
+
+	return 1
+}
+
+
+# Locate persistent config-host metadata by MAC.
+#
+# Safety invariants for Unpin:
+#   - a section containing multiple MACs is never deleted here;
+#   - a MAC present in multiple host sections is never deleted here;
+#   - a section with extra/unknown options is never deleted here.
+#
+# This prevents a status-page action from silently destroying unrelated DHCP
+# policy.
+match_host_section_by_mac() {
+	local mh_section="$1"
+	local mh_wanted="$2"
+	local mh_macs mh_candidate mh_count=0 mh_matched=0
+
+	config_get mh_macs "$mh_section" mac
+	[ -n "$mh_macs" ] || return 0
+
+	mh_macs="$(printf '%s' "$mh_macs" | tr ',' ' ')"
+
+	for mh_candidate in $mh_macs; do
+		mh_count=$((mh_count + 1))
+		if [ "$(normalize_mac "$mh_candidate")" = "$(normalize_mac "$mh_wanted")" ]; then
+			mh_matched=1
+		fi
+	done
+
+	[ "$mh_matched" -eq 1 ] || return 0
+
+	FOUND_HOST_MATCH_COUNT=$((FOUND_HOST_MATCH_COUNT + 1))
+
+	# Keep metadata from the first matching section, but continue scanning to
+	# detect duplicate host sections that refer to the same MAC.
+	[ -z "$FOUND_HOST_SECTION" ] || return 0
+
+	FOUND_HOST_SECTION="$mh_section"
+	FOUND_HOST_SELECTOR="$mh_section"
+	FOUND_HOST_MAC_COUNT="$mh_count"
+	FOUND_HOST_ALL_MACS="$mh_macs"
+	config_get FOUND_HOST_NAME "$mh_section" name
+	config_get FOUND_HOST_IP "$mh_section" ip
+}
+
+
+find_host_by_mac() {
+	FOUND_HOST_SECTION=''
+	FOUND_HOST_SELECTOR=''
+	FOUND_HOST_NAME=''
+	FOUND_HOST_IP=''
+	FOUND_HOST_ALL_MACS=''
+	FOUND_HOST_MAC_COUNT=0
+	FOUND_HOST_MATCH_COUNT=0
+	FOUND_HOST_MANAGED=0
+	FOUND_HOST_STATIC_IPV4=''
+	FOUND_HOST_COMPLEX=0
+	FOUND_HOST_AMBIGUOUS=0
+
+	config_foreach match_host_section_by_mac host "$1"
+
+	[ -n "$FOUND_HOST_SECTION" ] || return 1
+
+	case "$FOUND_HOST_SECTION" in
+		${PIN_SECTION_PREFIX}*) FOUND_HOST_MANAGED=1 ;;
+	esac
+
+	FOUND_HOST_STATIC_IPV4="$(first_ipv4 "$FOUND_HOST_IP" 2>/dev/null || true)"
+	[ "$FOUND_HOST_MATCH_COUNT" -gt 1 ] && FOUND_HOST_AMBIGUOUS=1
+	if host_section_has_extra_options "$FOUND_HOST_SELECTOR"; then
+		FOUND_HOST_COMPLEX=1
+	fi
+
+	return 0
+}
+
+
+# Find the active DHCP lease for a MAC. Used by Pin so that the optional static
+# reservation always comes from the currently remembered lease, never from a
+# stale UI value supplied by the browser.
+find_active_lease_by_mac() {
+	local fal_wanted fal_expiry fal_mac fal_ip fal_name fal_clientid fal_rest
+
+	LEASE_MATCH_EXPIRY=''
+	LEASE_MATCH_IPV4=''
+	LEASE_MATCH_NAME=''
+	fal_wanted="$(normalize_mac "$1")"
+
+	[ -r "$LEASE_FILE" ] || return 1
+
+	while IFS=' ' read -r fal_expiry fal_mac fal_ip fal_name fal_clientid fal_rest; do
+		[ -n "$fal_mac" ] || continue
+		lease_is_active "$fal_expiry" || continue
+		[ "$(normalize_mac "$fal_mac")" = "$fal_wanted" ] || continue
+
+		LEASE_MATCH_EXPIRY="$fal_expiry"
+		LEASE_MATCH_IPV4="$fal_ip"
+		LEASE_MATCH_NAME="$fal_name"
+		[ "$LEASE_MATCH_NAME" = '*' ] && LEASE_MATCH_NAME=''
+		return 0
+	done < "$LEASE_FILE"
+
+	return 1
+}
+
+
+# Canonical record lookup. A matching config domain is optional.
+find_canonical_domain() {
+	local fcd_host="$1"
+	local fcd_wanted fcd_i fcd_name fcd_ip
+
+	CANONICAL_IPV6=''
+	DNS_ALIAS=''
+
+	[ -n "$fcd_host" ] || return 1
+
+	fcd_wanted="$(lower "$fcd_host").${DNS_SUFFIX}"
+	fcd_i=0
+
+	while uci -q get "dhcp.@domain[$fcd_i]" >/dev/null 2>&1; do
+		fcd_name="$(uci -q get "dhcp.@domain[$fcd_i].name" 2>/dev/null)"
+		fcd_ip="$(uci -q get "dhcp.@domain[$fcd_i].ip" 2>/dev/null)"
+
+		if [ -n "$fcd_name" ] && [ "$(lower "$fcd_name")" = "$fcd_wanted" ]; then
+			case "$fcd_ip" in
+				*:*)
+					CANONICAL_IPV6="$fcd_ip"
+					DNS_ALIAS="$fcd_name"
+					return 0
+					;;
+			esac
+		fi
+
+		fcd_i=$((fcd_i + 1))
+	done
+
+	return 1
+}
+
+
+# Locate the logical netifd interface backed by the Yggdrasil proto handler.
+select_ygg_network() {
+	local syn_section="$1"
+	local syn_proto
+
+	[ -z "$YGG_NET" ] || return 0
+	config_get syn_proto "$syn_section" proto
+	[ "$syn_proto" = 'yggdrasil' ] || return 0
+	YGG_NET="$syn_section"
+}
+
+
+# Determine the routed /64 delegated by the Yggdrasil netifd interface. This
+# deliberately does not select the first global /64 from br-lan: WAN prefix
+# delegation or another overlay may legitimately add more prefixes later.
+find_lan_ygg_prefix() {
+	local flyp_addr
+
+	[ -n "$YGG_NET" ] || return 0
+
+	flyp_addr="$(
+		ubus call "network.interface.${YGG_NET}" status 2>/dev/null |
+			jsonfilter -e '@["ipv6-prefix"][@.class="ygg"].address' 2>/dev/null |
+			head -n 1
+	)"
+
+	printf '%s\n' "$flyp_addr" |
+		awk '
+			NF {
+				split($1, h, ":")
+				if (h[1] != "" && h[2] != "" && h[3] != "" && h[4] != "") {
+					print tolower(h[1] ":" h[2] ":" h[3] ":" h[4] ":")
+					exit
+				}
+			}
+		'
+}
+
+
+# A REACHABLE neighbor entry is a recent kernel-confirmed success, so avoid
+# spawning another probe for it. STALE/DELAY/PROBE/FAILED are not treated as
+# Online or Offline; those states still fall through to an active probe.
+neighbor_recently_reachable() {
+	local nrr_addr="$1"
+
+	case "$nrr_addr" in
+		*:*) ip -6 neigh show to "$nrr_addr" dev "$LAN_DEV" 2>/dev/null ;;
+		*)   ip neigh show to "$nrr_addr" dev "$LAN_DEV" 2>/dev/null ;;
+	esac | grep -qw 'REACHABLE'
+}
+
+
+# Runtime SLAAC addresses currently associated with a MAC. These are
+# enrichment only and are never written to UCI or a cache.
+observed_ipv6_for_mac() {
+	local o6_wanted="$1"
+
+	[ -n "$LAN_YGG_PREFIX" ] || return 0
+
+	ip -6 neigh show dev "$LAN_DEV" 2>/dev/null |
+		awk -v wanted="$(normalize_mac "$o6_wanted")" -v prefix="$LAN_YGG_PREFIX" '
+		{
+			addr = tolower($1)
+			mac = ""
+
+			for (i = 1; i <= NF; i++) {
+				if ($i == "lladdr" && (i + 1) <= NF) {
+					mac = tolower($(i + 1))
+					break
+				}
+			}
+
+			if (mac != wanted)
+				next
+
+			if (index(addr, prefix) != 1)
+				next
+
+			if (!seen[addr]++)
+				print $1
+		}
+	'
+}
+
+
+append_unique_ipv6() {
+	local aui_addr="$1"
+	local aui_current
+
+	[ -n "$aui_addr" ] || return 0
+
+	for aui_current in $KNOWN_IPV6; do
+		[ "$(lower "$aui_current")" = "$(lower "$aui_addr")" ] && return 0
+	done
+
+	KNOWN_IPV6="${KNOWN_IPV6}${KNOWN_IPV6:+ }${aui_addr}"
+}
+
+
+build_known_ipv6() {
+	local bki_mac="$1"
+	local bki_addr
+
+	KNOWN_IPV6=''
+	append_unique_ipv6 "$CANONICAL_IPV6"
+
+	for bki_addr in $(observed_ipv6_for_mac "$bki_mac"); do
+		append_unique_ipv6 "$bki_addr"
+	done
+}
+
+
+probe_online() {
+	local po_ipv4="$1"
+	local po_addr
+
+	if [ -n "$po_ipv4" ] && neighbor_recently_reachable "$po_ipv4"; then
+		return 0
+	fi
+
+	for po_addr in $KNOWN_IPV6; do
+		if neighbor_recently_reachable "$po_addr"; then
+			return 0
+		fi
+	done
+
+	if [ -n "$po_ipv4" ] && command -v arping >/dev/null 2>&1; then
+		if arping -I "$LAN_DEV" -c 1 -f -w 1 "$po_ipv4" >/dev/null 2>&1; then
+			return 0
+		fi
+	fi
+
+	for po_addr in $KNOWN_IPV6; do
+		if ping -6 -c 1 -W 1 "$po_addr" >/dev/null 2>&1; then
+			return 0
+		fi
+	done
+
+	return 1
+}
+
+
+emit_client() {
+	local ec_name="$1"
+	local ec_mac="$2"
+	local ec_ipv4="$3"
+	local ec_persistent="$4"
+	local ec_lease_expiry="$5"
+	local ec_static_ipv4="$6"
+	local ec_managed_pin="$7"
+	local ec_shared_host="$8"
+	local ec_complex_host="$9"
+	local ec_ambiguous_host="${10}"
+	local ec_online=0
+	local ec_primary_ipv6=''
+	local ec_addr ec_protected_host=0
+
+	[ -n "$ec_mac" ] || return 0
+
+	# A config domain is persistent metadata keyed by hostname. Only attach it
+	# to a persistent config-host identity; a DHCP-only client can claim an
+	# arbitrary hostname and must not inherit another device's canonical record.
+	if [ "$ec_persistent" -eq 1 ]; then
+		find_canonical_domain "$ec_name" || true
+	else
+		CANONICAL_IPV6=''
+		DNS_ALIAS=''
+	fi
+
+	build_known_ipv6 "$ec_mac"
+
+	ec_primary_ipv6="$CANONICAL_IPV6"
+	[ -n "$ec_primary_ipv6" ] || ec_primary_ipv6="${KNOWN_IPV6%% *}"
+
+	if probe_online "$ec_ipv4"; then
+		ec_online=1
+	fi
+
+	json_add_object ""
+	json_add_string hostname "$ec_name"
+	json_add_string mac "$ec_mac"
+	json_add_string ipv4 "$ec_ipv4"
+	json_add_string ipv6 "$ec_primary_ipv6"
+	json_add_string canonical_ipv6 "$CANONICAL_IPV6"
+	json_add_array ipv6_addresses
+	for ec_addr in $KNOWN_IPV6; do
+		json_add_string "" "$ec_addr"
+	done
+	json_close_array
+	json_add_string dns "$DNS_ALIAS"
+	json_add_int online "$ec_online"
+	json_add_int persistent "$ec_persistent"
+	json_add_int static_ipv4 "$([ -n "$ec_static_ipv4" ] && echo 1 || echo 0)"
+	json_add_string reserved_ipv4 "$ec_static_ipv4"
+	[ "$ec_shared_host" -eq 1 ] && ec_protected_host=1
+	[ "$ec_complex_host" -eq 1 ] && ec_protected_host=1
+	[ "$ec_ambiguous_host" -eq 1 ] && ec_protected_host=1
+
+	json_add_int managed_pin "$ec_managed_pin"
+	json_add_int shared_host "$ec_shared_host"
+	json_add_int complex_host "$ec_complex_host"
+	json_add_int ambiguous_host "$ec_ambiguous_host"
+	json_add_int protected_host "$ec_protected_host"
+	json_add_string lease_expiry "$ec_lease_expiry"
+	json_close_object
+
+	remember_emitted_mac "$ec_mac"
+}
+
+
+# Dynamic rows: active DHCPv4 leases. Their lifetime is exactly the DHCP lease
+# lifetime. No extra history is kept.
+emit_dynamic_leases() {
+	local ed_expiry ed_mac ed_ipv4 ed_hostname ed_clientid ed_rest
+	local ed_name ed_persistent ed_static_ipv4 ed_managed ed_shared ed_complex ed_ambiguous
+
+	[ -r "$LEASE_FILE" ] || return 0
+
+	while IFS=' ' read -r ed_expiry ed_mac ed_ipv4 ed_hostname ed_clientid ed_rest; do
+		[ -n "$ed_mac" ] || continue
+		lease_is_active "$ed_expiry" || continue
+		mac_was_emitted "$ed_mac" && continue
+
+		ed_name="$ed_hostname"
+		[ "$ed_name" = '*' ] && ed_name=''
+		ed_persistent=0
+		ed_static_ipv4=''
+		ed_managed=0
+		ed_shared=0
+		ed_complex=0
+		ed_ambiguous=0
+
+		if find_host_by_mac "$ed_mac"; then
+			ed_persistent=1
+			[ -n "$FOUND_HOST_NAME" ] && ed_name="$FOUND_HOST_NAME"
+			ed_static_ipv4="$FOUND_HOST_STATIC_IPV4"
+			ed_managed="$FOUND_HOST_MANAGED"
+			[ "$FOUND_HOST_MAC_COUNT" -gt 1 ] && ed_shared=1
+			ed_complex="$FOUND_HOST_COMPLEX"
+			ed_ambiguous="$FOUND_HOST_AMBIGUOUS"
+			[ -n "$ed_static_ipv4" ] && ed_ipv4="$ed_static_ipv4"
+		fi
+
+		emit_client "$ed_name" "$ed_mac" "$ed_ipv4" "$ed_persistent" "$ed_expiry" "$ed_static_ipv4" "$ed_managed" "$ed_shared" "$ed_complex" "$ed_ambiguous"
+	done < "$LEASE_FILE"
+}
+
+
+# Persistent rows without an active DHCP lease. They stay visible as Offline.
+emit_persistent_host() {
+	local eph_section="$1"
+	local eph_macs eph_mac eph_name eph_ipv4 eph_managed eph_shared eph_complex eph_ambiguous
+
+	config_get eph_macs "$eph_section" mac
+	[ -n "$eph_macs" ] || return 0
+	eph_macs="$(printf '%s' "$eph_macs" | tr ',' ' ')"
+
+	for eph_mac in $eph_macs; do
+		mac_was_emitted "$eph_mac" && continue
+
+		# Re-resolve by MAC so duplicate sections and section safety metadata are
+		# computed consistently even for persistent hosts without a live lease.
+		find_host_by_mac "$eph_mac" || continue
+
+		eph_name="$FOUND_HOST_NAME"
+		eph_ipv4="$FOUND_HOST_STATIC_IPV4"
+		eph_managed="$FOUND_HOST_MANAGED"
+		eph_shared=0
+		[ "$FOUND_HOST_MAC_COUNT" -gt 1 ] && eph_shared=1
+		eph_complex="$FOUND_HOST_COMPLEX"
+		eph_ambiguous="$FOUND_HOST_AMBIGUOUS"
+
+		emit_client "$eph_name" "$eph_mac" "$eph_ipv4" 1 "" "$eph_ipv4" "$eph_managed" "$eph_shared" "$eph_complex" "$eph_ambiguous"
+	done
+}
+
+
+rpc_clients() {
+	LAN_DEV="$(uci -q get network.${LAN_NET}.device)"
+	[ -n "$LAN_DEV" ] || LAN_DEV='br-lan'
+
+	NOW="$(date +%s)"
+	YGG_NET=''
+	config_load network
+	config_foreach select_ygg_network interface
+	LAN_YGG_PREFIX="$(find_lan_ygg_prefix)"
+	EMITTED_MACS=''
+
+	acquire_dhcp_lock shared || true
+	config_load dhcp
+
+	json_init
+	json_add_array clients
+	emit_dynamic_leases
+	config_foreach emit_persistent_host host
+	json_close_array
+	json_dump
+}
+
+
+json_reply() {
+	local jr_ok="$1"
+	local jr_code="$2"
+	local jr_message="$3"
+
+	json_init
+	json_add_int ok "$jr_ok"
+	json_add_string code "$jr_code"
+	json_add_string message "$jr_message"
+	json_dump
+}
+
+
+json_reply_device() {
+	local jrd_ok="$1"
+	local jrd_code="$2"
+	local jrd_message="$3"
+	local jrd_mac="$4"
+	local jrd_name="$5"
+	local jrd_ipv4="$6"
+
+	json_init
+	json_add_int ok "$jrd_ok"
+	json_add_string code "$jrd_code"
+	json_add_string message "$jrd_message"
+	json_add_string mac "$jrd_mac"
+	json_add_string hostname "$jrd_name"
+	json_add_string reserved_ipv4 "$jrd_ipv4"
+	json_dump
+}
+
+
+read_request() {
+	local rr_input
+	rr_input="$(cat)"
+	json_load "$rr_input" 2>/dev/null || return 1
+	return 0
+}
+
+
+backup_dhcp_config() {
+	DHCP_BACKUP="/tmp/yggdrasil-status-dhcp.$$.bak"
+	cp -p "$DHCP_CONFIG" "$DHCP_BACKUP" || return 1
+}
+
+
+restore_dhcp_config() {
+	[ -n "$DHCP_BACKUP" ] && [ -f "$DHCP_BACKUP" ] || return 0
+	cp -p "$DHCP_BACKUP" "$DHCP_CONFIG" || true
+	uci -q revert dhcp >/dev/null 2>&1 || true
+	/etc/init.d/dnsmasq reload >/dev/null 2>&1 || true
+}
+
+
+finish_dhcp_config() {
+	rm -f "$DHCP_BACKUP"
+	DHCP_BACKUP=''
+}
+
+
+dhcp_has_pending_changes() {
+	[ -n "$(uci -q changes dhcp 2>/dev/null)" ]
+}
+
+
+commit_and_reload_dhcp() {
+	if ! uci commit dhcp; then
+		restore_dhcp_config
+		return 1
+	fi
+
+	if ! /etc/init.d/dnsmasq reload >/dev/null 2>&1; then
+		restore_dhcp_config
+		return 1
+	fi
+
+	finish_dhcp_config
+	return 0
+}
+
+
+rpc_pin() {
+	local rp_mac rp_name rp_reserve rp_section rp_ipv4=''
+
+	read_request || {
+		json_reply 0 'invalid_request' 'Invalid JSON request.'
+		return 0
+	}
+
+	json_get_var rp_mac mac
+	json_get_var rp_name name
+	json_get_var rp_reserve reserve_ipv4
+
+	rp_mac="$(normalize_mac "$rp_mac")"
+
+	valid_mac "$rp_mac" || {
+		json_reply 0 'invalid_mac' 'Invalid MAC address.'
+		return 0
+	}
+
+	acquire_dhcp_lock exclusive || {
+		json_reply 0 'busy' 'Another DHCP configuration update is already in progress.'
+		return 0
+	}
+
+	NOW="$(date +%s)"
+	config_load dhcp
+
+	if find_host_by_mac "$rp_mac"; then
+		json_reply_device 1 'already_persistent' 'Device is already persistent.' "$rp_mac" "$FOUND_HOST_NAME" "$FOUND_HOST_STATIC_IPV4"
+		return 0
+	fi
+
+	find_active_lease_by_mac "$rp_mac" || {
+		json_reply 0 'no_active_lease' 'The device no longer has an active DHCP lease.'
+		return 0
+	}
+
+	[ -n "$rp_name" ] || rp_name="$LEASE_MATCH_NAME"
+
+	valid_hostname "$rp_name" || {
+		json_reply 0 'invalid_hostname' 'Hostname must be 1-63 characters using letters, digits or hyphens, and cannot start or end with a hyphen.'
+		return 0
+	}
+
+	case "$rp_reserve" in
+		1|true)
+			rp_ipv4="$LEASE_MATCH_IPV4"
+			if ! valid_ipv4 "$rp_ipv4"; then
+				json_reply 0 'no_ipv4' 'The active lease does not contain a usable IPv4 address.'
+				return 0
+			fi
+			;;
+	esac
+
+	rp_section="${PIN_SECTION_PREFIX}$(printf '%s' "$rp_mac" | tr -d ':')"
+
+	if dhcp_has_pending_changes; then
+		json_reply 0 'pending_uci_changes' 'DHCP has uncommitted UCI changes. Apply or revert them before using Pin/Unpin.'
+		return 0
+	fi
+
+	if uci -q get "dhcp.${rp_section}" >/dev/null 2>&1; then
+		json_reply 0 'section_collision' 'A Yggdrasil status pin section with this name already exists.'
+		return 0
+	fi
+
+	DHCP_BACKUP=''
+	backup_dhcp_config || {
+		json_reply 0 'backup_failed' 'Could not back up /etc/config/dhcp.'
+		return 0
+	}
+
+	if ! uci set "dhcp.${rp_section}=host" ||
+	   ! uci set "dhcp.${rp_section}.name=${rp_name}" ||
+	   ! uci set "dhcp.${rp_section}.mac=${rp_mac}"; then
+		restore_dhcp_config
+		finish_dhcp_config
+		json_reply 0 'uci_failed' 'Could not create the persistent host entry.'
+		return 0
+	fi
+
+	if [ -n "$rp_ipv4" ] && ! uci set "dhcp.${rp_section}.ip=${rp_ipv4}"; then
+		restore_dhcp_config
+		finish_dhcp_config
+		json_reply 0 'uci_failed' 'Could not store the IPv4 reservation.'
+		return 0
+	fi
+
+	if ! commit_and_reload_dhcp; then
+		finish_dhcp_config
+		json_reply 0 'reload_failed' 'Could not commit/reload DHCP configuration; the previous configuration was restored.'
+		return 0
+	fi
+
+	json_reply_device 1 'pinned' 'Device pinned successfully.' "$rp_mac" "$rp_name" "$rp_ipv4"
+}
+
+
+rpc_unpin() {
+	local ru_mac ru_confirm ru_static ru_section
+
+	read_request || {
+		json_reply 0 'invalid_request' 'Invalid JSON request.'
+		return 0
+	}
+
+	json_get_var ru_mac mac
+	json_get_var ru_confirm confirm_static
+	ru_mac="$(normalize_mac "$ru_mac")"
+
+	valid_mac "$ru_mac" || {
+		json_reply 0 'invalid_mac' 'Invalid MAC address.'
+		return 0
+	}
+
+	acquire_dhcp_lock exclusive || {
+		json_reply 0 'busy' 'Another DHCP configuration update is already in progress.'
+		return 0
+	}
+
+	config_load dhcp
+
+	if ! find_host_by_mac "$ru_mac"; then
+		json_reply 1 'already_dynamic' 'Device is already dynamic.'
+		return 0
+	fi
+
+	if [ "$FOUND_HOST_MATCH_COUNT" -gt 1 ]; then
+		json_reply 0 'ambiguous_host' 'This MAC appears in more than one config host section. Resolve the duplicate in Network -> DHCP and DNS before using Unpin.'
+		return 0
+	fi
+
+	if [ "$FOUND_HOST_MAC_COUNT" -gt 1 ]; then
+		json_reply 0 'shared_host' 'This config host contains multiple MAC addresses. Unpin it from the standard DHCP configuration to avoid affecting other devices.'
+		return 0
+	fi
+
+	if [ "$FOUND_HOST_COMPLEX" -eq 1 ]; then
+		json_reply 0 'complex_host' 'This config host contains additional DHCP options. Edit it in Network -> DHCP and DNS so those settings are not removed accidentally.'
+		return 0
+	fi
+
+	ru_static="$FOUND_HOST_STATIC_IPV4"
+
+	if [ -n "$ru_static" ]; then
+		case "$ru_confirm" in
+			1|true) ;;
+			*)
+				json_reply_device 0 'static_confirmation_required' 'This device has a static DHCP reservation. Removing this persistent entry will also remove the reserved IPv4 address.' "$ru_mac" "$FOUND_HOST_NAME" "$ru_static"
+				return 0
+				;;
+		esac
+	fi
+
+	ru_section="$FOUND_HOST_SELECTOR"
+
+	if dhcp_has_pending_changes; then
+		json_reply 0 'pending_uci_changes' 'DHCP has uncommitted UCI changes. Apply or revert them before using Pin/Unpin.'
+		return 0
+	fi
+
+	DHCP_BACKUP=''
+	backup_dhcp_config || {
+		json_reply 0 'backup_failed' 'Could not back up /etc/config/dhcp.'
+		return 0
+	}
+
+	if ! uci -q delete "dhcp.${ru_section}"; then
+		restore_dhcp_config
+		finish_dhcp_config
+		json_reply 0 'uci_failed' 'Could not remove the persistent host entry.'
+		return 0
+	fi
+
+	if ! commit_and_reload_dhcp; then
+		finish_dhcp_config
+		json_reply 0 'reload_failed' 'Could not commit/reload DHCP configuration; the previous configuration was restored.'
+		return 0
+	fi
+
+	json_reply_device 1 'unpinned' 'Device unpinned successfully. Any matching config domain record was left untouched.' "$ru_mac" "$FOUND_HOST_NAME" "$ru_static"
+}
+
+
+case "$1" in
+	list)
+		printf '%s\n' '{"clients":{},"pin":{"mac":"","name":"","reserve_ipv4":false},"unpin":{"mac":"","confirm_static":false}}'
+		;;
+
+	call)
+		case "$2" in
+			clients) rpc_clients ;;
+			pin) rpc_pin ;;
+			unpin) rpc_unpin ;;
+		esac
+		;;
+esac
