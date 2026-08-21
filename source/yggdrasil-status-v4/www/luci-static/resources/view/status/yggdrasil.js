@@ -96,7 +96,7 @@ function makeTable(headers, rows, id, compactColumns) {
 	]);
 
 	rows.forEach(function(row) {
-			table.appendChild(E('tr', { 'class': 'tr' },
+		table.appendChild(E('tr', { 'class': 'tr' },
 			row.map(function(value, i) {
 				var isCompact = compact.indexOf(i) !== -1;
 
