@@ -75,27 +75,37 @@ function lastError(peer) {
 }
 
 
-function makeTable(headers, rows, id) {
+function makeTable(headers, rows, id, compactColumns) {
 	var attrs = { 'class': 'table' };
+	var compact = compactColumns || [];
 
 	if (id)
 		attrs.id = id;
 
 	var table = E('table', attrs, [
 		E('tr', { 'class': 'tr table-titles' },
-			headers.map(function(header) {
-				return E('th', { 'class': 'th' }, header);
+			headers.map(function(header, i) {
+				return E('th', {
+					'class': 'th',
+					'style': compact.indexOf(i) !== -1
+						? 'width: 1%; white-space: nowrap; text-align: center'
+						: null
+				}, header);
 			})
 		)
 	]);
 
 	rows.forEach(function(row) {
-		table.appendChild(E('tr', { 'class': 'tr' },
+			table.appendChild(E('tr', { 'class': 'tr' },
 			row.map(function(value, i) {
+				var isCompact = compact.indexOf(i) !== -1;
+
 				return E('td', {
 					'class': 'td',
 					'data-title': headers[i],
-					'style': 'word-break: break-word'
+					'style': isCompact
+						? 'width: 1%; white-space: nowrap; text-align: center; word-break: normal'
+						: 'word-break: break-word'
 				}, value == null || value === '' ? '—' : value);
 			})
 		));
@@ -560,7 +570,9 @@ return view.extend({
 					_('Public key'),
 					_('Uptime')
 				],
-				nodeRows
+				nodeRows,
+				null,
+				[1]
 			),
 			E('h3', {}, _('Peers'))
 		];
@@ -583,7 +595,9 @@ return view.extend({
 					_('Cost'),
 					_('Last Error')
 				],
-				peerRows
+				peerRows,
+				null,
+				[2, 3, 11, 12]
 			));
 		}
 		else {
