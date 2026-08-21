@@ -1,0 +1,27 @@
+#!/bin/sh
+set -eu
+
+interface='ygg0'
+router_dns='<ROUTER_YGG_IPV6>'
+
+case "${1:-}" in
+  apply)
+    attempts=0
+    while ! /usr/bin/ip link show dev "$interface" >/dev/null 2>&1; do
+      attempts=$((attempts + 1))
+      [ "$attempts" -lt 100 ] || exit 1
+      sleep 0.1
+    done
+
+    /usr/bin/resolvectl dns "$interface" "$router_dns"
+    /usr/bin/resolvectl domain "$interface" '~home.arpa'
+    /usr/bin/resolvectl default-route "$interface" no
+    ;;
+  revert)
+    /usr/bin/resolvectl revert "$interface" 2>/dev/null || true
+    ;;
+  *)
+    echo "usage: $0 apply|revert" >&2
+    exit 2
+    ;;
+esac
