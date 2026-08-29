@@ -10,6 +10,7 @@ This archive is the complete handoff package for the current OpenWrt + Yggdrasil
 - `CHANGELOG.md` — architectural evolution and why older approaches were abandoned.
 - `TEST_PLAN.md` — required regression matrix for a rewrite or future release.
 - `REFERENCE_CONFIG.md` — compact generalized final UCI/configuration model.
+- `SLAAC_ADDRESS_FIX.md` — Russian incident report covering the root cause, v5 fix, and live verification of accumulated SLAAC/NDP addresses.
 - `MANIFEST.md` — this file.
 - `checksums.sha256` — SHA-256 for all files in this directory tree except the checksum file itself.
 
