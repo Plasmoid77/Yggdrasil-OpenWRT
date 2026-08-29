@@ -112,9 +112,23 @@ hostname.home.arpa -> canonical Ygg IPv6
 
 These are the key semantics that should not be changed casually.
 
-### 4.1 One OpenWrt Yggdrasil router, ordinary LAN clients
+### 4.1 One OpenWrt Yggdrasil router, ordinary or full-node LAN clients
 
 The router runs Yggdrasil. Ordinary LAN devices do not need Yggdrasil installed.
+
+Full Yggdrasil nodes may coexist on the LAN and use multicast peering. The
+tested LAN includes a Linux laptop and an Android phone in this mode. Each has
+two independent address roles:
+
+```text
+native Ygg TUN address -> its own 2xx: node identity / peer table
+Wi-Fi SLAAC address    -> router's 3xx: routed /64 / LAN-client table
+```
+
+The status backend filters LAN addresses to the router's delegated
+`class=ygg` prefix, so it does not confuse a full node's native address with an
+RA/SLAAC address. Such clients may enable IPv6 forwarding and therefore appear
+with the NDP `router` flag; inventory identity remains the MAC address.
 
 The router receives:
 
@@ -1040,6 +1054,7 @@ If you need to rewrite the implementation, preserve these semantics unless the u
 19. DNS remains optional and separate from core routing.
 20. Do not silently replace tested firewall behavior with a different security policy in documentation; label hardening variants as optional.
 21. New documentation should use `ygg0` as the canonical interface name while noting existing deployments may use another logical name.
+22. Keep native full-node Ygg addresses separate from router-prefix LAN SLAAC addresses in status semantics and documentation.
 
 ### Prefer to preserve
 

@@ -827,8 +827,15 @@ ordinary SLAAC client
 └── only receives an address from routed /64
 
 full LAN Yggdrasil node
-└── may discover ygg0 by multicast peering
+├── owns its independent native Ygg node address on its TUN interface
+├── may discover ygg0 by multicast peering
+└── may also receive the router's routed /64 by SLAAC on its LAN interface
 ```
+
+These address roles are independent. The peer table reports the native Ygg
+node address, while the LAN-client table deliberately filters to the routed
+prefix advertised by this OpenWrt router. Running Yggdrasil locally does not
+turn the device's Wi-Fi SLAAC addresses into additional Ygg node identities.
 
 ---
 
@@ -3557,6 +3564,13 @@ v5 uses stable-first selection: a canonical `config domain` wins; otherwise an
 observed modified EUI-64 wins; privacy-only clients retain all observed
 addresses. Nothing is persisted, and no address is assigned to or removed from
 the client.
+
+This also applies to LAN devices that run their own Yggdrasil daemon. Such a
+device separately owns a native `2xx:` node address, which belongs in the peer
+table, and a router-prefix `3xx:` SLAAC address, which belongs in the LAN table.
+IPv6 forwarding used by a local Yggdrasil client may add the NDP `router` flag;
+that flag does not create another identity and is ignored by the inventory
+merge.
 
 For a DHCP-only client, the device row itself still disappears when the DHCP
 lease expires.

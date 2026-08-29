@@ -181,3 +181,11 @@ The new logic passed BusyBox `ash` fixtures for canonical, EUI-64, and
 privacy-only cases. On the real router it reduced the affected live rows from
 14 and 31 cached addresses to one stable address each while preserving online
 state and privacy-only fallback.
+
+Follow-up verification established that the Linux laptop and one affected
+Android phone are also full Yggdrasil nodes connected to OpenWrt through LAN
+multicast peering. Their native node addresses remain separate from the
+router-prefix SLAAC addresses handled by the LAN inventory. After v5 stopped
+probing the historical privacy set, the phone's NDP entries naturally fell
+from 14 to two currently observed SLAAC addresses, while the status row
+continued to expose one stable address and Online state.

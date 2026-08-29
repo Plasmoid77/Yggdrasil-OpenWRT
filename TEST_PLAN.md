@@ -102,6 +102,7 @@ Fixture:
 one DHCP lease
 same MAC has multiple Ygg /64 IPv6 neighbors
 one neighbor is the modified EUI-64 derived from the MAC
+neighbor may carry the NDP router flag because the client is a full Ygg node
 ```
 
 Expected:
@@ -110,6 +111,7 @@ Expected:
 one row
 only the observed modified EUI-64 shown
 no automatic persistence of those addresses
+router flag does not change MAC identity or create another row
 ```
 
 ### Case F — privacy-only multiple SLAAC addresses
@@ -429,6 +431,7 @@ RA/SLAAC configuration
 DHCPv6 setting
 firewall rules
 Ygg peers
+LAN multicast peering with any full-node clients
 Jumper settings
 DNS firewall module
 ```
