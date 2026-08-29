@@ -110,7 +110,7 @@ RESULT="$(ubus call luci.yggdrasil-status clients 2>/dev/null)" || rollback
 [ -n "$RESULT" ] || rollback
 
 printf '%s\n' '============================================================'
-printf '%s\n' ' Yggdrasil Status v4 installed'
+printf '%s\n' ' Yggdrasil Status v5 installed'
 printf '%s\n' '============================================================'
 printf 'Backup: %s\n' "$BACKUP"
 printf '%s\n' ''

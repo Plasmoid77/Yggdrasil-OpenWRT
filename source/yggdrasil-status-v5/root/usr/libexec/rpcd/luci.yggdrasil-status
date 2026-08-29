@@ -6,7 +6,7 @@
 # Lifetime model:
 #   - config host         -> persistent row
 #   - active DHCPv4 lease -> dynamic row for exactly the lease lifetime
-#   - neighbour entries   -> runtime IPv6 enrichment only; never persisted
+#   - neighbour entries   -> stable-first runtime IPv6 enrichment; never persisted
 #   - config domain       -> optional canonical Ygg IPv6 + DNS alias
 #
 # Management model:
@@ -356,8 +356,8 @@ neighbor_recently_reachable() {
 }
 
 
-# Runtime SLAAC addresses currently associated with a MAC. These are
-# enrichment only and are never written to UCI or a cache.
+# Runtime SLAAC addresses associated with a MAC in the kernel neighbor table.
+# These are enrichment only and are never written to UCI or a cache.
 observed_ipv6_for_mac() {
 	local o6_wanted="$1"
 
@@ -389,6 +389,24 @@ observed_ipv6_for_mac() {
 }
 
 
+eui64_ipv6_for_mac() {
+	local e64_mac e64_old_ifs e64_first
+
+	e64_mac="$(normalize_mac "$1")"
+	valid_mac "$e64_mac" || return 1
+
+	e64_old_ifs="$IFS"
+	IFS=':'
+	set -- $e64_mac
+	IFS="$e64_old_ifs"
+	[ "$#" -eq 6 ] || return 1
+
+	e64_first="$((0x$1 ^ 2))"
+	printf '%s%02x%s:%sff:fe%s:%s%s\n' \
+		"$LAN_YGG_PREFIX" "$e64_first" "$2" "$3" "$4" "$5" "$6"
+}
+
+
 append_unique_ipv6() {
 	local aui_addr="$1"
 	local aui_current
@@ -405,12 +423,29 @@ append_unique_ipv6() {
 
 build_known_ipv6() {
 	local bki_mac="$1"
-	local bki_addr
+	local bki_addr bki_eui64 bki_observed
 
 	KNOWN_IPV6=''
-	append_unique_ipv6 "$CANONICAL_IPV6"
+	if [ -n "$CANONICAL_IPV6" ]; then
+		append_unique_ipv6 "$CANONICAL_IPV6"
+		return 0
+	fi
 
-	for bki_addr in $(observed_ipv6_for_mac "$bki_mac"); do
+	bki_eui64="$(eui64_ipv6_for_mac "$bki_mac" 2>/dev/null || true)"
+	bki_observed="$(observed_ipv6_for_mac "$bki_mac")"
+
+	# A modified EUI-64 address is stable and unambiguous when the client uses
+	# one. Prefer it over privacy IIDs so historical NDP entries do not flood
+	# the UI or get kept alive by repeated presence probes. Clients that do not
+	# expose EUI-64 (notably privacy-only devices) retain all observed addresses.
+	for bki_addr in $bki_observed; do
+		if [ -n "$bki_eui64" ] && [ "$(lower "$bki_addr")" = "$bki_eui64" ]; then
+			append_unique_ipv6 "$bki_addr"
+			return 0
+		fi
+	done
+
+	for bki_addr in $bki_observed; do
 		append_unique_ipv6 "$bki_addr"
 	done
 }

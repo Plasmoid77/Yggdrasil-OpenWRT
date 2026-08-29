@@ -1,4 +1,4 @@
-# Yggdrasil Status v4 - Dynamic LAN Inventory + Pin / Unpin
+# Yggdrasil Status v5 - Stable SLAAC Inventory + Pin / Unpin
 
 This package updates only the optional `Status -> Yggdrasil` LuCI module.
 
@@ -10,6 +10,19 @@ config host         -> persistent row
 ip -6 neigh         -> runtime SLAAC enrichment only
 config domain       -> optional canonical Ygg IPv6 / DNS metadata for a persistent host
 ```
+
+IPv6 selection is stable-first:
+
+```text
+canonical config domain -> show only the canonical address
+observed modified EUI-64 -> show only that stable SLAAC address
+privacy-only client      -> show all observed addresses
+```
+
+This prevents old privacy IIDs in the kernel NDP table from flooding the UI or
+being kept alive by repeated presence probes. It does not assign, remove or
+otherwise change addresses on LAN clients; SLAAC address generation remains a
+client decision.
 
 Management from the Yggdrasil status page:
 
@@ -39,6 +52,7 @@ Safety behavior:
 - Pin validates MAC and hostname server-side. A requested IPv4 reservation is taken only from a currently active lease and is validated server-side.
 - Pin/Unpin mutations are serialized with `flock`; a concurrent mutation returns `busy` without touching UCI.
 - Ygg prefix discovery follows netifd `proto=yggdrasil` and `class=ygg`, so another global LAN `/64` is not mistaken for the routed Ygg prefix.
+- Canonical and observed modified EUI-64 addresses take precedence over rotating privacy IIDs. Privacy-only clients still retain multiple observed addresses.
 - A recent kernel NUD `REACHABLE` result avoids a redundant active probe; all other neighbor states still fall through to ARP/IPv6 probing.
 
 The installer backs up the existing status-module files, installs `iputils-arping` if needed, validates the backend, restarts only `rpcd`, checks that `clients`, `pin` and `unpin` are registered, and rolls the module files back automatically if post-install validation fails.
@@ -48,6 +62,6 @@ It does **not** reload the network, restart the firewall, restart Yggdrasil or r
 Run on OpenWrt as root:
 
 ```sh
-tar -xzf /tmp/yggdrasil-status-v4.tar.gz -C /tmp
-/tmp/yggdrasil-status-v4/install.sh
+tar -xzf /tmp/yggdrasil-status-v5.tar.gz -C /tmp
+/tmp/yggdrasil-status-v5/install.sh
 ```

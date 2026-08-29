@@ -1227,20 +1227,24 @@ The backend then reads:
 ip -6 neigh show dev br-lan
 ```
 
-and associates current Ygg SLAAC addresses with devices by MAC.
+and associates observed Ygg SLAAC addresses with devices by MAC.
 
 These addresses are **runtime enrichment only**:
 
 ```text
-IPv6 neighbour state
-        │
-        ├── address currently associated with MAC -> show it
-        └── no association                         -> do not invent one
+config domain exists      -> show the canonical address only
+no canonical, EUI-64 seen -> show the stable modified EUI-64 only
+privacy-only client       -> show all observed addresses
+no association            -> do not invent an address
 ```
 
 Nothing observed here is written back into UCI, a file or a database.
 
-This matters for privacy-address clients. A phone may legitimately have several current Ygg SLAAC addresses; the status page may display all of them without permanently remembering them.
+This stable-first policy prevents historical privacy IIDs in the NDP cache from
+flooding the UI. It also prevents polling from repeatedly probing every old IID
+and keeping those neighbour entries active. Clients that do not expose a
+modified EUI-64, including privacy-only phones, may still display multiple
+addresses. The router does not assign or remove any client address here.
 
 ### 13.4 Optional canonical Ygg IPv6
 
@@ -1270,12 +1274,12 @@ When a canonical address exists:
 
 - it is displayed first;
 - it remains visible even when neighbour state disappears;
-- duplicate observation of the same address is suppressed;
+- it is the only IPv6 address displayed and probed for that persistent row;
 - the corresponding `home.arpa` name is shown in the DNS column.
 
-Additional observed SLAAC addresses may still be shown underneath it.
-
-Without a matching `config domain`, the dashboard simply shows the currently observed Ygg addresses and `DNS: —`.
+Without a matching `config domain`, the dashboard prefers an observed modified
+EUI-64 address. If none exists, it shows the observed privacy addresses and
+`DNS: —`.
 
 ### 13.5 Online / Offline semantics
 
@@ -1290,7 +1294,7 @@ IPv4 -> one ARP probe on br-lan
           └── failure
                  │
                  ▼
-       known Ygg IPv6 address(es)
+       selected Ygg IPv6 address(es)
                  │
                  ├── any replies -> Online
                  └── none reply  -> Offline
@@ -1420,7 +1424,7 @@ with the following contents:
 # Lifetime model:
 #   - config host         -> persistent row
 #   - active DHCPv4 lease -> dynamic row for exactly the lease lifetime
-#   - neighbour entries   -> runtime IPv6 enrichment only; never persisted
+#   - neighbour entries   -> stable-first runtime IPv6 enrichment; never persisted
 #   - config domain       -> optional canonical Ygg IPv6 + DNS alias
 #
 # Management model:
@@ -1770,8 +1774,8 @@ neighbor_recently_reachable() {
 }
 
 
-# Runtime SLAAC addresses currently associated with a MAC. These are
-# enrichment only and are never written to UCI or a cache.
+# Runtime SLAAC addresses associated with a MAC in the kernel neighbor table.
+# These are enrichment only and are never written to UCI or a cache.
 observed_ipv6_for_mac() {
 	local o6_wanted="$1"
 
@@ -1803,6 +1807,24 @@ observed_ipv6_for_mac() {
 }
 
 
+eui64_ipv6_for_mac() {
+	local e64_mac e64_old_ifs e64_first
+
+	e64_mac="$(normalize_mac "$1")"
+	valid_mac "$e64_mac" || return 1
+
+	e64_old_ifs="$IFS"
+	IFS=':'
+	set -- $e64_mac
+	IFS="$e64_old_ifs"
+	[ "$#" -eq 6 ] || return 1
+
+	e64_first="$((0x$1 ^ 2))"
+	printf '%s%02x%s:%sff:fe%s:%s%s\n' \
+		"$LAN_YGG_PREFIX" "$e64_first" "$2" "$3" "$4" "$5" "$6"
+}
+
+
 append_unique_ipv6() {
 	local aui_addr="$1"
 	local aui_current
@@ -1819,12 +1841,29 @@ append_unique_ipv6() {
 
 build_known_ipv6() {
 	local bki_mac="$1"
-	local bki_addr
+	local bki_addr bki_eui64 bki_observed
 
 	KNOWN_IPV6=''
-	append_unique_ipv6 "$CANONICAL_IPV6"
+	if [ -n "$CANONICAL_IPV6" ]; then
+		append_unique_ipv6 "$CANONICAL_IPV6"
+		return 0
+	fi
 
-	for bki_addr in $(observed_ipv6_for_mac "$bki_mac"); do
+	bki_eui64="$(eui64_ipv6_for_mac "$bki_mac" 2>/dev/null || true)"
+	bki_observed="$(observed_ipv6_for_mac "$bki_mac")"
+
+	# A modified EUI-64 address is stable and unambiguous when the client uses
+	# one. Prefer it over privacy IIDs so historical NDP entries do not flood
+	# the UI or get kept alive by repeated presence probes. Clients that do not
+	# expose EUI-64 (notably privacy-only devices) retain all observed addresses.
+	for bki_addr in $bki_observed; do
+		if [ -n "$bki_eui64" ] && [ "$(lower "$bki_addr")" = "$bki_eui64" ]; then
+			append_unique_ipv6 "$bki_addr"
+			return 0
+		fi
+	done
+
+	for bki_addr in $bki_observed; do
 		append_unique_ipv6 "$bki_addr"
 	done
 }
@@ -3007,7 +3046,7 @@ The final frontend:
 - shows active DHCP clients dynamically;
 - keeps `config host` devices persistently;
 - merges dynamic and persistent sources by MAC;
-- shows current Ygg SLAAC addresses from neighbour state;
+- shows the stable-first selected Ygg SLAAC set from neighbour state;
 - shows canonical Ygg IPv6 / DNS metadata only for a persistent identity;
 - renders `Online` in green and `Offline` in red;
 - exposes `Dynamic`, `Pinned`, `Persistent` and `Static` states;
@@ -3445,7 +3484,10 @@ This is cleaner than inventing a pseudo-domain that may conflict with other nami
 
 Neighbour state is not sufficiently precise for live presence.
 
-An active ARP probe is a strong direct-LAN IPv4 presence signal. If that fails, the backend tries the known Ygg IPv6 addresses for the device: canonical first when configured, followed by current observed SLAAC addresses.
+An active ARP probe is a strong direct-LAN IPv4 presence signal. If that fails,
+the backend tries the selected Ygg IPv6 set: the canonical address when
+configured, otherwise an observed modified EUI-64, otherwise the observed
+privacy-only addresses.
 
 ```text
 ARP success -> Online
@@ -3501,15 +3543,23 @@ Use active tests and client state before concluding that SLAAC itself changed th
 
 A printer in `STALE` state remained completely usable. This is one reason the final dashboard performs active probes.
 
-### 17.3 Multiple observed SLAAC addresses are valid runtime data
+### 17.3 Historical SLAAC addresses can accumulate in NDP
 
-A client may legitimately have stable plus temporary/privacy addresses.
+A client may legitimately have stable plus temporary/privacy addresses. The
+router advertises a prefix; the client chooses its IID(s).
 
-The final status page does **not** persist all of them as inventory. It can display every currently observed Ygg address associated with the MAC while keeping them runtime-only.
+The original v4 status page displayed every Ygg address associated with a MAC
+in `ip -6 neigh`. On a long-running router this included many historical
+privacy IIDs. Polling also probed those entries, which could keep the NDP set
+busy even after a client had stopped using the addresses.
 
-If a canonical `config domain` exists, that address is displayed first and survives neighbour-cache churn. Additional observed addresses remain diagnostic/runtime information.
+v5 uses stable-first selection: a canonical `config domain` wins; otherwise an
+observed modified EUI-64 wins; privacy-only clients retain all observed
+addresses. Nothing is persisted, and no address is assigned to or removed from
+the client.
 
-For a DHCP-only privacy-address client, all displayed IPv6 addresses disappear naturally with neighbour state, and the device row itself disappears when the DHCP lease expires.
+For a DHCP-only client, the device row itself still disappears when the DHCP
+lease expires.
 
 ### 17.4 BusyBox lowercase bug found during final backend testing
 
@@ -3961,11 +4011,11 @@ For a new maintainer or AI agent, the distribution package also contains:
 
 ```text
 AI_CONTEXT.md       compact authoritative architecture + rewrite contract
-CHANGELOG.md        evolution from early prototypes through status v4
+CHANGELOG.md        evolution from early prototypes through status v5
 TEST_PLAN.md        regression matrix required before a new release
 REFERENCE_CONFIG.md compact generalized UCI model
-source/             unpacked v4 source code
-packages/           ready-to-install v4 archive + checksum
+source/             unpacked v5 source code
+packages/           ready-to-install v5 archive + checksum
 MANIFEST.md         package inventory and hashes
 ```
 
@@ -3975,17 +4025,17 @@ At this handoff point:
 
 ```text
 Core network       working on real OpenWrt 25.12.5
-Status module      v4
+Status module      v5
 Dynamic inventory DHCPv4 lease lifetime
 Persistent overlay config host
-Runtime Ygg IPv6  ip -6 neigh, merged by MAC
+Runtime Ygg IPv6  stable-first selection from ip -6 neigh, merged by MAC
 Canonical IPv6    optional config domain
 Presence           ARP OR known Ygg IPv6 probe
 Management         Pin / Unpin / protected Manage path
 DNS                optional module
 ```
 
-The current v4 module has been installed on the real router and the dynamic dashboard is reported working.
+The current v5 module has been installed and verified on the real router.
 
 ### 22.2 The five rules that explain almost everything
 
@@ -4001,14 +4051,14 @@ The current v4 module has been installed on the real router and the dynamic dash
    after their DHCP lease expires.
 
 4. MAC = device identity.
-   SLAAC/privacy IPv6 addresses are runtime properties of that identity and may
-   be multiple or rotating.
+   Canonical or modified EUI-64 IPv6 is preferred for display/probing; a
+   privacy-only client may still have multiple rotating runtime addresses.
 
 5. config domain = optional canonical Ygg IPv6 + home.arpa metadata.
    It is not required for SLAAC or dynamic discovery.
 ```
 
-### 22.3 Status v4 state machine
+### 22.3 Status v5 state machine
 
 ```text
                     active DHCP lease
@@ -4048,6 +4098,7 @@ If another agent rewrites the implementation, it should treat the following as i
 
 - do not require `config host` for a dynamic DHCP client to appear;
 - do not persist every observed SLAAC/privacy IPv6;
+- prefer canonical or observed modified EUI-64 addresses over historical privacy IIDs;
 - do not use `getHostHints` or NUD state as authoritative inventory/presence;
 - do not force EUI-64;
 - do not switch the profile back to stateful DHCPv6 without a deliberate architecture change;
@@ -4064,7 +4115,7 @@ If another agent rewrites the implementation, it should treat the following as i
 
 ### 22.5 Code map
 
-The optional v4 module consists of exactly four installed runtime files:
+The optional v5 module consists of exactly four installed runtime files:
 
 ```text
 /usr/libexec/rpcd/luci.yggdrasil-status
@@ -4094,14 +4145,14 @@ For the exact request/response schema, failure codes, rollback behavior, known l
 - dynamic inventory is deliberately based on **active DHCPv4 leases**; an IPv6-only device with no DHCPv4 lease needs a new lifetime design if it must appear dynamically;
 - `ip -6 neigh` is runtime enrichment only, so an address may temporarily disappear from the UI if the router no longer knows its MAC mapping;
 - the current backend assumes one logical LAN (`network.lan`, normally `br-lan`);
-- current Ygg-prefix detection is sufficient for the intended one-global-`/64` profile but should be improved before supporting multiple simultaneous global `/64` prefixes on the same bridge;
+- Ygg-prefix detection follows the netifd `proto=yggdrasil` interface and delegated `class=ygg`; multiple Ygg interfaces would require an explicit selection policy;
 - renaming a persistent host does not automatically rename its independent `config domain` record;
 - Unpin deliberately leaves `config domain` untouched;
 - a rotating private Wi-Fi MAC is a new identity; an old dynamic MAC disappears with its DHCP lease, while an old pinned MAC remains until manually changed.
 
 ### 22.7 Release discipline
 
-Do not call a future v5+ finished after only `sh -n`.
+Do not call a future release finished after only `sh -n`.
 
 At minimum test:
 
@@ -4110,8 +4161,9 @@ DHCP-only client
 expired guest lease
 persistent client without lease
 persistent + active lease merge
-multiple SLAAC/privacy IPv6 addresses
-canonical + observed IPv6 merge
+stable EUI-64 + privacy IPv6 selection
+privacy-only multiple IPv6 fallback
+canonical IPv6 precedence
 hostname collision isolation
 ARP / IPv6 presence fallbacks
 Pin without IPv4
@@ -4138,10 +4190,10 @@ If context budget is tight, provide the agent only these files, in this order:
 
 ```text
 1. AI_CONTEXT.md
-2. source/yggdrasil-status-v4/root/usr/libexec/rpcd/luci.yggdrasil-status
-3. source/yggdrasil-status-v4/www/luci-static/resources/view/status/yggdrasil.js
-4. source/yggdrasil-status-v4/root/usr/share/rpcd/acl.d/yggdrasil-status.json
-5. source/yggdrasil-status-v4/root/usr/share/luci/menu.d/yggdrasil-status.json
+2. source/yggdrasil-status-v5/root/usr/libexec/rpcd/luci.yggdrasil-status
+3. source/yggdrasil-status-v5/www/luci-static/resources/view/status/yggdrasil.js
+4. source/yggdrasil-status-v5/root/usr/share/rpcd/acl.d/yggdrasil-status.json
+5. source/yggdrasil-status-v5/root/usr/share/luci/menu.d/yggdrasil-status.json
 6. TEST_PLAN.md
 ```
 

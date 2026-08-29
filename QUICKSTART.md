@@ -142,19 +142,21 @@ trusted Ygg client to the router node address.
 ## 4. Install the optional LuCI status module
 
 ```sh
-wget -O /tmp/yggdrasil-status-v4.tar.gz \
-  https://raw.githubusercontent.com/Plasmoid77/Yggdrasil-OpenWRT/main/packages/yggdrasil-status-v4.tar.gz
-wget -O /tmp/yggdrasil-status-v4.tar.gz.sha256 \
-  https://raw.githubusercontent.com/Plasmoid77/Yggdrasil-OpenWRT/main/packages/yggdrasil-status-v4.tar.gz.sha256
+wget -O /tmp/yggdrasil-status-v5.tar.gz \
+  https://raw.githubusercontent.com/Plasmoid77/Yggdrasil-OpenWRT/main/packages/yggdrasil-status-v5.tar.gz
+wget -O /tmp/yggdrasil-status-v5.tar.gz.sha256 \
+  https://raw.githubusercontent.com/Plasmoid77/Yggdrasil-OpenWRT/main/packages/yggdrasil-status-v5.tar.gz.sha256
 
 cd /tmp
-sha256sum -c yggdrasil-status-v4.tar.gz.sha256
-tar -xzf yggdrasil-status-v4.tar.gz
-/tmp/yggdrasil-status-v4/install.sh
+sha256sum -c yggdrasil-status-v5.tar.gz.sha256
+tar -xzf yggdrasil-status-v5.tar.gz
+/tmp/yggdrasil-status-v5/install.sh
 ```
 
 Open **Status → Yggdrasil**. Active DHCPv4 clients should appear without
-manual enrollment. Pin defaults to no IPv4 reservation.
+manual enrollment. The IPv6 column prefers a canonical or observed stable
+EUI-64 address, while privacy-only clients may show multiple addresses. Pin
+defaults to no IPv4 reservation.
 
 ## 5. Add optional `home.arpa` DNS
 

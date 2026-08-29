@@ -94,13 +94,32 @@ lease_expiry empty
 usually Offline unless static IPv4/canonical IPv6 still answers
 ```
 
-### Case E — iOS-like multiple SLAAC addresses
+### Case E — stable EUI-64 plus privacy addresses
 
 Fixture:
 
 ```text
 one DHCP lease
 same MAC has multiple Ygg /64 IPv6 neighbors
+one neighbor is the modified EUI-64 derived from the MAC
+```
+
+Expected:
+
+```text
+one row
+only the observed modified EUI-64 shown
+no automatic persistence of those addresses
+```
+
+### Case F — privacy-only multiple SLAAC addresses
+
+Fixture:
+
+```text
+one DHCP lease
+same MAC has multiple Ygg /64 IPv6 neighbors
+none is the modified EUI-64 derived from the MAC
 ```
 
 Expected:
@@ -111,7 +130,7 @@ all unique observed Ygg addresses shown
 no automatic persistence of those addresses
 ```
 
-### Case F — canonical + observed address
+### Case G — canonical + observed address
 
 Fixture:
 
@@ -125,12 +144,10 @@ Expected:
 
 ```text
 canonical_ipv6 populated
-canonical appears first/bold in UI
-observed addresses also shown
-duplicates removed
+canonical is the only displayed/probed IPv6 address
 ```
 
-### Case G — dynamic hostname collision with canonical record
+### Case H — dynamic hostname collision with canonical record
 
 Fixture:
 
@@ -359,7 +376,8 @@ LAN clients renders
 15-second polling only while page open
 Online green
 Offline red
-multiple IPv6 addresses render as multiple lines
+privacy-only multiple IPv6 addresses render as multiple lines
+observed modified EUI-64 suppresses other privacy IIDs
 canonical IPv6 bold
 Dynamic shows Pin
 Pinned shows Unpin
@@ -393,6 +411,10 @@ Status -> Yggdrasil
 ```
 
 At least one DHCP-only client should appear without a manual `config host` if such a client is currently leased.
+
+For a client whose NDP set contains a modified EUI-64 plus historical privacy
+IIDs, the RPC response and LuCI row must contain only the EUI-64. A
+privacy-only fixture must still retain multiple observed addresses.
 
 ---
 

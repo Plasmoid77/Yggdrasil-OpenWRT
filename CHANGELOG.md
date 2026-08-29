@@ -132,11 +132,11 @@ v4 installer:
 - safe handling of anonymous/complex OpenWrt UCI host sections;
 - canonical DNS metadata restricted to persistent identity so DHCP hostname collisions cannot inherit another host's record.
 
-## Current handoff state
+## v4 handoff state
 
 v4 has been installed on the real OpenWrt 25.12.5 router and the user reports that the dynamic inventory and UI are working.
 
-Future changes should be treated as v5+ and should preserve the invariants in `AI_CONTEXT.md` unless requirements change explicitly.
+The next behavior change should be treated as v5+ and preserve the invariants in `AI_CONTEXT.md` unless requirements change explicitly.
 
 ## 2026-08 — v4 maintenance hardening
 
@@ -158,3 +158,26 @@ Future changes should be treated as v5+ and should preserve the invariants in `A
   service lifecycle. Two consecutive service restarts were validated.
 - The final client interface name was changed from generic `tun0` to explicit
   `ygg0`; two further service restarts and split-DNS routing were validated.
+
+## 2026-08 — Status v5 stable-first SLAAC inventory
+
+Live diagnosis after clients returned to the home LAN found one routed Ygg
+`/64`, but dozens of IPv6 neighbour entries for some Android MACs. These were
+historical rotating privacy IIDs in the kernel NDP table, not additional
+prefixes issued by OpenWrt. The v4 status poll treated every observed IID as
+current and could repeatedly probe old entries.
+
+v5 changes only status selection and probing:
+
+- a persistent canonical `config domain` address is used alone;
+- otherwise, an observed modified EUI-64 address is used alone when present;
+- privacy-only clients retain all observed addresses because NDP exposes no
+  reliable stable/temporary marker for them;
+- unselected historical privacy IIDs are no longer displayed or probed;
+- no RA, DHCPv6, firewall, Yggdrasil, or client address-generation behavior is
+  changed.
+
+The new logic passed BusyBox `ash` fixtures for canonical, EUI-64, and
+privacy-only cases. On the real router it reduced the affected live rows from
+14 and 31 cached addresses to one stable address each while preserving online
+state and privacy-only fallback.
