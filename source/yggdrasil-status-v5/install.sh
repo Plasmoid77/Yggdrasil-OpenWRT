@@ -1,4 +1,7 @@
 #!/bin/sh
+# shellcheck disable=SC3043
+# Target shell is BusyBox ash on OpenWrt: SC3043 ('local' is undefined in
+# POSIX sh) does not apply.
 set -eu
 
 [ "$(id -u)" -eq 0 ] || {
@@ -6,7 +9,7 @@ set -eu
 	exit 1
 }
 
-BASE="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+BASE="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
 BACKUP="/root/yggdrasil-status-backup-$(date +%Y%m%d-%H%M%S)"
 
 BACKEND_SRC="$BASE/root/usr/libexec/rpcd/luci.yggdrasil-status"

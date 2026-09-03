@@ -1,6 +1,7 @@
+1c5a7146a23713f31b09033507aedfb4522c2161ed1f9327f098f7a38d5466bb  ./.github/workflows/checks.yml
 02d2f1fd87f281dfc18451d7153ce3c2e209ddd9cc56ede883ebc21fdd90d9b6  ./AI_CONTEXT.md
 2739e9449cde60a05905b88a36fd61ca850872795cbd769e6a44ba5c7c25abac  ./CHANGELOG.md
-39926d88b3b755fa30cf933e9be4221792cc759ce1dd31d8ae1cf898a3076cbc  ./MANIFEST.md
+825a54eb7303e2528a61ffb7c2f28a1eb83931824fdbf98bef7d66f90d2a99a3  ./MANIFEST.md
 82cf8b5ea8e37e8f8b57dce776a5b8be0a4f299421f7144577c40a05dd7f7f8c  ./QUICKSTART.md
 79141cb1cc890d6155c6bfd9a9cdbcba8c8b12aa429ff52ac4b28adcc760697e  ./README.md
 9d61468fe64962273aa9033ae466f2cbb3b647940f923746fd75f7b5ca1a854e  ./REFERENCE_CONFIG.md
@@ -13,8 +14,8 @@ a7a772d2f2a9d0e4b2d7be175672996175cf35f0b79508e5719ec6e9ecec814e  ./client/linux
 26063dd0d0b89599e8123a6a67350b6d2606336c2080010e6474eef4358679a4  ./packages/yggdrasil-status-v5.tar.gz
 174a47967e925084c6dfd9984c5213bda0b66f11112b47eb7010c43fdaff2ce8  ./packages/yggdrasil-status-v5.tar.gz.sha256
 d832ca0c7a629495c90657d32a898b441766990491324e090900ad499786846f  ./source/yggdrasil-status-v5/README.md
-1d6e1dd5cdbd8914b575373faa3ddce644b5fc4485fbe79bd15470c932924efe  ./source/yggdrasil-status-v5/install.sh
-01326a240eaf379758d5ab05affcc07cceca0b635681d4e60764e6169e69eaa0  ./source/yggdrasil-status-v5/root/usr/libexec/rpcd/luci.yggdrasil-status
+dab1ab4e6ea89ae0ac04273b0b5e4b910546d9d9668daf7fbba9055e50b73199  ./source/yggdrasil-status-v5/install.sh
+0a7f308321fed7e1735dcd0ddff278ebce6c3673bde9d62fa9965d11277d99a2  ./source/yggdrasil-status-v5/root/usr/libexec/rpcd/luci.yggdrasil-status
 b37e5028f7fc787b671390187959959fbbdd5a657287cff78b01cdd2b5b6b345  ./source/yggdrasil-status-v5/root/usr/share/luci/menu.d/yggdrasil-status.json
 8bf275e8e75e569a117eb8cf48b939353991d9e3421f556794ec8c84ed2fd0c3  ./source/yggdrasil-status-v5/root/usr/share/rpcd/acl.d/yggdrasil-status.json
 02a985f72d470a0efb137c67e3b0f57fbbaa2b97c52e62ced9407d07c8fd19a1  ./source/yggdrasil-status-v5/www/luci-static/resources/view/status/yggdrasil.js

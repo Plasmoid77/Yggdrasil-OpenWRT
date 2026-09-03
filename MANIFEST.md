@@ -36,7 +36,7 @@ This archive is the complete handoff package for the current OpenWrt + Yggdrasil
 - `source/yggdrasil-status-v5/root/usr/share/luci/menu.d/yggdrasil-status.json`
 - `source/yggdrasil-status-v5/www/luci-static/resources/view/status/yggdrasil.js`
 
-The unpacked source is byte-for-byte equivalent to the contents of the ready-to-install v5 archive at packaging time.
+The unpacked source is byte-for-byte equivalent to the contents of the ready-to-install v5 archive at packaging time. Later non-functional cleanup (dead-variable removal, ShellCheck directives) has since landed in `source/` without a repackage, so `source/` and the frozen `packages/yggdrasil-status-v5.tar.gz` may no longer match byte-for-byte; the archive's SHA-256 below still identifies the exact build validated on real hardware and cited in `SLAAC_ADDRESS_FIX.md`.
 
 ## Current implementation identity
 

@@ -1,0 +1,55 @@
+name: Checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install ShellCheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Check shell syntax
+        run: |
+          bash -n source/yggdrasil-status-v5/install.sh
+          bash -n source/yggdrasil-status-v5/root/usr/libexec/rpcd/luci.yggdrasil-status
+          bash -n client/linux/yggdrasil-split-dns
+      - name: Run ShellCheck
+        run: |
+          shellcheck -s sh \
+            source/yggdrasil-status-v5/install.sh \
+            source/yggdrasil-status-v5/root/usr/libexec/rpcd/luci.yggdrasil-status \
+            client/linux/yggdrasil-split-dns
+
+  json:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Validate ACL and menu JSON
+        run: |
+          jq empty source/yggdrasil-status-v5/root/usr/share/rpcd/acl.d/yggdrasil-status.json
+          jq empty source/yggdrasil-status-v5/root/usr/share/luci/menu.d/yggdrasil-status.json
+
+  javascript:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check LuCI view syntax
+        run: node --check source/yggdrasil-status-v5/www/luci-static/resources/view/status/yggdrasil.js
+
+  integrity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Verify checksums.sha256 matches the tree
+        run: |
+          sha256sum -c checksums.sha256 || {
+            echo '::error::checksums.sha256 is stale. Regenerate with:'
+            echo '  find . -type f ! -name checksums.sha256 ! -path "./.git/*" | LC_ALL=C sort | xargs sha256sum > checksums.sha256'
+            exit 1
+          }

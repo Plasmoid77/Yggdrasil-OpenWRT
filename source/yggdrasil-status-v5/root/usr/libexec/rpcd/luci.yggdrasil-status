@@ -1,4 +1,8 @@
 #!/bin/sh
+# shellcheck shell=sh disable=SC1091,SC3043
+# Target shell is BusyBox ash on OpenWrt: SC3043 ('local' is undefined in
+# POSIX sh) does not apply, and SC1091 (sourced files not followed) is
+# expected for these fixed OpenWrt system paths.
 
 #
 # Dynamic Yggdrasil LAN inventory for OpenWrt.
@@ -38,6 +42,9 @@ DHCP_LOCK_FILE='/var/lock/yggdrasil-status-dhcp.lock'
 
 
 lower() {
+	# 'A-Z'/'a-z', not '[:upper:]'/'[:lower:]': the POSIX class form failed on
+	# the real BusyBox target (see AI_CONTEXT.md 13.1) — do not "simplify" this.
+	# shellcheck disable=SC2018,SC2019
 	printf '%s' "$1" | tr 'A-Z' 'a-z'
 }
 
@@ -204,7 +211,6 @@ match_host_section_by_mac() {
 	FOUND_HOST_SECTION="$mh_section"
 	FOUND_HOST_SELECTOR="$mh_section"
 	FOUND_HOST_MAC_COUNT="$mh_count"
-	FOUND_HOST_ALL_MACS="$mh_macs"
 	config_get FOUND_HOST_NAME "$mh_section" name
 	config_get FOUND_HOST_IP "$mh_section" ip
 }
@@ -215,7 +221,6 @@ find_host_by_mac() {
 	FOUND_HOST_SELECTOR=''
 	FOUND_HOST_NAME=''
 	FOUND_HOST_IP=''
-	FOUND_HOST_ALL_MACS=''
 	FOUND_HOST_MAC_COUNT=0
 	FOUND_HOST_MATCH_COUNT=0
 	FOUND_HOST_MANAGED=0
@@ -247,19 +252,20 @@ find_host_by_mac() {
 find_active_lease_by_mac() {
 	local fal_wanted fal_expiry fal_mac fal_ip fal_name fal_clientid fal_rest
 
-	LEASE_MATCH_EXPIRY=''
 	LEASE_MATCH_IPV4=''
 	LEASE_MATCH_NAME=''
 	fal_wanted="$(normalize_mac "$1")"
 
 	[ -r "$LEASE_FILE" ] || return 1
 
+	# fal_clientid/fal_rest are unused but required so read() splits the
+	# dhcp.leases fields (expiry mac ip hostname clientid...) correctly.
+	# shellcheck disable=SC2034
 	while IFS=' ' read -r fal_expiry fal_mac fal_ip fal_name fal_clientid fal_rest; do
 		[ -n "$fal_mac" ] || continue
 		lease_is_active "$fal_expiry" || continue
 		[ "$(normalize_mac "$fal_mac")" = "$fal_wanted" ] || continue
 
-		LEASE_MATCH_EXPIRY="$fal_expiry"
 		LEASE_MATCH_IPV4="$fal_ip"
 		LEASE_MATCH_NAME="$fal_name"
 		[ "$LEASE_MATCH_NAME" = '*' ] && LEASE_MATCH_NAME=''
@@ -397,6 +403,8 @@ eui64_ipv6_for_mac() {
 
 	e64_old_ifs="$IFS"
 	IFS=':'
+	# Intentional word-splitting: splits the MAC into positional params by ':'.
+	# shellcheck disable=SC2086
 	set -- $e64_mac
 	IFS="$e64_old_ifs"
 	[ "$#" -eq 6 ] || return 1
@@ -557,6 +565,9 @@ emit_dynamic_leases() {
 
 	[ -r "$LEASE_FILE" ] || return 0
 
+	# ed_clientid/ed_rest are unused but required so read() splits the
+	# dhcp.leases fields (expiry mac ip hostname clientid...) correctly.
+	# shellcheck disable=SC2034
 	while IFS=' ' read -r ed_expiry ed_mac ed_ipv4 ed_hostname ed_clientid ed_rest; do
 		[ -n "$ed_mac" ] || continue
 		lease_is_active "$ed_expiry" || continue
