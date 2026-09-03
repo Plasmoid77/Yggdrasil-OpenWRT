@@ -22,6 +22,8 @@ Part III DNS over Yggdrasil / friendly names
 > **The final design was validated on a real OpenWrt 25.12.5 router.** The deployed router used a local logical interface name `ygg`; this guide deliberately standardizes new installations on `ygg0`.
 >
 > **Guide by Plasmoid (Neuroslopped)**
+>
+> **License:** GPL-3.0-or-later — see [LICENSE](LICENSE).
 
 > Want the shortest tested path? See [QUICKSTART.md](QUICKSTART.md). This README
 > remains the authoritative guide for architecture, rationale, safety,

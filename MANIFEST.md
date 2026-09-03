@@ -12,6 +12,7 @@ This archive is the complete handoff package for the current OpenWrt + Yggdrasil
 - `REFERENCE_CONFIG.md` — compact generalized final UCI/configuration model.
 - `SLAAC_ADDRESS_FIX.md` — Russian incident report covering the root cause, v5 fix, and live verification of accumulated SLAAC/NDP addresses.
 - `MANIFEST.md` — this file.
+- `LICENSE` — GPL-3.0-or-later license text.
 - `checksums.sha256` — SHA-256 for all files in this directory tree except the checksum file itself.
 
 ## Ready-to-install package
