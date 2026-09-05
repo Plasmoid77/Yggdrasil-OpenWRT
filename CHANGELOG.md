@@ -1,5 +1,28 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## v5.4 — run it straight off GitHub
+
+`deploy/deploy-openwrt-yggdrasil.sh` 1.2.1. Documentation and one cosmetic fix.
+
+### Fixed: the banner said "sh" when the script was piped
+
+`SELF="${0##*/}"` is the shell's own name under
+`wget -qO- … | sh -s -- …`, so the banner and the usage text announced
+themselves as `sh 1.2.0`. `SELF` now falls back to the real filename when `$0`
+names a shell.
+
+### Documented: fetching the script on the router
+
+OpenWrt ships `wget` (`uclient-fetch`) with a CA bundle and no `curl`.
+`QUICKSTART.md` now shows both forms — download to `/tmp` and run, which keeps
+`stdin` free for the interactive trusted-address prompt and makes a re-run free,
+or pipe straight into `sh -s --`, which requires `--trusted` on the command line.
+
+It also states the one thing that catches people on a first deployment: the
+netifd restart in stage 2 bounces every interface and kills the SSH session the
+operator is typing in, so the first run belongs under `setsid` with a log. Later
+runs need no restart and are safe to watch live.
+
 ## v5.3 — identity restore, and one run deploys the whole design
 
 `deploy/deploy-openwrt-yggdrasil.sh` 1.2.0. The status package is unchanged at
