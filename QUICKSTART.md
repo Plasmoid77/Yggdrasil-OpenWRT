@@ -20,43 +20,53 @@ Linux split DNS.
 
 `deploy/deploy-openwrt-yggdrasil.sh` performs every step below on a live router.
 Run it in a root shell **on the router**. OpenWrt ships `wget`
-(`uclient-fetch`) with a CA bundle and no `curl`, so fetch it with `wget`:
+(`uclient-fetch`) with a CA bundle and no `curl`:
 
 ```sh
-wget -O /tmp/deploy.sh \
+wget -O deploy-openwrt-yggdrasil.sh \
   https://raw.githubusercontent.com/Plasmoid77/Yggdrasil-OpenWRT/main/deploy/deploy-openwrt-yggdrasil.sh
-sh /tmp/deploy.sh \
+sh deploy-openwrt-yggdrasil.sh \
   --peer tls://<host>:<port> \
   --peer wss://<host>:<port> \
   --trusted <TRUSTED_YGG_IPV6>
 ```
 
-Downloading first is worth the extra line: the script keeps `stdin`, so it can
-ask for the trusted addresses interactively, and a re-run costs nothing. Piping
-works too, but then `stdin` is the pipe and `--trusted` has to be given on the
-command line:
+A root login starts in `/root`, which lives on the overlay and survives a
+reboot. `/tmp` is a tmpfs: nothing prunes it on a timer, but it costs RAM and is
+empty again after a restart.
+
+Piping works too, but then `stdin` is the pipe: the script cannot ask for the
+trusted addresses interactively, so `--trusted` becomes mandatory, and there is
+no local copy to check a checksum against.
 
 ```sh
 wget -qO- https://raw.githubusercontent.com/Plasmoid77/Yggdrasil-OpenWRT/main/deploy/deploy-openwrt-yggdrasil.sh \
   | sh -s -- --peer tls://<host>:<port> --trusted <TRUSTED_YGG_IPV6>
 ```
 
-**On a first deployment, detach the run from your SSH session.** netifd reads
-`/lib/netifd/proto/*.sh` only at startup, so the freshly installed Yggdrasil
-protocol handler is invisible to it and the script has to restart netifd once.
-That bounces every interface, LAN included, and kills the session you are typing
-in — halfway through the deployment. Detached, it finishes regardless:
+`-q` silences the progress output that would otherwise be mixed into the script,
+and `-O -` writes the download to standard output instead of a file.
+
+### About the netifd restart in stage 2
+
+netifd reads `/lib/netifd/proto/*.sh` only at startup, so a Yggdrasil protocol
+handler installed during the same run is invisible to the running daemon and the
+interface comes up as `proto 'none'` with `NO_DEVICE`. A reload does not fix it;
+the script detects the condition and restarts netifd once.
+
+**This is a service restart, not a reboot, and it does not interrupt the run.**
+Measured on the tested router: it takes about three seconds, and an established
+SSH session survives it — the LAN address is back long before the TCP connection
+gives up. What fails during that window is anything opening a *new* connection.
+So a first deployment can be watched live in the terminal like any other run.
+
+Over a link where a three second gap might not be survivable, detach it instead
+and read the log afterwards:
 
 ```sh
-setsid sh /tmp/deploy.sh --peer ... --trusted ... -y \
-    </dev/null >/tmp/deploy.log 2>&1 &
-# reconnect, then:
-cat /tmp/deploy.log
+setsid sh deploy-openwrt-yggdrasil.sh --peer ... --trusted ... -y \
+    </dev/null >deploy.log 2>&1 &
 ```
-
-Once Yggdrasil is deployed the handler is loaded, no restart happens, and later
-runs are safe to watch live in the terminal — where the output is also in colour,
-which it is not when redirected to a file.
 
 One run covers all three parts, section 5 included: it writes
 `router.home.arpa` for the router, `--dns-host NAME=ADDR` for anything else, and

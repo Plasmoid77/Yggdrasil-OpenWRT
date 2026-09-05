@@ -18,10 +18,15 @@ OpenWrt ships `wget` (`uclient-fetch`) with a CA bundle and no `curl`.
 `stdin` free for the interactive trusted-address prompt and makes a re-run free,
 or pipe straight into `sh -s --`, which requires `--trusted` on the command line.
 
-It also states the one thing that catches people on a first deployment: the
-netifd restart in stage 2 bounces every interface and kills the SSH session the
-operator is typing in, so the first run belongs under `setsid` with a log. Later
-runs need no restart and are safe to watch live.
+It also explains the netifd restart in stage 2, and corrects an overstatement
+made while writing this section. The restart is a service restart, not a reboot,
+and it does **not** interrupt the run: measured on the tested router it takes
+about three seconds, and an established SSH session survives it, because the LAN
+address returns long before the TCP connection gives up. What fails during that
+window is anything opening a *new* connection — which is what an earlier polling
+loop was doing when it looked like the session had died. A first deployment can
+be watched live in the terminal; `setsid` with a log is a precaution for links
+where a three second gap may not be survivable, not a requirement.
 
 ## v5.3 — identity restore, and one run deploys the whole design
 
