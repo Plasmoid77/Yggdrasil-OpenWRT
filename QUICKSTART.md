@@ -25,11 +25,14 @@ Run it in a root shell **on the router**. OpenWrt ships `wget`
 ```sh
 wget -O deploy-openwrt-yggdrasil.sh \
   https://raw.githubusercontent.com/Plasmoid77/Yggdrasil-OpenWRT/main/deploy/deploy-openwrt-yggdrasil.sh
-sh deploy-openwrt-yggdrasil.sh \
+sh deploy-openwrt-yggdrasil.sh -y \
   --peer tls://<host>:<port> \
   --peer wss://<host>:<port> \
   --trusted <TRUSTED_YGG_IPV6>
 ```
+
+`-y` skips the confirmation prompt. Drop it to be asked once before anything is
+applied, and to be asked for the trusted addresses if `--trusted` was omitted.
 
 A root login starts in `/root`, which lives on the overlay and survives a
 reboot. `/tmp` is a tmpfs: nothing prunes it on a timer, but it costs RAM and is
@@ -47,21 +50,27 @@ wget -qO- https://raw.githubusercontent.com/Plasmoid77/Yggdrasil-OpenWRT/main/de
 `-q` silences the progress output that would otherwise be mixed into the script,
 and `-O -` writes the download to standard output instead of a file.
 
-### About the netifd restart in stage 2
+### About the netifd restart
 
 netifd reads `/lib/netifd/proto/*.sh` only at startup, so a Yggdrasil protocol
 handler installed during the same run is invisible to the running daemon and the
-interface comes up as `proto 'none'` with `NO_DEVICE`. A reload does not fix it;
-the script detects the condition and restarts netifd once.
+interface would come up as `proto 'none'` with `NO_DEVICE`. A reload does not fix
+it; only a restart does.
 
-**This is a service restart, not a reboot, and it does not interrupt the run.**
-Measured on the tested router: it takes about three seconds, and an established
-SSH session survives it — the LAN address is back long before the TCP connection
+The script does that itself, in stage 1, **immediately after installing the
+packages and before it writes a single UCI value**. That ordering is deliberate:
+the restart drops every interface for a few seconds, and doing it while nothing
+has been changed yet means a connection lost at that moment leaves the router
+exactly as it was found. Re-running the script then simply continues — there is
+no half-applied state to clean up.
+
+This is a service restart, not a reboot, and it does not end the run. Measured on
+the tested router it takes about three seconds, and an established SSH session
+survives it: SSH runs over the LAN IPv4 address, which comes back long before TCP
 gives up. What fails during that window is anything opening a *new* connection.
-So a first deployment can be watched live in the terminal like any other run.
 
-Over a link where a three second gap might not be survivable, detach it instead
-and read the log afterwards:
+Over a link where a three second gap might not be survivable, detach the run and
+read the log afterwards:
 
 ```sh
 setsid sh deploy-openwrt-yggdrasil.sh --peer ... --trusted ... -y \
