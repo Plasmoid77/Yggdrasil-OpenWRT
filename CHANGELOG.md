@@ -1,5 +1,27 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## v5.5 — restart netifd before anything is written
+
+`deploy/deploy-openwrt-yggdrasil.sh` 1.3.0.
+
+### Changed: the netifd restart happens in stage 1, not mid-deployment
+
+netifd only reads `/lib/netifd/proto/*.sh` at startup, so a handler installed
+during the run is invisible to it and the interface comes up as `proto 'none'`.
+The script has always detected that and restarted netifd — but it did so in
+stage 2, after committing the Yggdrasil interface, which put a few seconds of
+dropped interfaces in the middle of applying configuration.
+
+It now restarts netifd at the end of stage 1, right after installing the
+packages and before the first UCI write, and only when this run actually
+installed something. A connection lost at that moment now leaves the router
+exactly as it was found, and re-running the script continues from a clean state
+instead of from a half-applied one.
+
+The stage 2 check is kept as a fallback for the case stage 1 cannot see: a
+handler installed by someone else since netifd last started, leaving this run
+with nothing to install and no reason to restart.
+
 ## v5.4 — run it straight off GitHub
 
 `deploy/deploy-openwrt-yggdrasil.sh` 1.2.1. Documentation and one cosmetic fix.

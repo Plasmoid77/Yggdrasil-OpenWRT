@@ -14,7 +14,7 @@
 
 set -u
 
-VERSION='1.2.1'
+VERSION='1.3.0'
 SELF="${0##*/}"
 # Piped straight from a URL — wget -qO- ... | sh -s -- ... — $0 is the shell, so
 # the banner and the usage text would announce themselves as "sh".
@@ -523,6 +523,26 @@ stage_packages() {
     [ -f /lib/netifd/proto/yggdrasil.sh ] \
         || die "netifd yggdrasil proto handler missing after install (/lib/netifd/proto/yggdrasil.sh)"
     ok "netifd yggdrasil proto handler present"
+
+    # netifd sources /lib/netifd/proto/*.sh once, at startup. A handler installed
+    # a moment ago is therefore invisible to the running daemon, and the Yggdrasil
+    # interface would come up as proto 'none' with NO_DEVICE. Only a restart fixes
+    # it, and it is done here, before the first UCI change: the restart drops
+    # every interface for a few seconds, and doing it while nothing has been
+    # written yet means a connection lost at that moment leaves the router exactly
+    # as it was found, and re-running the script simply continues.
+    if [ -n "$_missing" ] && [ "$DRY_RUN" -eq 0 ]; then
+        info "restarting netifd so it picks up the freshly installed proto handler"
+        info "  (interfaces drop for a few seconds; nothing has been changed yet)"
+        /etc/init.d/network restart >/dev/null 2>&1 || die "network restart failed"
+        _i=0
+        while [ "$_i" -lt 30 ]; do
+            ubus -t 2 wait_for network.interface 2>/dev/null && break
+            _i=$((_i + 2)); sleep 2
+        done
+        sleep 2
+        ok "netifd restarted"
+    fi
 }
 
 # ================================================ stage 2: yggdrasil interface
@@ -658,14 +678,13 @@ stage_yggdrasil() {
         /etc/init.d/network reload >/dev/null 2>&1 || die "network reload failed"
         sleep 3
 
-        # netifd sources /lib/netifd/proto/*.sh only at startup. A protocol
-        # handler installed during this run is invisible to the already-running
-        # netifd, and the interface then comes up as proto 'none' + NO_DEVICE.
-        # A reload does not fix that; only restarting netifd does.
+        # Fallback for the case stage 1 cannot see: the handler was installed by
+        # someone else since netifd last started, so this run had nothing to
+        # install and did not restart it.
         _proto="$(ifstatus "$IFACE" 2>/dev/null | jsonfilter -e '@.proto' 2>/dev/null)"
         if [ "$_proto" != 'yggdrasil' ]; then
             warn "netifd reports proto='${_proto:-unset}' for '$IFACE'"
-            warn "restarting netifd so it loads the freshly installed yggdrasil proto handler"
+            warn "restarting netifd so it loads the yggdrasil proto handler"
             warn "  (this briefly bounces every interface, LAN included)"
             /etc/init.d/network restart >/dev/null 2>&1 || die "network restart failed"
             _i=0
