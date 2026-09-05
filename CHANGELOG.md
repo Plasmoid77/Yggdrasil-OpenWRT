@@ -1,5 +1,35 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## v5.2 — the optional DNS module is deployable
+
+`deploy/deploy-openwrt-yggdrasil.sh` 1.1.0. The status package is unchanged at
+`yggdrasil-status-v5.1`; this release touches the deployment script only.
+
+### Added: `--dns` deploys Part III
+
+Part III (`AI_CONTEXT.md` section 10, `REFERENCE_CONFIG.md` 6-7) was documented
+but had to be applied by hand. The script now has a stage for it, off unless
+`--dns` is given, because the routed `/64`, SLAAC, the firewall policy and the
+status page all work without it.
+
+It writes one `config domain` record per name, opens port 53 to the trusted
+`/128` addresses only, and makes dnsmasq answer the namespace itself instead of
+forwarding it upstream. `--dns-host NAME=ADDR` adds records and may repeat a
+name, so a host with two addresses on the routed `/64` gets both; the UCI
+section id is derived from name *and* address, and existing records for a name
+are dropped before rewriting, so a changed address leaves no stale answer.
+
+### Note: `local` as a UCI list breaks dnsmasq
+
+The obvious way to make dnsmasq authoritative for the namespace is
+`list local '/home.arpa/'`. `/etc/init.d/dnsmasq` emits `option local` as a
+single line and joins list values with spaces, producing `local=/lan/ /home.arpa/`
+— invalid, and dnsmasq exits without a message, taking LAN name resolution with
+it. The script uses `list server '/home.arpa/'` instead: `server=/domain/` with
+no target is dnsmasq's equivalent of `local=/domain/`, and the init script emits
+one line per list value. The stage also waits for dnsmasq to come back and fails
+loudly if it does not.
+
 ## v5.1 — prefix class no longer assumed, plus an automated deployment
 
 Validated on a Cudy WBR3000UAX v1 running OpenWrt 25.12.5 (mediatek/filogic,

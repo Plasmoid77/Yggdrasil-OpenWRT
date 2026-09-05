@@ -28,6 +28,11 @@ Copy it there and run it with the peers you want:
   --trusted <TRUSTED_YGG_IPV6>
 ```
 
+`--dns` additionally deploys the optional DNS module of section 5: it writes
+`router.home.arpa` for the router, `--dns-host NAME=ADDR` for anything else, and
+opens port 53 to the trusted addresses only. Without it nothing DNS-related is
+touched.
+
 Without `--trusted` it asks for the allowed Yggdrasil addresses interactively;
 with `-y` it runs unattended. `--dry-run` prints every change and applies none.
 It preserves an existing private key, backs up `network`, `dhcp` and `firewall`

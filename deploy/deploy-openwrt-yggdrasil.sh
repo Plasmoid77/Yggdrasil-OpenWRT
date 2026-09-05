@@ -14,7 +14,7 @@
 
 set -u
 
-VERSION='1.0.0'
+VERSION='1.1.0'
 SELF="${0##*/}"
 
 # ---------------------------------------------------------------- defaults ---
@@ -29,6 +29,12 @@ DO_LAN=1
 DO_FIREWALL=1
 DO_STATUS=1
 DO_MULTICAST=1
+# Part III of the design is a convenience layer: the routed /64, SLAAC, the
+# firewall policy and the status page all work without it, so it stays opt-in.
+DO_DNS=0
+DNS_DOMAIN='home.arpa'
+DNS_ROUTER='router'
+DNS_HOSTS=''
 STATUS_PKG=''
 STATUS_BASE='https://raw.githubusercontent.com/Plasmoid77/Yggdrasil-OpenWRT/main/packages'
 STATUS_URL=''
@@ -93,6 +99,13 @@ Trusted remote access (firewall src_ip allow-list):
   --trusted ADDR        Yggdrasil /128 allowed to reach the router and LAN.
                         Repeatable. Without any, the ygg zone stays fully closed.
 
+Optional DNS module (Part III — off unless --dns is given):
+  --dns                 Serve <name>.$DNS_DOMAIN records over Yggdrasil.
+  --dns-domain NAME     Private namespace (default: $DNS_DOMAIN)
+  --dns-router NAME     Hostname for this router (default: $DNS_ROUTER)
+  --dns-host NAME=ADDR  Extra record. Repeatable; repeat a NAME to give it
+                        several addresses.
+
 Scope:
   --iface NAME          Yggdrasil interface / UCI section name (default: $IFACE)
   --lan NAME            LAN UCI interface name (default: $LAN)
@@ -142,6 +155,25 @@ add_trusted() {
 }$_t"
 }
 
+add_dns_host() {
+    case "$1" in
+        *=*) : ;;
+        *)   die "--dns-host expects NAME=ADDRESS: $1" ;;
+    esac
+    _n="${1%%=*}"
+    _a="${1#*=}"
+    [ -n "$_n" ] || die "--dns-host: empty hostname in '$1'"
+    case "$_n" in
+        *.*) die "--dns-host: give a bare hostname, the domain is appended: $_n" ;;
+    esac
+    case "$_a" in
+        2??:*|3??:*) : ;;
+        *) die "--dns-host: '$_a' is not a Yggdrasil 200::/7 address" ;;
+    esac
+    DNS_HOSTS="${DNS_HOSTS}${DNS_HOSTS:+
+}$_n=$_a"
+}
+
 while [ $# -gt 0 ]; do
     case "$1" in
         --peer)        [ $# -ge 2 ] || die "--peer needs a value";        add_peer "$2";    shift 2 ;;
@@ -162,6 +194,10 @@ while [ $# -gt 0 ]; do
         --no-lan)      DO_LAN=0;           shift ;;
         --no-firewall) DO_FIREWALL=0;      shift ;;
         --no-status)   DO_STATUS=0;        shift ;;
+        --dns)         DO_DNS=1;           shift ;;
+        --dns-domain)  [ $# -ge 2 ] || die "--dns-domain needs a value";  DNS_DOMAIN="$2";  shift 2 ;;
+        --dns-router)  [ $# -ge 2 ] || die "--dns-router needs a value";  DNS_ROUTER="$2";  shift 2 ;;
+        --dns-host)    [ $# -ge 2 ] || die "--dns-host needs a value";    add_dns_host "$2"; shift 2 ;;
         --status-pkg)  [ $# -ge 2 ] || die "--status-pkg needs a value";  STATUS_PKG="$2";  shift 2 ;;
         --status-url)  [ $# -ge 2 ] || die "--status-url needs a value";  STATUS_URL="$2";  shift 2 ;;
         --wait)        [ $# -ge 2 ] || die "--wait needs a value";        WAIT_SECS="$2";   shift 2 ;;
@@ -750,12 +786,135 @@ stage_firewall() {
     fi
 }
 
-# ================================================== stage 6: LuCI status module
+# ================================================ stage 6: DNS over Yggdrasil
+
+# Part III of the design (AI_CONTEXT.md section 10, REFERENCE_CONFIG.md 6-7).
+# One 'config domain' record serves two roles at once: persistent canonical Ygg
+# metadata for the status page, and a plain dnsmasq answer. No extra daemon.
+
+dns_section() {
+    # $1 = record name, $2 = address. Both go into the UCI section id, so a host
+    # with two addresses on the routed /64 gets two records instead of
+    # overwriting itself, and re-running the script stays idempotent.
+    printf 'ygg_dns_%s' "$(printf '%s_%s' "$1" "$2" | tr -c 'A-Za-z0-9' '_')"
+}
+
+dns_purge() {
+    # $1 = fully qualified record name. Drop every record this script owns for
+    # that name, so a changed address cannot leave a stale second answer.
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '    would run: drop existing ygg_dns_* records for %s\n' "$1" >&2
+        return 0
+    fi
+    uci show dhcp 2>/dev/null \
+        | grep -F ".name='$1'" \
+        | grep '^dhcp\.ygg_dns_' \
+        | cut -d. -f2 \
+        | while IFS= read -r _s; do
+              [ -n "$_s" ] && uci -q delete "dhcp.$_s"
+          done
+    return 0
+}
+
+dns_record() {
+    # $1 = fully qualified name, $2 = address
+    _sec="$(dns_section "$1" "$2")"
+    uci_set "dhcp.$_sec" 'domain'
+    uci_set "dhcp.$_sec.name" "$1"
+    uci_set "dhcp.$_sec.ip" "$2"
+    info "record $1 -> $2"
+}
+
+stage_dns() {
+    [ "$DO_DNS" -eq 1 ] || { info "skipping optional DNS module (enable with --dns)"; return 0; }
+    FAILED_STAGE='DNS over Yggdrasil'
+    step "Stage 6 — DNS over Yggdrasil (optional)"
+
+    uci -q get 'dhcp.@dnsmasq[0]' >/dev/null 2>&1 \
+        || die "no dnsmasq section in /etc/config/dhcp"
+
+    CHANGED_DHCP=1
+
+    # "<fqdn> <address>" per line: the router first, then every --dns-host.
+    _records="${DNS_ROUTER}.${DNS_DOMAIN} ${NODE_ADDR}"
+    _oifs="$IFS"
+    IFS='
+'
+    for _h in $DNS_HOSTS; do
+        [ -n "$_h" ] || continue
+        _records="${_records}
+${_h%%=*}.${DNS_DOMAIN} ${_h#*=}"
+    done
+    for _r in $_records; do
+        dns_purge "${_r%% *}"
+    done
+    for _r in $_records; do
+        dns_record "${_r%% *}" "${_r##* }"
+    done
+    IFS="$_oifs"
+
+    # Answer this namespace locally instead of forwarding it to the WAN resolver.
+    # NB: the documented equivalent, 'local=/domain/', must NOT be turned into a
+    # UCI list — /etc/init.d/dnsmasq emits a single 'local=' line and joins list
+    # values with spaces, which is invalid and stops dnsmasq from starting.
+    # 'server' is emitted as one line per value, and 'server=/domain/' with no
+    # target is dnsmasq's exact equivalent of 'local=/domain/'.
+    if uci -q get 'dhcp.@dnsmasq[0].server' 2>/dev/null \
+        | tr ' ' '\n' | grep -qxF "/$DNS_DOMAIN/"
+    then
+        info "dnsmasq already authoritative for $DNS_DOMAIN"
+    else
+        uci_add_list 'dhcp.@dnsmasq[0].server' "/$DNS_DOMAIN/"
+        info "dnsmasq made authoritative for $DNS_DOMAIN"
+    fi
+
+    if [ "$DO_FIREWALL" -eq 0 ]; then
+        warn "--no-firewall: port 53 not opened, DNS stays LAN-only"
+    elif [ -z "$TRUSTED" ]; then
+        CHANGED_FIREWALL=1
+        uci_del 'firewall.ygg_dns'
+        warn "no trusted /128: DNS will not be reachable over Yggdrasil"
+    else
+        CHANGED_FIREWALL=1
+        uci_set 'firewall.ygg_dns' 'rule'
+        uci_set 'firewall.ygg_dns.name' 'Allow-DNS-from-Trusted-Yggdrasil'
+        uci_set 'firewall.ygg_dns.src' 'ygg'
+        uci_set 'firewall.ygg_dns.family' 'ipv6'
+        uci_set 'firewall.ygg_dns.proto' 'tcp udp'
+        uci_set 'firewall.ygg_dns.dest_port' '53'
+        uci_set 'firewall.ygg_dns.target' 'ACCEPT'
+        fw_rule_trusted 'ygg_dns'
+        ok "port 53 opened for the trusted addresses only"
+    fi
+
+    if [ "$DRY_RUN" -eq 0 ]; then
+        uci commit dhcp || die "uci commit dhcp failed"
+        /etc/init.d/dnsmasq restart >/dev/null 2>&1 || die "dnsmasq restart failed"
+
+        # A dnsmasq that cannot parse its config exits without a word, taking
+        # LAN name resolution with it. Do not leave this stage until it is back.
+        _n=0
+        while [ "$_n" -lt 10 ]; do
+            pidof dnsmasq >/dev/null 2>&1 && break
+            _n=$((_n + 1))
+            sleep 1
+        done
+        pidof dnsmasq >/dev/null 2>&1 || die "dnsmasq is not running after restart"
+
+        if [ "$DO_FIREWALL" -eq 1 ]; then
+            uci commit firewall || die "uci commit firewall failed"
+            /etc/init.d/firewall reload >/dev/null 2>&1 || die "firewall reload failed"
+        fi
+        ok "DNS module applied"
+    fi
+}
+
+# ================================================== stage 7: LuCI status module
 
 stage_status() {
     [ "$DO_STATUS" -eq 1 ] || { info "skipping status module (--no-status)"; return 0; }
     FAILED_STAGE='LuCI status module'
-    step "Stage 6 — LuCI status module"
+    step "Stage 7 — LuCI status module"
 
     if [ "$DRY_RUN" -eq 1 ]; then
         info "would install the status module from ${STATUS_PKG:-${STATUS_URL:-$STATUS_BASE}}"
@@ -851,7 +1010,7 @@ stage_status() {
     fi
 }
 
-# ==================================================== stage 7: verification
+# ==================================================== stage 8: verification
 
 check() {
     # $1 = label, $2 = expected, $3 = actual
@@ -865,7 +1024,7 @@ check() {
 
 stage_verify() {
     FAILED_STAGE=''
-    step "Stage 7 — verification"
+    step "Stage 8 — verification"
     [ "$DRY_RUN" -eq 1 ] && { info "dry run — nothing to verify"; return 0; }
 
     printf '\nInvariants:\n' >&2
@@ -886,6 +1045,25 @@ stage_verify() {
         check 'ygg zone output'  'ACCEPT' "$(uci -q get firewall.ygg.output)"
         check 'ygg zone forward' 'DROP'   "$(uci -q get firewall.ygg.forward)"
         check 'no NAT66'         ''       "$(uci -q get firewall.ygg.masq6)"
+    fi
+
+    if [ "$DO_DNS" -eq 1 ]; then
+        _dsec="$(dns_section "${DNS_ROUTER}.${DNS_DOMAIN}" "$NODE_ADDR")"
+        check 'DNS router record' "$NODE_ADDR" "$(uci -q get "dhcp.$_dsec.ip")"
+        check 'dnsmasq running'   'yes' \
+            "$(pidof dnsmasq >/dev/null 2>&1 && echo yes || echo no)"
+        if [ -n "$TRUSTED" ] && [ "$DO_FIREWALL" -eq 1 ]; then
+            check 'DNS rule port'  '53' "$(uci -q get firewall.ygg_dns.dest_port)"
+        fi
+        # Resolve it for real. nslookup output varies between BusyBox builds, so
+        # a mismatch is reported as a warning rather than a failed invariant.
+        _dres="$(nslookup "${DNS_ROUTER}.${DNS_DOMAIN}" 127.0.0.1 2>/dev/null \
+            | awk '/^Address:/ { a = $2 } END { print a }')"
+        if [ "$_dres" = "$NODE_ADDR" ]; then
+            ok "dnsmasq resolves ${DNS_ROUTER}.${DNS_DOMAIN} -> $NODE_ADDR"
+        else
+            warn "could not confirm ${DNS_ROUTER}.${DNS_DOMAIN} locally (got '${_dres:-nothing}')"
+        fi
     fi
 
     if [ -S "/tmp/yggdrasil/${IFACE}.sock" ]; then
@@ -941,6 +1119,18 @@ stage_verify() {
         printf '  Yggdrasil. Re-run with --trusted <address> to open it.\n' >&2
     fi
 
+    if [ "$DO_DNS" -eq 1 ]; then
+        printf '\n  Private DNS namespace\n' >&2
+        printf '      %s%s.%s%s -> %s\n' \
+            "$C_BLD" "$DNS_ROUTER" "$DNS_DOMAIN" "$C_RST" "$NODE_ADDR" >&2
+        printf '\n  A trusted client reaches those names by pointing its resolver\n' >&2
+        printf '  for %s at %s -- suffix routing, not a\n' "$DNS_DOMAIN" "$NODE_ADDR" >&2
+        printf '  second entry in resolv.conf, which is failover instead.\n' >&2
+        printf '  client/linux/yggdrasil-split-dns in this repository does that\n' >&2
+        printf '  for systemd-resolved. Then: %shttp://%s.%s/%s\n' \
+            "$C_BLD" "$DNS_ROUTER" "$DNS_DOMAIN" "$C_RST" >&2
+    fi
+
     printf '\n  Configuration backup: %s\n' "${BACKUP_DIR:-none}" >&2
     printf '%s%s%s\n' "$C_HDR" "$RULE" "$C_RST" >&2
 }
@@ -957,6 +1147,7 @@ stage_yggdrasil
 stage_wait
 stage_lan
 stage_firewall
+stage_dns
 stage_status
 stage_verify
 
