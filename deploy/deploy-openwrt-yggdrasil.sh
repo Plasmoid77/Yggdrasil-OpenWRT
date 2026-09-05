@@ -14,7 +14,7 @@
 
 set -u
 
-VERSION='1.1.1'
+VERSION='1.2.0'
 SELF="${0##*/}"
 
 # ---------------------------------------------------------------- defaults ---
@@ -29,9 +29,10 @@ DO_LAN=1
 DO_FIREWALL=1
 DO_STATUS=1
 DO_MULTICAST=1
-# Part III of the design is a convenience layer: the routed /64, SLAAC, the
-# firewall policy and the status page all work without it, so it stays opt-in.
-DO_DNS=0
+# Part III is a separate module in the design — the routed /64, SLAAC, the
+# firewall policy and the status page all work without it — but a deployment
+# that stops short of it is not finished, so it runs unless --no-dns says not to.
+DO_DNS=1
 DNS_DOMAIN='home.arpa'
 DNS_ROUTER='router'
 DNS_HOSTS=''
@@ -41,6 +42,8 @@ STATUS_URL=''
 # Newest first. v5.1 fixes the prefix-class lookup; v5 only resolves the routed
 # /64 when the Yggdrasil interface happens to be named 'ygg'.
 STATUS_VERSIONS='yggdrasil-status-v5.1 yggdrasil-status-v5'
+PRIVATE_KEY_FILE=''
+SUPPLIED_KEY=''
 DRY_RUN=0
 ASSUME_YES=0
 WAIT_SECS=90
@@ -95,12 +98,20 @@ Required:
 Peer handling:
   --add-peers           Append to existing peers instead of replacing the set.
 
+Node identity:
+  --private-key-file F  Restore an existing Yggdrasil identity from file F,
+                        keeping its node address. F holds the 128 hex character
+                        private key and nothing else. The key may also be passed
+                        in the YGG_PRIVATE_KEY environment variable. It is never
+                        accepted as an argument value: /proc/<pid>/cmdline is
+                        world readable. Without either, an existing key in the
+                        configuration is kept and a missing one is generated.
+
 Trusted remote access (firewall src_ip allow-list):
   --trusted ADDR        Yggdrasil /128 allowed to reach the router and LAN.
                         Repeatable. Without any, the ygg zone stays fully closed.
 
-Optional DNS module (Part III — off unless --dns is given):
-  --dns                 Serve <name>.$DNS_DOMAIN records over Yggdrasil.
+DNS module (Part III, on by default — see also --no-dns):
   --dns-domain NAME     Private namespace (default: $DNS_DOMAIN)
   --dns-router NAME     Hostname for this router (default: $DNS_ROUTER)
   --dns-host NAME=ADDR  Extra record. Repeatable; repeat a NAME to give it
@@ -114,6 +125,7 @@ Scope:
   --no-lan              Do not touch LAN ip6assign/ip6class/RA/SLAAC
   --no-firewall         Do not create the ygg zone or trusted rules
   --no-status           Do not install the LuCI status module
+  --no-dns              Do not serve <name>.$DNS_DOMAIN over Yggdrasil
   --status-pkg PATH     Install the status module from a local tarball
   --status-url URL      Override the status module download URL
 
@@ -187,6 +199,9 @@ while [ $# -gt 0 ]; do
                        shift 2 ;;
         --add-peers)   PEERS_MODE='add';   shift ;;
         --trusted)     [ $# -ge 2 ] || die "--trusted needs a value";     add_trusted "$2"; shift 2 ;;
+        --private-key-file)
+                       [ $# -ge 2 ] || die "--private-key-file needs a value"
+                       PRIVATE_KEY_FILE="$2"; shift 2 ;;
         --iface)       [ $# -ge 2 ] || die "--iface needs a value";       IFACE="$2";       shift 2 ;;
         --lan)         [ $# -ge 2 ] || die "--lan needs a value";         LAN="$2";         shift 2 ;;
         --no-jumper)   DO_JUMPER=0;        shift ;;
@@ -195,6 +210,7 @@ while [ $# -gt 0 ]; do
         --no-firewall) DO_FIREWALL=0;      shift ;;
         --no-status)   DO_STATUS=0;        shift ;;
         --dns)         DO_DNS=1;           shift ;;
+        --no-dns)      DO_DNS=0;           shift ;;
         --dns-domain)  [ $# -ge 2 ] || die "--dns-domain needs a value";  DNS_DOMAIN="$2";  shift 2 ;;
         --dns-router)  [ $# -ge 2 ] || die "--dns-router needs a value";  DNS_ROUTER="$2";  shift 2 ;;
         --dns-host)    [ $# -ge 2 ] || die "--dns-host needs a value";    add_dns_host "$2"; shift 2 ;;
@@ -290,6 +306,46 @@ confirm() {
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# The private key is the node identity: supplying the old one is the only way to
+# keep an existing Yggdrasil address when redeploying or moving to new hardware.
+# It is deliberately not accepted as a command-line value — /proc/<pid>/cmdline
+# is world readable, so an argument would expose the key to every process on the
+# router for the length of the run, and leave it in the shell history of whoever
+# typed it and in the ssh command line if the script was piped in. A file or the
+# environment keeps it out of argv.
+load_supplied_key() {
+    _k=''
+    if [ -n "$PRIVATE_KEY_FILE" ]; then
+        [ -r "$PRIVATE_KEY_FILE" ] || die "cannot read private key file: $PRIVATE_KEY_FILE"
+        # BusyBox find has no -printf, so the mode string comes from ls.
+        # shellcheck disable=SC2012
+        _mode="$(ls -ld "$PRIVATE_KEY_FILE" 2>/dev/null | cut -c1-10)"
+        case "$_mode" in
+            ????------) : ;;
+            *) warn "key file is readable beyond its owner ($_mode): $PRIVATE_KEY_FILE" ;;
+        esac
+        _k="$(tr -d ' \t\r\n' < "$PRIVATE_KEY_FILE")"
+        _src="$PRIVATE_KEY_FILE"
+    elif [ -n "${YGG_PRIVATE_KEY:-}" ]; then
+        _k="$(printf '%s' "$YGG_PRIVATE_KEY" | tr -d ' \t\r\n')"
+        _src='the YGG_PRIVATE_KEY environment variable'
+    else
+        return 0
+    fi
+
+    # Never echo the value itself, not even in an error.
+    case "${#_k}" in
+        128) : ;;
+        *) die "private key from $_src is ${#_k} characters, expected 128 hex" ;;
+    esac
+    case "$_k" in
+        *[!0-9a-fA-F]*) die "private key from $_src contains non-hex characters" ;;
+    esac
+
+    SUPPLIED_KEY="$_k"
+    ok "private key loaded from $_src (128 hex chars)"
+}
+
 # ---------------------------------------------------------------- rollback ---
 
 rollback() {
@@ -356,9 +412,14 @@ stage_preflight() {
         warn "only ${_free}KB free on the overlay — package installation may fail"
     fi
 
+    load_supplied_key
+
     # detect an existing deployment
     EXISTING_KEY="$(uci -q get "network.$IFACE.private_key" 2>/dev/null || true)"
-    if [ -n "$EXISTING_KEY" ]; then
+    if [ -n "$SUPPLIED_KEY" ]; then
+        ok "a private key was supplied — the restored identity WILL BE USED"
+        info "    (this router takes the node address that key belongs to)"
+    elif [ -n "$EXISTING_KEY" ]; then
         ok "existing Yggdrasil interface '$IFACE' found — its private key WILL BE PRESERVED"
         info "    (node address and routed /64 stay the same)"
     else
@@ -480,6 +541,16 @@ stage_yggdrasil() {
     CHANGED_NETWORK=1
 
     _priv="$EXISTING_KEY"
+    if [ -n "$SUPPLIED_KEY" ]; then
+        if [ -n "$EXISTING_KEY" ] && [ "$EXISTING_KEY" != "$SUPPLIED_KEY" ]; then
+            warn "this router already has a different Yggdrasil identity"
+            warn "applying the supplied key CHANGES its node address and routed /64"
+            confirm "  replace the existing identity?" \
+                || die "aborted — omit --private-key-file to keep the existing key, or pass -y"
+        fi
+        _priv="$SUPPLIED_KEY"
+        ok "using the supplied private key"
+    fi
     if [ -z "$_priv" ]; then
         if [ "$DRY_RUN" -eq 1 ]; then
             info "would generate a new key pair via: yggdrasil -genconf -json"
@@ -826,9 +897,9 @@ dns_record() {
 }
 
 stage_dns() {
-    [ "$DO_DNS" -eq 1 ] || { info "skipping optional DNS module (enable with --dns)"; return 0; }
+    [ "$DO_DNS" -eq 1 ] || { info "skipping DNS module (--no-dns)"; return 0; }
     FAILED_STAGE='DNS over Yggdrasil'
-    step "Stage 6 — DNS over Yggdrasil (optional)"
+    step "Stage 6 — DNS over Yggdrasil"
 
     uci -q get 'dhcp.@dnsmasq[0]' >/dev/null 2>&1 \
         || die "no dnsmasq section in /etc/config/dhcp"
