@@ -14,7 +14,7 @@
 
 set -u
 
-VERSION='1.1.0'
+VERSION='1.1.1'
 SELF="${0##*/}"
 
 # ---------------------------------------------------------------- defaults ---
@@ -1085,18 +1085,22 @@ stage_verify() {
     fi
 
     if [ "$RC_OK" -ne 0 ]; then
-        printf '\n' >&2
-        err "deployment finished but some invariants FAILED (see above)"
+        printf '\n%s%s%s\n' "$C_ERR" "$RULE" "$C_RST" >&2
+        printf '%s%s FAILED — some invariants did not hold%s\n' \
+            "$C_ERR" "$C_BLD" "$C_RST" >&2
+        printf '%s%s%s\n\n' "$C_ERR" "$RULE" "$C_RST" >&2
+        err "review the [FAIL] lines above before relying on this router"
         err "configuration backup is at ${BACKUP_DIR:-<none>}"
         return 0
     fi
 
-    printf '\n%s%s\n' "$C_HDR" "$RULE" >&2
-    printf ' Yggdrasil is up on this router\n' >&2
-    printf '%s%s\n\n' "$RULE" "$C_RST" >&2
+    printf '\n%s%s%s\n' "$C_OK" "$RULE" "$C_RST" >&2
+    printf '%s%s SUCCESS — Yggdrasil is up and this router is reachable%s\n' \
+        "$C_OK" "$C_BLD" "$C_RST" >&2
+    printf '%s%s%s\n\n' "$C_OK" "$RULE" "$C_RST" >&2
 
     printf '  Router Yggdrasil address\n' >&2
-    printf '      %s%s%s\n\n' "$C_BLD" "$NODE_ADDR" "$C_RST" >&2
+    printf '      %s%s%s%s\n\n' "$C_OK" "$C_BLD" "$NODE_ADDR" "$C_RST" >&2
 
     printf '  Routed prefix advertised to the LAN\n' >&2
     printf '      %s\n\n' "$YGG_PREFIX" >&2
@@ -1123,16 +1127,17 @@ stage_verify() {
         printf '\n  Private DNS namespace\n' >&2
         printf '      %s%s.%s%s -> %s\n' \
             "$C_BLD" "$DNS_ROUTER" "$DNS_DOMAIN" "$C_RST" "$NODE_ADDR" >&2
-        printf '\n  A trusted client reaches those names by pointing its resolver\n' >&2
-        printf '  for %s at %s -- suffix routing, not a\n' "$DNS_DOMAIN" "$NODE_ADDR" >&2
-        printf '  second entry in resolv.conf, which is failover instead.\n' >&2
-        printf '  client/linux/yggdrasil-split-dns in this repository does that\n' >&2
-        printf '  for systemd-resolved. Then: %shttp://%s.%s/%s\n' \
+        printf '\n  A trusted client reaches those names by pointing its\n' >&2
+        printf '  resolver for %s at the address above. That is suffix\n' "$DNS_DOMAIN" >&2
+        printf '  routing, not a second entry in resolv.conf: resolver order\n' >&2
+        printf '  is failover, which is not the same thing.\n' >&2
+        printf '  client/linux/yggdrasil-split-dns does it for systemd-resolved.\n' >&2
+        printf '  Then: %shttp://%s.%s/%s\n' \
             "$C_BLD" "$DNS_ROUTER" "$DNS_DOMAIN" "$C_RST" >&2
     fi
 
     printf '\n  Configuration backup: %s\n' "${BACKUP_DIR:-none}" >&2
-    printf '%s%s%s\n' "$C_HDR" "$RULE" "$C_RST" >&2
+    printf '%s%s%s\n' "$C_OK" "$RULE" "$C_RST" >&2
 }
 
 # ------------------------------------------------------------------- main ---
