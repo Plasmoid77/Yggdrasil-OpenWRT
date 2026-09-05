@@ -15,10 +15,21 @@ This archive is the complete handoff package for the current OpenWrt + Yggdrasil
 - `LICENSE` — GPL-3.0-or-later license text.
 - `checksums.sha256` — SHA-256 for all files in this directory tree except the checksum file itself.
 
+## Automated deployment
+
+- `deploy/deploy-openwrt-yggdrasil.sh` — reproduces the whole design on a live
+  OpenWrt router from a peer list: packages, the Yggdrasil interface and keys,
+  the routed `/64` on LAN, SLAAC-only RA, the `ygg` firewall zone with an
+  explicit trusted `/128` allow-list, and the LuCI status module. POSIX `sh`,
+  runs under BusyBox ash on the router. Idempotent, backs up
+  `network`/`dhcp`/`firewall` before touching them and restores them on any
+  failure, preserves an existing private key, and supports `--dry-run`.
+
 ## Ready-to-install package
 
-- `packages/yggdrasil-status-v5.tar.gz` — current installable v5 LuCI status module.
-- `packages/yggdrasil-status-v5.tar.gz.sha256` — current package checksum.
+- `packages/yggdrasil-status-v5.1.tar.gz` — current installable status module.
+- `packages/yggdrasil-status-v5.1.tar.gz.sha256` — current package checksum.
+- `packages/yggdrasil-status-v5.tar.gz` and `.sha256` — previous v5 release.
 - `packages/yggdrasil-status-v4.tar.gz` and `.sha256` — previous v4 release.
 
 ## Linux client split DNS reference
@@ -30,6 +41,7 @@ This archive is the complete handoff package for the current OpenWrt + Yggdrasil
 
 ## Unpacked source
 
+- `deploy/deploy-openwrt-yggdrasil.sh`
 - `source/yggdrasil-status-v5/install.sh`
 - `source/yggdrasil-status-v5/README.md`
 - `source/yggdrasil-status-v5/root/usr/libexec/rpcd/luci.yggdrasil-status`
@@ -42,6 +54,14 @@ The unpacked source is byte-for-byte equivalent to the contents of the ready-to-
 ## Current implementation identity
 
 Status package:
+
+```text
+yggdrasil-status-v5.1.tar.gz
+SHA-256: 49dd2e2c57027b000ce62fa710d48abeb17cbe1ee532dfa0d504d4f2f0041e0a
+```
+
+v5.1 is v5 plus the prefix-class fix in `find_lan_ygg_prefix` (see CHANGELOG).
+The frozen v5 archive is retained for provenance:
 
 ```text
 yggdrasil-status-v5.tar.gz

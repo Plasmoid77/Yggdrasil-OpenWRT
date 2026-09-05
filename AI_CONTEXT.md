@@ -18,7 +18,7 @@ Current state at handoff:
 - the optional LuCI `Status -> Yggdrasil` module has evolved to **v5**;
 - v5 was installed on the real router and its stable-first client inventory was verified against the live NDP table;
 - v4 adds safe `Pin / Unpin` persistence management directly from the status page;
-- the deployed v4 maintenance revision serializes DHCP mutations with `flock`, selects the Ygg prefix through netifd `class=ygg`, and avoids redundant probes for recently `REACHABLE` neighbors;
+- the deployed v4 maintenance revision serializes DHCP mutations with `flock`, selects the Ygg prefix through the netifd prefix class, and avoids redundant probes for recently `REACHABLE` neighbors;
 - v5 prevents historical privacy IID accumulation from flooding the dashboard: canonical metadata wins, otherwise an observed modified EUI-64 wins, while privacy-only clients retain multiple observed addresses;
 - the DNS layer is optional and is not required for routing, SLAAC, firewalling, or the status page's dynamic discovery;
 - the tested router now restricts DNS-over-Ygg to the same trusted source `/128` addresses used for administration, and a Linux client was validated with route-only `~home.arpa` split DNS;
@@ -126,7 +126,7 @@ Wi-Fi SLAAC address    -> router's 3xx: routed /64 / LAN-client table
 ```
 
 The status backend filters LAN addresses to the router's delegated
-`class=ygg` prefix, so it does not confuse a full node's native address with an
+delegated prefix, so it does not confuse a full node's native address with an
 RA/SLAAC address. Such clients may enable IPv6 forwarding and therefore appear
 with the NDP `router` flag; inventory identity remains the MAC address.
 
@@ -145,7 +145,7 @@ Final model:
 
 ```text
 network.lan.ip6assign = 64
-network.lan.ip6class  = ygg
+network.lan.ip6class  = ygg0    # = the Yggdrasil interface name
 
 dhcp.lan.dhcpv6      = disabled
 dhcp.lan.ra           = server
@@ -168,9 +168,16 @@ The chosen profile removes OpenWrt's automatically generated `fdxx:` ULA prefix 
 
 Link-local `fe80::/64` remains normal and required.
 
-### 4.4 `ip6class='ygg'` matters
+### 4.4 `ip6class` matters
 
-LAN should consume the Yggdrasil prefix class, not indiscriminately advertise every IPv6 prefix source.
+LAN should consume the Yggdrasil prefix class, not indiscriminately advertise
+every IPv6 prefix source.
+
+The class is not a free-form label: netifd names a delegated prefix after the
+interface that provided it, so it equals the Yggdrasil UCI section name —
+`ygg0` for the interface documented here, `ygg` in the original deployment.
+`ip6class` on the Yggdrasil interface does not override it. A mismatch is
+silent: the LAN simply never selects the routed prefix.
 
 ### 4.5 Ygg firewall is deny-by-default
 
@@ -982,11 +989,13 @@ Do not “fix” this by permanently storing every observed privacy address.
 ### 14.3 Multiple LAN prefixes
 
 The backend resolves the logical netifd interface whose protocol is
-`yggdrasil`, then selects its delegated prefix with `class=ygg`. It therefore
-does not depend on the Ygg prefix being the first global `/64` on `br-lan`.
+`yggdrasil`, then selects its delegated prefix by the class netifd derived from
+that interface's own name, falling back to its first published prefix. It
+therefore does not depend on the Ygg prefix being the first global `/64` on
+`br-lan`, and does not depend on the interface being called `ygg`.
 
-Multiple Yggdrasil interfaces or multiple `class=ygg` prefixes would still
-require an explicit interface-selection policy.
+Multiple Yggdrasil interfaces or multiple delegated prefixes on one interface
+would still require an explicit interface-selection policy.
 
 ### 14.4 One logical LAN inventory
 

@@ -56,8 +56,14 @@ config interface 'lan'
     option proto 'static'
     list ipaddr '<LAN_IPV4/CIDR>'
     option ip6assign '64'
-    list ip6class 'ygg'
+    list ip6class 'ygg0'
 ```
+
+`ip6class` must name the class netifd publishes for the delegated prefix, and
+that class is the name of the Yggdrasil interface section (`ygg0` here). An
+earlier revision of this project named that section `ygg`, hence the older
+`ip6class 'ygg'`. Setting `ip6class` on the Yggdrasil interface itself does not
+change the published class.
 
 This profile removes the extra generated ULA:
 

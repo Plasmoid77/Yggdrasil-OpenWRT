@@ -16,12 +16,14 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: Check shell syntax
         run: |
+          bash -n deploy/deploy-openwrt-yggdrasil.sh
           bash -n source/yggdrasil-status-v5/install.sh
           bash -n source/yggdrasil-status-v5/root/usr/libexec/rpcd/luci.yggdrasil-status
           bash -n client/linux/yggdrasil-split-dns
       - name: Run ShellCheck
         run: |
           shellcheck -s sh \
+            deploy/deploy-openwrt-yggdrasil.sh \
             source/yggdrasil-status-v5/install.sh \
             source/yggdrasil-status-v5/root/usr/libexec/rpcd/luci.yggdrasil-status \
             client/linux/yggdrasil-split-dns

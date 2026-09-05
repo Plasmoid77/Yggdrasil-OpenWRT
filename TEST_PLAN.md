@@ -440,4 +440,6 @@ If any of those change, this is no longer a status-only release and requires a s
 
 Also test a LAN bridge containing another global `/64`. Runtime IPv6
 enrichment must continue selecting the prefix delegated by the netifd
-Yggdrasil interface with `class=ygg`.
+Yggdrasil interface, whatever class netifd derived from that interface's name.
+Cover an interface NOT named `ygg` (for example `ygg0`): a backend that
+hardcodes `class="ygg"` silently reports no client IPv6 addresses at all.
