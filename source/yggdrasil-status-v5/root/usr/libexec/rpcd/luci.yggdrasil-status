@@ -330,9 +330,21 @@ find_lan_ygg_prefix() {
 
 	[ -n "$YGG_NET" ] || return 0
 
+	# netifd labels a delegated prefix with the name of the interface that
+	# provided it, so the class is whatever the Yggdrasil section is called:
+	# 'ygg' for the original deployment, 'ygg0' for the documented name today.
+	# Match the class of the interface already identified as the Yggdrasil one,
+	# then fall back to its first published prefix, which is correct for any
+	# naming. This still never picks an arbitrary global /64 off br-lan.
 	flyp_addr="$(
 		ubus call "network.interface.${YGG_NET}" status 2>/dev/null |
-			jsonfilter -e '@["ipv6-prefix"][@.class="ygg"].address' 2>/dev/null |
+			jsonfilter -e "@[\"ipv6-prefix\"][@.class=\"${YGG_NET}\"].address" 2>/dev/null |
+			head -n 1
+	)"
+
+	[ -n "$flyp_addr" ] || flyp_addr="$(
+		ubus call "network.interface.${YGG_NET}" status 2>/dev/null |
+			jsonfilter -e '@["ipv6-prefix"][*].address' 2>/dev/null |
 			head -n 1
 	)"
 

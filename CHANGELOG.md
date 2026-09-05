@@ -1,5 +1,42 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## v5.1 — prefix class no longer assumed, plus an automated deployment
+
+Validated on a Cudy WBR3000UAX v1 running OpenWrt 25.12.5 (mediatek/filogic,
+`apk`), with the Yggdrasil interface named `ygg0`.
+
+### Fixed: the routed prefix was never found unless the interface was named `ygg`
+
+`find_lan_ygg_prefix` selected the delegated prefix with a hardcoded
+`@.class="ygg"`. netifd does not take that class from the configuration: it
+names a delegated prefix after the interface that provided it. The original
+deployment's interface was called `ygg`, so the literal happened to match. With
+the documented name `ygg0` the class is `ygg0`, the lookup returned nothing, and
+every LAN client reported an empty `ipv6` / `ipv6_addresses` with no error
+anywhere. The backend now matches the class of the interface it already
+identified as the Yggdrasil one, and falls back to that interface's first
+published prefix, so any interface name works.
+
+The same stale value was in the documented LAN configuration: `ip6class 'ygg'`
+against a `ygg0` interface silently selects no prefix. Corrected throughout, with
+the rule stated rather than the value alone. Setting `ip6class` on the Yggdrasil
+interface does not override the published class — verified, not assumed.
+
+### Added: `deploy/deploy-openwrt-yggdrasil.sh`
+
+One POSIX `sh` script that applies the whole design from a peer list and an
+optional trusted `/128` list, then prints the router's Yggdrasil address and the
+command to reach it. Backs up `network`/`dhcp`/`firewall` and restores them on
+any failure, preserves an existing private key, never prints one, and is
+idempotent. `--dry-run` previews every change.
+
+It also handles something the manual instructions did not: netifd reads
+`/lib/netifd/proto/*.sh` only at startup, so a Yggdrasil proto handler installed
+during the same run is invisible to the running netifd and the interface comes
+up as `proto 'none'` with `NO_DEVICE`. A reload does not fix it; the script
+detects the condition and restarts netifd once.
+
+
 This changelog summarizes architectural evolution, not every experimental command from development chats.
 
 ## 2026-08 — Core routed-LAN design
@@ -9,7 +46,7 @@ Established the base architecture:
 - native Yggdrasil on OpenWrt;
 - Yggdrasil routed `/64` advertised to `br-lan`;
 - `network.lan.ip6assign='64'`;
-- `network.lan.ip6class='ygg'`;
+- `network.lan.ip6class='ygg0'` (the Yggdrasil interface name);
 - odhcpd RA/SLAAC;
 - DHCPv6 disabled;
 - extra OpenWrt ULA removed for this profile;

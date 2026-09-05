@@ -16,6 +16,27 @@ and NAT66 are not used. Remote access is limited to trusted Ygg `/128`s.
 Optional modules provide a LuCI inventory, `home.arpa` names, and route-only
 Linux split DNS.
 
+## Automated path
+
+`deploy/deploy-openwrt-yggdrasil.sh` performs every step below on a live router.
+Copy it there and run it with the peers you want:
+
+```sh
+./deploy-openwrt-yggdrasil.sh \
+  --peer tls://<host>:<port> \
+  --peer wss://<host>:<port> \
+  --trusted <TRUSTED_YGG_IPV6>
+```
+
+Without `--trusted` it asks for the allowed Yggdrasil addresses interactively;
+with `-y` it runs unattended. `--dry-run` prints every change and applies none.
+It preserves an existing private key, backs up `network`, `dhcp` and `firewall`
+before touching them, restores them if any stage fails, and finishes by printing
+the router's Yggdrasil address and the command to reach it.
+
+The rest of this document is the manual equivalent, and remains the reference for
+what the script does and why.
+
 ## Requirements
 
 - OpenWrt 25.12+ with `apk`, firewall4, odhcpd, dnsmasq, rpcd and LuCI;
@@ -63,8 +84,14 @@ ifstatus ygg0
 ubus call network.interface.ygg0 status
 ```
 
-The result must include a node address from `200::/7` and a delegated
-`class=ygg` `/64`.
+The result must include a node address from `200::/7` and a delegated `/64`.
+netifd labels that prefix with the name of the interface that provided it, so
+with the interface named `ygg0` the prefix class is `ygg0`. Confirm it before
+the next step, because the LAN has to ask for that exact class:
+
+```sh
+ifstatus ygg0 | jsonfilter -e '@["ipv6-prefix"][*].class'
+```
 
 ## 2. Advertise the routed `/64` on LAN
 
@@ -73,7 +100,7 @@ This intentionally removes the extra OpenWrt ULA and enables SLAAC-only RA:
 ```sh
 uci set network.lan.ip6assign='64'
 uci -q delete network.lan.ip6class
-uci add_list network.lan.ip6class='ygg'
+uci add_list network.lan.ip6class='ygg0'   # = the Yggdrasil interface name
 uci -q delete network.globals.ula_prefix
 
 uci set dhcp.lan.dhcpv6='disabled'
@@ -265,7 +292,7 @@ ubus call luci.yggdrasil-status clients
 Expected invariants:
 
 ```text
-LAN ip6class = ygg
+LAN ip6class = ygg0
 DHCPv6       = disabled
 RA           = server
 RA SLAAC     = 1

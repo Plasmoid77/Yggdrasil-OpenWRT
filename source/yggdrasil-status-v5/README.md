@@ -51,7 +51,7 @@ Safety behavior:
 - `/etc/config/dhcp` is backed up before every mutation and restored if the UCI commit or `dnsmasq reload` fails.
 - Pin validates MAC and hostname server-side. A requested IPv4 reservation is taken only from a currently active lease and is validated server-side.
 - Pin/Unpin mutations are serialized with `flock`; a concurrent mutation returns `busy` without touching UCI.
-- Ygg prefix discovery follows netifd `proto=yggdrasil` and `class=ygg`, so another global LAN `/64` is not mistaken for the routed Ygg prefix.
+- Ygg prefix discovery follows netifd `proto=yggdrasil` and the prefix class netifd derived from that interface's name, so another global LAN `/64` is not mistaken for the routed Ygg prefix and any interface name works.
 - Canonical and observed modified EUI-64 addresses take precedence over rotating privacy IIDs. Privacy-only clients still retain multiple observed addresses.
 - A recent kernel NUD `REACHABLE` result avoids a redundant active probe; all other neighbor states still fall through to ARP/IPv6 probing.
 

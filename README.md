@@ -885,13 +885,13 @@ This is the core Auto-IP step.
 ```sh
 uci set network.lan.ip6assign='64'
 uci -q delete network.lan.ip6class
-uci add_list network.lan.ip6class='ygg'
+uci add_list network.lan.ip6class='ygg0'   # = the Yggdrasil interface name
 ```
 
 The key setting is:
 
 ```text
-list ip6class 'ygg'
+list ip6class 'ygg0'
 ```
 
 It ensures that LAN receives the Yggdrasil prefix class instead of indiscriminately consuming every available IPv6 prefix source.
@@ -1228,7 +1228,7 @@ When only the lease exists, the DHCP hostname and IPv4 are used. A hostname of `
 
 ### 13.3 Runtime Yggdrasil IPv6 discovery
 
-The routed Ygg `/64` is discovered from the global `/64` currently assigned to the LAN bridge. In the profile used by this guide, `ip6class 'ygg'` means that this global LAN `/64` is the Yggdrasil routed prefix.
+The routed Ygg `/64` is discovered from the global `/64` currently assigned to the LAN bridge. In the profile used by this guide, `ip6class 'ygg0'` means that this global LAN `/64` is the Yggdrasil routed prefix. The class is not a free-form label: netifd names a delegated prefix after the interface that provided it, so it equals the Yggdrasil UCI section name.
 
 The backend then reads:
 
@@ -1751,9 +1751,21 @@ find_lan_ygg_prefix() {
 
 	[ -n "$YGG_NET" ] || return 0
 
+	# netifd labels a delegated prefix with the name of the interface that
+	# provided it, so the class is whatever the Yggdrasil section is called:
+	# 'ygg' for the original deployment, 'ygg0' for the documented name today.
+	# Match the class of the interface already identified as the Yggdrasil one,
+	# then fall back to its first published prefix, which is correct for any
+	# naming. This still never picks an arbitrary global /64 off br-lan.
 	flyp_addr="$(
 		ubus call "network.interface.${YGG_NET}" status 2>/dev/null |
-			jsonfilter -e '@["ipv6-prefix"][@.class="ygg"].address' 2>/dev/null |
+			jsonfilter -e "@[\"ipv6-prefix\"][@.class=\"${YGG_NET}\"].address" 2>/dev/null |
+			head -n 1
+	)"
+
+	[ -n "$flyp_addr" ] || flyp_addr="$(
+		ubus call "network.interface.${YGG_NET}" status 2>/dev/null |
+			jsonfilter -e '@["ipv6-prefix"][*].address' 2>/dev/null |
 			head -n 1
 	)"
 
@@ -3329,7 +3341,7 @@ Therefore preserving the private key is critical if you want the same routed `/6
 
 ```text
 network.lan.ip6assign = 64
-network.lan.ip6class  = ygg
+network.lan.ip6class  = ygg0
 ```
 
 This tells netifd which prefix source should feed LAN.
@@ -3900,7 +3912,7 @@ The exact combination in this README is not copied verbatim from any single sour
 The final synthesis includes:
 
 - standardized logical interface `ygg0` for clean installations;
-- Yggdrasil routed `/64` selected with `ip6class 'ygg'`;
+- Yggdrasil routed `/64` selected with `ip6class 'ygg0'` (the Yggdrasil interface name);
 - SLAAC-only LAN profile with DHCPv6 disabled;
 - OpenWrt-generated ULA removed for this profile;
 - dedicated `ygg` firewall zone;
@@ -4161,7 +4173,7 @@ For the exact request/response schema, failure codes, rollback behavior, known l
 - dynamic inventory is deliberately based on **active DHCPv4 leases**; an IPv6-only device with no DHCPv4 lease needs a new lifetime design if it must appear dynamically;
 - `ip -6 neigh` is runtime enrichment only, so an address may temporarily disappear from the UI if the router no longer knows its MAC mapping;
 - the current backend assumes one logical LAN (`network.lan`, normally `br-lan`);
-- Ygg-prefix detection follows the netifd `proto=yggdrasil` interface and delegated `class=ygg`; multiple Ygg interfaces would require an explicit selection policy;
+- Ygg-prefix detection follows the netifd `proto=yggdrasil` interface and the prefix class netifd derived from that interface's name, with a fallback to its first published prefix; multiple Ygg interfaces would require an explicit selection policy;
 - renaming a persistent host does not automatically rename its independent `config domain` record;
 - Unpin deliberately leaves `config domain` untouched;
 - a rotating private Wi-Fi MAC is a new identity; an old dynamic MAC disappears with its DHCP lease, while an old pinned MAC remains until manually changed.
