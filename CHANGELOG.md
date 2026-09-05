@@ -2,7 +2,7 @@
 
 ## v5.2 — the optional DNS module is deployable
 
-`deploy/deploy-openwrt-yggdrasil.sh` 1.1.0. The status package is unchanged at
+`deploy/deploy-openwrt-yggdrasil.sh` 1.1.1. The status package is unchanged at
 `yggdrasil-status-v5.1`; this release touches the deployment script only.
 
 ### Added: `--dns` deploys Part III
@@ -18,6 +18,15 @@ forwarding it upstream. `--dns-host NAME=ADDR` adds records and may repeat a
 name, so a host with two addresses on the routed `/64` gets both; the UCI
 section id is derived from name *and* address, and existing records for a name
 are dropped before rewriting, so a changed address leaves no stale answer.
+
+### Changed: the run ends with a colour-coded verdict
+
+The final summary was framed in the same cyan as every stage header, so a run
+that finished with failed invariants looked like a run that succeeded once the
+`[FAIL]` lines had scrolled away. Success is now a green frame carrying the
+router's Yggdrasil address, failure a red one; the address itself is green and
+bold. Colour is still emitted only on a real terminal and suppressed by
+`NO_COLOR`, so redirected logs stay plain text.
 
 ### Note: `local` as a UCI list breaks dnsmasq
 
