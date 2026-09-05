@@ -28,10 +28,28 @@ Copy it there and run it with the peers you want:
   --trusted <TRUSTED_YGG_IPV6>
 ```
 
-`--dns` additionally deploys the optional DNS module of section 5: it writes
+One run covers all three parts, section 5 included: it writes
 `router.home.arpa` for the router, `--dns-host NAME=ADDR` for anything else, and
-opens port 53 to the trusted addresses only. Without it nothing DNS-related is
-touched.
+opens port 53 to the trusted addresses only. `--no-dns` skips that part, the way
+`--no-lan`, `--no-firewall` and `--no-status` skip theirs. Only the client side
+of section 6 stays manual — the script runs on the router and cannot reach the
+client.
+
+To keep an existing Yggdrasil address on a redeployment or on new hardware, hand
+the old private key over in a file rather than on the command line, which is
+world readable through `/proc/<pid>/cmdline`:
+
+```sh
+ssh root@<router> 'cat > /tmp/ygg.key && chmod 600 /tmp/ygg.key' < old-private.key
+ssh root@<router> sh -s -- --peer ... --private-key-file /tmp/ygg.key \
+    < deploy/deploy-openwrt-yggdrasil.sh
+ssh root@<router> 'rm -f /tmp/ygg.key'
+```
+
+The key is the 128 hex characters of `option private_key` from the old router's
+`/etc/config/network`. `YGG_PRIVATE_KEY` in the environment works too. Without
+either, an existing key in the configuration is preserved and a missing one is
+generated.
 
 Without `--trusted` it asks for the allowed Yggdrasil addresses interactively;
 with `-y` it runs unattended. `--dry-run` prints every change and applies none.

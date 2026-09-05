@@ -1,5 +1,34 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## v5.3 — identity restore, and one run deploys the whole design
+
+`deploy/deploy-openwrt-yggdrasil.sh` 1.2.0. The status package is unchanged at
+`yggdrasil-status-v5.1`.
+
+### Added: restore an existing node identity
+
+The Yggdrasil private key is the node identity, so redeploying or moving to new
+hardware without it means a new address and a new routed `/64`. The script now
+takes the old key from `--private-key-file PATH` or from `YGG_PRIVATE_KEY` in
+the environment, validates it as 128 hex characters, and refuses anything else.
+
+It is deliberately **not** accepted as a command-line value. `/proc/<pid>/cmdline`
+is world readable, so an argument would expose the key to every process on the
+router for the length of the run, and leave it in the shell history of whoever
+typed it and in the ssh command line when the script is piped in. The key is
+never echoed — not in a log line, not in an error, and `--dry-run` prints
+`<REDACTED 128 hex chars>`. Replacing an identity that already differs asks for
+confirmation first, because it changes the router's address and its routed `/64`.
+
+### Changed: the DNS module runs by default
+
+`--dns` made Part III the one optional stage that was off by default, while
+`--no-lan`, `--no-firewall` and `--no-status` all describe stages that run unless
+told otherwise. It now follows the same convention: the stage runs, `--no-dns`
+skips it. `--dns` is still accepted. A deployment that stops before DNS is not
+finished, and the module boundary the design describes is about architecture,
+not about what a default deployment should leave undone.
+
 ## v5.2 — the optional DNS module is deployable
 
 `deploy/deploy-openwrt-yggdrasil.sh` 1.1.1. The status package is unchanged at
