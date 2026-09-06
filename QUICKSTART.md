@@ -50,6 +50,52 @@ wget -qO- https://raw.githubusercontent.com/Plasmoid77/Yggdrasil-OpenWRT/main/de
 `-q` silences the progress output that would otherwise be mixed into the script,
 and `-O -` writes the download to standard output instead of a file.
 
+### Deploy other proto handlers first
+
+If the router still needs a package that ships its own netifd protocol handler —
+an LTE modem (`luci-proto-xmm`, `luci-proto-qmi`, `luci-proto-mbim`), a tunnel
+protocol, anything under `/lib/netifd/proto/` — **install that first, let it
+finish its own reboot, and confirm it comes back on its own. Deploy Yggdrasil
+after that.**
+
+The reason is the netifd restart described below. Installing a protocol handler
+requires one, and doing it while Yggdrasil is already running means restarting
+netifd underneath a live Yggdrasil interface. Once, on the tested router, that
+sequence left `ygg0` at `up:false pending:true` after the following reboot: the
+daemon had its peers, but netifd never completed the protocol setup, so no
+prefix was published, the LAN kept no routed address, and the firewall zone had
+no device — the router looked healthy while the whole design was unreachable
+from outside. `ifup ygg0` cleared it in one shot.
+
+It happened once and did not reproduce in fourteen further attempts (reboots
+with and without an uplink, and repeated `/etc/init.d/network restart`), so it
+is a rare race rather than a defect with a known trigger. Deploying the other
+handlers first avoids the situation entirely, at no cost.
+
+Validated end to end on a factory-reset router: uplink, then the modem
+installer and its reboot, then a control reboot to prove the modem alone is
+stable, then Yggdrasil, then a final reboot — `ygg0` came up `up:true
+pending:false` with its prefix on five consecutive samples.
+
+If the router has no uplink at all after a reset, the modem installer cannot
+run either. Join a Wi-Fi network as a station to bootstrap it — `wpad` is in the
+base image, so this needs no packages:
+
+```sh
+uci set network.wwan=interface
+uci set network.wwan.proto='dhcp'
+uci set wireless.radio0.disabled='0'
+uci set wireless.sta=wifi-iface
+uci set wireless.sta.device='radio0'
+uci set wireless.sta.network='wwan'
+uci set wireless.sta.mode='sta'
+uci set wireless.sta.ssid='<SSID>'
+uci set wireless.sta.encryption='psk2'
+uci set wireless.sta.key='<PASSPHRASE>'
+uci add_list firewall.@zone[1].network='wwan'   # the 'wan' zone
+uci commit; /etc/init.d/network reload; wifi reload
+```
+
 ### About the netifd restart
 
 netifd reads `/lib/netifd/proto/*.sh` only at startup, so a Yggdrasil protocol
