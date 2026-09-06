@@ -1,5 +1,33 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## v5.8 — a smaller flag surface
+
+`deploy/deploy-openwrt-yggdrasil.sh` 1.5.0.
+
+### Removed: `--add-peers` and `--status-url`
+
+`--add-peers` appended to the configured peers instead of replacing them. It
+made the resulting peer set depend on what was already there, which is the one
+property an idempotent deployment script should not have. The peer list on the
+command line is now simply the peer list: existing sections are removed first,
+every time.
+
+`--status-url` pointed the status-module download at another host. `--status-pkg`
+already covers the case it was meant for — an isolated router, a fork, a local
+build — by taking the tarball directly, and it verifies a `.sha256` sitting next
+to it. One way in is enough.
+
+### Verified on hardware: the remaining switches
+
+`--no-lan`, `--no-firewall` and `--no-status` were tested by perturbation rather
+than by trusting their "skipping" line. `network.lan.ip6assign` was set to `60`,
+`firewall.ygg_dns.dest_port` to `5353`, and the installed status module's
+checksum and mtime recorded. After a full run with all three switches every one
+of them was untouched; a plain run afterwards restored `64` and `53`.
+
+`--status-pkg` installed the module from a local tarball, verified it against the
+`.sha256` beside it, and never touched the network.
+
 ## v5.7 — apk only
 
 `deploy/deploy-openwrt-yggdrasil.sh` 1.4.0.
