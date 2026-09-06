@@ -96,6 +96,13 @@ uci add_list firewall.@zone[1].network='wwan'   # the 'wan' zone
 uci commit; /etc/init.d/network reload; wifi reload
 ```
 
+For the Fibocom L860-GL used in the factory-reset validation, the modem must be
+installed while that temporary uplink is active. Follow
+[`openwrt-fibocom-l860gl`](https://github.com/Plasmoid77/openwrt-fibocom-l860gl),
+let its installer reboot the router, and require `l860-healthcheck` to pass
+before deploying Yggdrasil. The temporary Wi-Fi station can then be removed;
+the remaining default route should use `wwan0`.
+
 ### About the netifd restart
 
 netifd reads `/lib/netifd/proto/*.sh` only at startup, so a Yggdrasil protocol
@@ -135,8 +142,9 @@ the old private key over in a file rather than on the command line, which is
 world readable through `/proc/<pid>/cmdline`:
 
 ```sh
-ssh root@<router> 'cat > /tmp/ygg.key && chmod 600 /tmp/ygg.key' < old-private.key
-ssh root@<router> sh -s -- --peer ... --private-key-file /tmp/ygg.key \
+ssh root@<router> 'umask 077; cat > /tmp/ygg.key' < old-private.key
+ssh root@<router> sh -s -- --peer ... --trusted ... -y \
+    --private-key-file /tmp/ygg.key \
     < deploy/deploy-openwrt-yggdrasil.sh
 ssh root@<router> 'rm -f /tmp/ygg.key'
 ```
@@ -158,6 +166,7 @@ what the script does and why.
 ## Requirements
 
 - OpenWrt 25.12+ with `apk`, firewall4, odhcpd, dnsmasq, rpcd and LuCI;
+- working Internet access and a correct system clock for HTTPS package downloads;
 - root shell access and backups of network, DHCP and firewall configuration;
 - current Yggdrasil peers;
 - a remote Ygg client with a stable node address.
@@ -287,15 +296,15 @@ trusted Ygg client to the router node address.
 ## 4. Install the optional LuCI status module
 
 ```sh
-wget -O /tmp/yggdrasil-status-v5.tar.gz \
-  https://raw.githubusercontent.com/Plasmoid77/Yggdrasil-OpenWRT/main/packages/yggdrasil-status-v5.tar.gz
-wget -O /tmp/yggdrasil-status-v5.tar.gz.sha256 \
-  https://raw.githubusercontent.com/Plasmoid77/Yggdrasil-OpenWRT/main/packages/yggdrasil-status-v5.tar.gz.sha256
+wget -O /tmp/yggdrasil-status-v5.1.tar.gz \
+  https://raw.githubusercontent.com/Plasmoid77/Yggdrasil-OpenWRT/main/packages/yggdrasil-status-v5.1.tar.gz
+wget -O /tmp/yggdrasil-status-v5.1.tar.gz.sha256 \
+  https://raw.githubusercontent.com/Plasmoid77/Yggdrasil-OpenWRT/main/packages/yggdrasil-status-v5.1.tar.gz.sha256
 
 cd /tmp
-sha256sum -c yggdrasil-status-v5.tar.gz.sha256
-tar -xzf yggdrasil-status-v5.tar.gz
-/tmp/yggdrasil-status-v5/install.sh
+sha256sum -c yggdrasil-status-v5.1.tar.gz.sha256
+tar -xzf yggdrasil-status-v5.1.tar.gz
+/tmp/yggdrasil-status-v5.1/install.sh
 ```
 
 Open **Status → Yggdrasil**. Active DHCPv4 clients should appear without

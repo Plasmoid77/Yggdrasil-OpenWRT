@@ -19,7 +19,7 @@ Part III DNS over Yggdrasil / friendly names
 
 > **Target platform:** OpenWrt 25.12+ with `apk`, `netifd`, `odhcpd`, `dnsmasq`, firewall4, rpcd and LuCI.
 >
-> **The final design was validated on a real OpenWrt 25.12.5 router.** The deployed router used a local logical interface name `ygg`; this guide deliberately standardizes new installations on `ygg0`.
+> **The final design was validated on a real OpenWrt 25.12.5 router.** An earlier configuration used the local logical interface name `ygg`; the current factory-reset validation and this guide use `ygg0`.
 >
 > **Guide by Plasmoid (Neuroslopped)**
 >
@@ -1124,7 +1124,7 @@ Expected properties:
 
 ```text
 64
-ygg
+ygg0
 ```
 
 ### 12.7 No generated ULA in this profile
@@ -3405,7 +3405,9 @@ The canonical record does not cause the address to exist on the client. It only 
 
 A deterministic logical name makes UCI sections, firewall references and documentation predictable.
 
-The real tested router pre-dated this standardization and used `ygg`. The guide uses `ygg0` for clean new installations rather than copying that local historical name.
+An earlier tested configuration pre-dated this standardization and used `ygg`.
+The current factory-reset validation and the guide use `ygg0` for clean new
+installations rather than copying that local historical name.
 
 ### 16.2 Why native OpenWrt integration
 
@@ -4138,7 +4140,7 @@ If another agent rewrites the implementation, it should treat the following as i
 - keep rollback around persistent DHCP mutations;
 - keep DNS optional and separate from the routed-LAN core;
 - keep the firewall deny-by-default and avoid blanket `ygg -> lan` forwarding;
-- when documenting the tested DNS module, distinguish the actually tested zone-wide port-53 rule from optional `/128` hardening;
+- when documenting the tested DNS module, preserve the trusted-source `/128` restriction on port 53;
 - use `ygg0` as the generalized documentation name, while accepting that an existing router may use a different logical interface name.
 
 ### 22.5 Code map

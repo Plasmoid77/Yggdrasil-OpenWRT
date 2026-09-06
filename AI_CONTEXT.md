@@ -37,7 +37,9 @@ rpcd
 LuCI
 ```
 
-The real tested router happened to use logical Yggdrasil interface name `ygg`. **Documentation standardizes new installations on `ygg0`**. This is a naming/generalization choice, not a different architecture.
+An earlier tested configuration used logical Yggdrasil interface name `ygg`.
+The current factory-reset validation and the documentation use `ygg0`. This is
+a naming choice, not a different architecture.
 
 ---
 
