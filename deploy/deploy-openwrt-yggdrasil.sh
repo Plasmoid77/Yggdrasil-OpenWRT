@@ -14,7 +14,7 @@
 
 set -u
 
-VERSION='1.4.0'
+VERSION='1.5.0'
 SELF="${0##*/}"
 # Piped straight from a URL — wget -qO- ... | sh -s -- ... — $0 is the shell, so
 # the banner and the usage text would announce themselves as "sh".
@@ -27,7 +27,6 @@ esac
 IFACE='ygg0'
 LAN='lan'
 PEERS=''
-PEERS_MODE='replace'          # replace | add
 TRUSTED=''
 DO_JUMPER=1
 DO_LAN=1
@@ -43,7 +42,6 @@ DNS_ROUTER='router'
 DNS_HOSTS=''
 STATUS_PKG=''
 STATUS_BASE='https://raw.githubusercontent.com/Plasmoid77/Yggdrasil-OpenWRT/main/packages'
-STATUS_URL=''
 # Newest first. v5.1 fixes the prefix-class lookup; v5 only resolves the routed
 # /64 when the Yggdrasil interface happens to be named 'ygg'.
 STATUS_VERSIONS='yggdrasil-status-v5.1 yggdrasil-status-v5'
@@ -100,9 +98,6 @@ Required:
                         Schemes: tls tcp quic ws wss socks sockstls
   --peers-file FILE     Read peers from FILE, one URI per line (# = comment).
 
-Peer handling:
-  --add-peers           Append to existing peers instead of replacing the set.
-
 Node identity:
   --private-key-file F  Restore an existing Yggdrasil identity from file F,
                         keeping its node address. F holds the 128 hex character
@@ -132,7 +127,6 @@ Scope:
   --no-status           Do not install the LuCI status module
   --no-dns              Do not serve <name>.$DNS_DOMAIN over Yggdrasil
   --status-pkg PATH     Install the status module from a local tarball
-  --status-url URL      Override the status module download URL
 
 Behaviour:
   -n, --dry-run         Print what would change; touch nothing
@@ -202,7 +196,6 @@ while [ $# -gt 0 ]; do
                            [ -n "$_line" ] && add_peer "$_line"
                        done < "$2"
                        shift 2 ;;
-        --add-peers)   PEERS_MODE='add';   shift ;;
         --trusted)     [ $# -ge 2 ] || die "--trusted needs a value";     add_trusted "$2"; shift 2 ;;
         --private-key-file)
                        [ $# -ge 2 ] || die "--private-key-file needs a value"
@@ -220,7 +213,6 @@ while [ $# -gt 0 ]; do
         --dns-router)  [ $# -ge 2 ] || die "--dns-router needs a value";  DNS_ROUTER="$2";  shift 2 ;;
         --dns-host)    [ $# -ge 2 ] || die "--dns-host needs a value";    add_dns_host "$2"; shift 2 ;;
         --status-pkg)  [ $# -ge 2 ] || die "--status-pkg needs a value";  STATUS_PKG="$2";  shift 2 ;;
-        --status-url)  [ $# -ge 2 ] || die "--status-url needs a value";  STATUS_URL="$2";  shift 2 ;;
         --wait)        [ $# -ge 2 ] || die "--wait needs a value";        WAIT_SECS="$2";   shift 2 ;;
         -n|--dry-run)  DRY_RUN=1;          shift ;;
         -y|--yes)      ASSUME_YES=1;       shift ;;
@@ -426,7 +418,7 @@ stage_preflight() {
         info "no existing '$IFACE' — a new key pair will be generated"
     fi
 
-    info "peers to configure ($PEERS_MODE):"
+    info 'peers to configure (the existing set is replaced):'
     printf '%s\n' "$PEERS" | while IFS= read -r _p; do [ -n "$_p" ] && info "    $_p"; done
     if [ -n "$TRUSTED" ]; then
         info "trusted Yggdrasil /128:"
@@ -604,27 +596,24 @@ stage_yggdrasil() {
     fi
 
     # --- peers ---------------------------------------------------------------
+    # The peer list given on the command line is the peer list: existing
+    # sections are removed first, so a re-run cannot accumulate duplicates and
+    # the configuration always matches what was asked for.
     _peer_type="yggdrasil_${IFACE}_peer"
-    if [ "$PEERS_MODE" = 'replace' ]; then
-        _n=0
-        if [ "$DRY_RUN" -eq 0 ]; then
-            # delete from the end so indices stay valid
-            _count="$(uci show network 2>/dev/null | grep -c "=$_peer_type\$" || true)"
-            [ -z "$_count" ] && _count=0
-            while [ "$_count" -gt 0 ]; do
-                _count=$((_count - 1))
-                uci -q delete "network.@${_peer_type}[${_count}]" 2>/dev/null || true
-                _n=$((_n + 1))
-            done
-        fi
-        [ "$_n" -gt 0 ] && info "removed $_n existing peer section(s)"
+    _n=0
+    if [ "$DRY_RUN" -eq 0 ]; then
+        # delete from the end so indices stay valid
+        _count="$(uci show network 2>/dev/null | grep -c "=$_peer_type\$" || true)"
+        [ -z "$_count" ] && _count=0
+        while [ "$_count" -gt 0 ]; do
+            _count=$((_count - 1))
+            uci -q delete "network.@${_peer_type}[${_count}]" 2>/dev/null || true
+            _n=$((_n + 1))
+        done
     fi
+    [ "$_n" -gt 0 ] && info "removed $_n existing peer section(s)"
 
     _existing_peers=''
-    if [ "$PEERS_MODE" = 'add' ] && [ "$DRY_RUN" -eq 0 ]; then
-        _existing_peers="$(uci show network 2>/dev/null \
-            | sed -n "s/^network\.@$_peer_type\[[0-9]*\]\.address='\(.*\)'\$/\1/p")"
-    fi
 
     _added=0
     printf '%s\n' "$PEERS" | while IFS= read -r _p; do
@@ -1003,7 +992,7 @@ stage_status() {
     step "Stage 7 — LuCI status module"
 
     if [ "$DRY_RUN" -eq 1 ]; then
-        info "would install the status module from ${STATUS_PKG:-${STATUS_URL:-$STATUS_BASE}}"
+        info "would install the status module from ${STATUS_PKG:-$STATUS_BASE}"
         return 0
     fi
 
@@ -1034,11 +1023,6 @@ stage_status() {
         info "using local package $STATUS_PKG"
         [ -r "$STATUS_PKG.sha256" ] \
             && { _verify "$_tgz" "$(awk '{print $1}' "$STATUS_PKG.sha256")" || return 0; }
-    elif [ -n "$STATUS_URL" ]; then
-        info "downloading $STATUS_URL"
-        _fetch "$STATUS_URL" "$_tgz" || { warn "download failed — skipping status module"; return 0; }
-        _fetch "$STATUS_URL.sha256" "$_tgz.sha256"
-        _verify "$_tgz" "$(awk '{print $1}' "$_tgz.sha256" 2>/dev/null)" || return 0
     else
         # A checkout of this repository ships the package next to the script;
         # prefer it, so a run from a checkout installs the version being tested.
