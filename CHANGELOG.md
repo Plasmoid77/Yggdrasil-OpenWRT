@@ -1,5 +1,31 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## v5.6 — deploy other proto handlers first
+
+Documentation only.
+
+### Documented: install protocol-handler packages before Yggdrasil
+
+Installing a package that ships a netifd protocol handler requires a netifd
+restart. Doing that while Yggdrasil is already running restarts netifd
+underneath a live Yggdrasil interface, and once on the tested router the reboot
+that followed left `ygg0` at `up:false pending:true`: the daemon had its peers,
+but netifd never completed the protocol setup, so no prefix was published, the
+LAN kept no routed address and the firewall zone had no device. The router
+looked healthy while the design was unreachable from outside; `ifup ygg0`
+cleared it.
+
+It did not reproduce in fourteen further attempts — reboots with and without an
+uplink, and repeated `/etc/init.d/network restart` — so it is a rare race rather
+than a defect with a known trigger, and no watchdog is shipped for it. Deploying
+the other handlers first avoids the situation at no cost, and that order is now
+validated end to end from a factory reset: uplink, modem installer and its
+reboot, a control reboot proving the modem alone is stable, Yggdrasil, then a
+final reboot that came up clean on five consecutive samples.
+
+`QUICKSTART.md` also gains the Wi-Fi station bootstrap, since a factory reset can
+leave a router with no uplink at all and no way to install one.
+
 ## v5.5 — restart netifd before anything is written
 
 `deploy/deploy-openwrt-yggdrasil.sh` 1.3.0.
