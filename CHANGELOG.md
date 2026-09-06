@@ -1,5 +1,33 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## v5.7 — apk only
+
+`deploy/deploy-openwrt-yggdrasil.sh` 1.4.0.
+
+### Removed: the opkg fallback
+
+The script accepted an `opkg` router with a warning. That was a courtesy that
+could not be honoured: on an opkg release the package names differ, the
+Yggdrasil netifd protocol handler is not the same, and nothing in this design
+has ever been validated there. A run would have failed later and less clearly
+than a refusal at preflight. It now requires `apk` and says so:
+
+```
+apk not found — this design targets OpenWrt 25.12 or newer
+```
+
+### Verified: `--private-key-file` restores an identity on real hardware
+
+Previously exercised only under `--dry-run`. Tested end to end: the node's
+private key was saved, the whole Yggdrasil configuration deleted, and the script
+re-run with `--private-key-file`. The node came back at exactly its previous
+address and routed prefix, and a remote client reached it over Yggdrasil with no
+change to its own configuration — no SSH config edit, no `known_hosts` entry, no
+split-DNS update. The key appeared nowhere in the output: a search of the full
+run for the 128 hex characters, and for their first 32, found nothing.
+
+`--peers-file`, `--add-peers` and the four `--no-*` switches were confirmed too.
+
 ## v5.6 — deploy other proto handlers first
 
 Documentation only.

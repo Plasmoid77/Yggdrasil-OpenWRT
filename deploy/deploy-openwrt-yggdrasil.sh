@@ -14,7 +14,7 @@
 
 set -u
 
-VERSION='1.3.0'
+VERSION='1.4.0'
 SELF="${0##*/}"
 # Piped straight from a URL — wget -qO- ... | sh -s -- ... — $0 is the shell, so
 # the banner and the usage text would announce themselves as "sh".
@@ -397,16 +397,11 @@ stage_preflight() {
         have "$_t" || die "required tool missing: $_t"
     done
 
-    if have apk; then
-        PKG='apk'; PKG_UPDATE='apk update'; PKG_ADD='apk add'
-    elif have opkg; then
-        PKG='opkg'; PKG_UPDATE='opkg update'; PKG_ADD='opkg install'
-        warn "this router uses opkg; the design is documented against OpenWrt 25.12+ with apk"
-        warn "package names and the yggdrasil netifd proto may differ — proceeding, but verify"
-    else
-        die "neither apk nor opkg found"
-    fi
-    info "package manager: $PKG"
+    # apk only. The design targets OpenWrt 25.12+, where apk is the package
+    # manager; on an opkg release the package names and the yggdrasil netifd
+    # proto differ enough that a run would fail somewhere less obvious than here.
+    have apk || die "apk not found — this design targets OpenWrt 25.12 or newer"
+    info "package manager: apk"
 
     uci -q get "network.$LAN" >/dev/null 2>&1 || die "no UCI interface 'network.$LAN' — pass --lan"
 
@@ -479,11 +474,7 @@ stage_packages() {
 
     _missing=''
     for _p in $_want; do
-        if [ "$PKG" = 'apk' ]; then
-            apk info -e "$_p" >/dev/null 2>&1 && continue
-        else
-            opkg list-installed 2>/dev/null | grep -q "^$_p " && continue
-        fi
+        apk info -e "$_p" >/dev/null 2>&1 && continue
         _missing="$_missing $_p"
     done
 
@@ -495,17 +486,17 @@ stage_packages() {
 
     info "installing:$_missing"
     if [ "$DRY_RUN" -eq 1 ]; then
-        printf '    would run: %s\n' "$PKG_UPDATE" >&2
-        printf '    would run: %s%s\n' "$PKG_ADD" "$_missing" >&2
+        printf '    would run: apk update\n' >&2
+        printf '    would run: apk add%s\n' "$_missing" >&2
         return 0
     fi
 
     # shellcheck disable=SC2086
-    $PKG_UPDATE >/dev/null 2>&1 || warn "package index update failed — trying to install anyway"
+    apk update >/dev/null 2>&1 || warn "package index update failed — trying to install anyway"
 
     for _p in $_missing; do
         # shellcheck disable=SC2086
-        if $PKG_ADD "$_p" >/dev/null 2>&1; then
+        if apk add "$_p" >/dev/null 2>&1; then
             ok "installed $_p"
         else
             case "$_p" in
