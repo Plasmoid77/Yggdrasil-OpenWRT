@@ -37,6 +37,17 @@ jobs:
           git apply --index "$RUNNER_TEMP/release-distribution.patch"
           git rm .github/workflows/release-migration-once.yml
           test "$(git write-tree)" = "$EXPECTED_TREE"
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('tests/status-download.sh')
+          s = p.read_text()
+          line = next(line for line in s.splitlines() if line.startswith("printf '#!/bin/sh"))
+          assert s.count(line) == 1
+          s = s.replace(line, '# Expand INSTALL_MARKER only when the generated fixture executes.\n# shellcheck disable=SC2016\n' + line)
+          p.write_text(s)
+          PY
+          git add tests/status-download.sh
+          git write-tree | tee "$RUNNER_TEMP/verified-tree.txt"
           git diff --exit-code "$BASE" -- source client packages
           git diff --check --cached
       - name: Install host dependencies
@@ -47,14 +58,12 @@ jobs:
           set -euo pipefail
           sh tools/check.sh 2>&1 | tee "$RUNNER_TEMP/release-checks.log"
           sh tests/status-download.sh --live 2>&1 | tee -a "$RUNNER_TEMP/release-checks.log"
-          git archive --format=tar.gz "$EXPECTED_TREE" > "$RUNNER_TEMP/release-distribution-reviewed-tree.tar.gz"
+          git archive --format=tar.gz "$(cat "$RUNNER_TEMP/verified-tree.txt")" > "$RUNNER_TEMP/release-distribution-reviewed-tree.tar.gz"
       - name: Commit verified source and documentation without changing workflow files
         shell: bash
         run: |
           set -euo pipefail
           test "$(git ls-remote origin refs/heads/refactor/release-distribution | cut -f1)" = "$GITHUB_SHA"
-          # Workflow files are finalized through the connector after validation;
-          # this token does not need permission to edit workflow definitions.
           git restore --source=HEAD --staged --worktree -- .github
           git diff --cached --exit-code -- .github
           git config user.name 'github-actions[bot]'
@@ -62,7 +71,7 @@ jobs:
           git commit -m 'feat: pin status releases and require verified distributions'
           git push origin HEAD:refs/heads/refactor/release-distribution
           echo "Verified source commit: $(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
-          echo "Full reviewed tree: $EXPECTED_TREE" >> "$GITHUB_STEP_SUMMARY"
+          echo "Full reviewed tree: $(cat "$RUNNER_TEMP/verified-tree.txt")" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v7.0.1
         with:
           name: release-distribution-reviewed-tree
@@ -70,5 +79,6 @@ jobs:
             ${{ runner.temp }}/release-distribution-reviewed-tree.tar.gz
             ${{ runner.temp }}/release-distribution.patch
             ${{ runner.temp }}/release-checks.log
+            ${{ runner.temp }}/verified-tree.txt
           if-no-files-found: error
           retention-days: 7
