@@ -1,5 +1,24 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## Unreleased - pinned status releases (deployer 1.5.2)
+
+The default status download now uses `status-v5.1` on GitHub Releases and an
+embedded SHA-256. Transport failures may fall back to the identical archive at
+an immutable Git commit, never to v5 or a moving branch. Local checkout archives
+must match the same pin; explicit `--status-pkg` builds require a single-entry
+checksum file. Missing verification tools/checksums and mismatches refuse the
+optional installation. Status workspaces are private and cleaned on exit.
+
+Existing v4/v5/v5.1 archives and checksums have been preserved as Release assets
+without rebuilding. Copies in `packages/` remain unchanged for old raw URLs;
+new builds go to Releases, not the source tree.
+
+A manual workflow prepares a draft from a clean, exact main-branch revision;
+it creates a fresh tag, refuses existing tags and never publishes or changes
+the deployer pin automatically. Download/error-path tests run under sh and
+BusyBox; CI verifies real public release/mirror bytes. No new real-router test
+is claimed. Core network, status runtime and client DNS behavior are unchanged.
+
 ## v5.9 — private-key handling and factory-reset revalidation
 
 `deploy/deploy-openwrt-yggdrasil.sh` 1.5.1. The status package is unchanged at

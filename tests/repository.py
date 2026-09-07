@@ -191,6 +191,53 @@ class PackagingTests(unittest.TestCase):
             self.assertNotEqual(0, result.returncode, "tracked metadata was silently replaced")
             self.assertFalse((parent / "out").exists())
 
+    def release_build(self, root, output, version="v6.0.0"):
+        return subprocess.run(
+            [sys.executable, str(root / "tools/package.py"), version,
+             "--release", "--output", str(output)], cwd=root,
+            capture_output=True, text=True,
+        )
+
+    def test_release_build_accepts_clean_numeric_version(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = Path(tmp)
+            root, _source = self.fixture_repo(parent)
+            out = parent / "release"
+            result = self.release_build(root, out)
+            self.assertEqual(0, result.returncode, result.stderr)
+            with tarfile.open(out / "yggdrasil-status-v6.0.0.tar.gz") as tar:
+                info = json.load(tar.extractfile("yggdrasil-status-v6.0.0/BUILD_INFO.json"))
+                self.assertFalse(info["source_dirty"])
+                self.assertEqual("v6.0.0", info["version"])
+            for label in ("dev-test", "v6.0.0-rc1", "6.0", "v06.0"):
+                result = self.release_build(root, parent / "invalid", label)
+                self.assertNotEqual(0, result.returncode)
+                self.assertIn("release version", result.stderr)
+                self.assertFalse((parent / "invalid").exists())
+
+    def test_release_build_rejects_dirty_source_and_tooling(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = Path(tmp)
+            root, source = self.fixture_repo(parent)
+            for file in (source / "install.sh", root / "tools/package.py"):
+                original = file.read_bytes()
+                file.write_bytes(original + b"\n# uncommitted change\n")
+                result = self.release_build(root, parent / "out")
+                self.assertNotEqual(0, result.returncode)
+                self.assertIn("clean", result.stderr)
+                self.assertFalse((parent / "out").exists())
+                file.write_bytes(original)
+
+    def test_release_build_rejects_untracked_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = Path(tmp)
+            root, source = self.fixture_repo(parent)
+            (source / "forgotten.sh").write_text("#!/bin/sh\nexit 0\n")
+            result = self.release_build(root, parent / "out")
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("untracked", result.stderr)
+            self.assertFalse((parent / "out").exists())
+
     def test_untracked_source_files_are_not_distributed(self):
         extra = SOURCE / "untracked-sensitive-fixture.txt"
         self.assertFalse(extra.exists())
