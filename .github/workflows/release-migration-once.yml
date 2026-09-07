@@ -1,0 +1,86 @@
+name: Preserve status releases and retire merged branch
+
+on:
+  push:
+    branches: [refactor/release-distribution]
+    paths: [.github/workflows/release-migration-once.yml]
+
+permissions:
+  contents: write
+  pull-requests: read
+
+concurrency:
+  group: one-time-status-release-migration
+  cancel-in-progress: false
+
+jobs:
+  preserve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: Plasmoid77/Yggdrasil-OpenWRT
+      BASE: f8abee9bab3a5f1be3c91e7e1bdff8047161c8b2
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: f8abee9bab3a5f1be3c91e7e1bdff8047161c8b2
+          persist-credentials: false
+      - name: Verify baseline, archived branch, and merged PR before deletion
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$BASE"
+          test "$(gh api "repos/$GH_REPO/git/ref/heads/archive/pre-refactor-2026-09-07" --jq .object.sha)" = 34ccc28640627985a8e806e6076b2e2e87b52c2a
+          gh api "repos/$GH_REPO/pulls/14" > "$RUNNER_TEMP/pr14.json"
+          jq -e '.merged == true and .merge_commit_sha == "f8abee9bab3a5f1be3c91e7e1bdff8047161c8b2" and .head.sha == "1194d90a4bc8a75f551895011738f1af56931bd2"' "$RUNNER_TEMP/pr14.json"
+          test "$(gh api "repos/$GH_REPO/git/ref/heads/refactor/repository-clarity" --jq .object.sha)" = 1194d90a4bc8a75f551895011738f1af56931bd2
+          gh api --method DELETE "repos/$GH_REPO/git/refs/heads/refactor/repository-clarity"
+          echo 'Deleted only refs/heads/refactor/repository-clarity' >> "$GITHUB_STEP_SUMMARY"
+      - name: Validate the preserved archive bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd packages
+          for file in *.sha256; do sha256sum -c "$file"; done
+          printf '%s\n' \
+            '696e5d2cecc2a77a2159af74b6dce14f1ebf6477cd03f8babe3e4b8aa4208861  yggdrasil-status-v4.tar.gz' \
+            '26063dd0d0b89599e8123a6a67350b6d2606336c2080010e6474eef4358679a4  yggdrasil-status-v5.tar.gz' \
+            '49dd2e2c57027b000ce62fa710d48abeb17cbe1ee532dfa0d504d4f2f0041e0a  yggdrasil-status-v5.1.tar.gz' | sha256sum -c -
+      - name: Publish unchanged historical archives, without rebuilding or overwriting
+        shell: bash
+        run: |
+          set -euo pipefail
+          for version in v4 v5 v5.1; do
+            tag="status-$version"
+            file="yggdrasil-status-$version.tar.gz"
+            if gh release view "$tag" >/dev/null 2>&1; then
+              echo "Release $tag already exists; refusing to replace it" >&2
+              exit 1
+            fi
+            printf '%s\n' \
+              "# Yggdrasil Status $version - preserved distribution" \
+              '' \
+              'This is an unchanged historical status-module archive, migrated from the repository to GitHub Releases. It is not a new build or a new hardware validation.' \
+              '' \
+              "Original archive: packages/$file at commit $BASE." \
+              'The tag identifies the preservation snapshot, not the original build date. The asset contents and its original SHA-256 file are authoritative for this historical build; the tag source tree may contain later source cleanup.' \
+              '' \
+              'v5.1 is the current distribution and fixes prefix-class lookup for interfaces such as ygg0. v4 and v5 are retained for provenance, not automatic fallback.' \
+              > "$RUNNER_TEMP/$tag.md"
+            gh release create "$tag" "packages/$file" "packages/$file.sha256" \
+              --target "$BASE" --title "Yggdrasil Status $version (preserved)" \
+              --notes-file "$RUNNER_TEMP/$tag.md" --draft --latest=false
+            mkdir "$RUNNER_TEMP/$tag"
+            gh release download "$tag" --dir "$RUNNER_TEMP/$tag"
+            cmp "packages/$file" "$RUNNER_TEMP/$tag/$file"
+            cmp "packages/$file.sha256" "$RUNNER_TEMP/$tag/$file.sha256"
+            if [ "$version" = v5.1 ]; then
+              gh release edit "$tag" --draft=false --latest
+            else
+              gh release edit "$tag" --draft=false --latest=false
+            fi
+            wget -q -O "$RUNNER_TEMP/$tag/public.tar.gz" "https://github.com/$GH_REPO/releases/download/$tag/$file"
+            cmp "packages/$file" "$RUNNER_TEMP/$tag/public.tar.gz"
+            echo "Published and publicly verified $tag: $(sha256sum "packages/$file")" >> "$GITHUB_STEP_SUMMARY"
+          done
