@@ -18,6 +18,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y shellcheck busybox jq
       - name: Run the same checks used by maintainers and agents
         run: sh tools/check.sh
+      - name: Verify public pinned release and mirror downloads (no installation)
+        run: sh tests/status-download.sh --live
       - name: Build a development distribution from this revision
         run: python3 tools/package.py "dev-${GITHUB_SHA}" --output dist
       - uses: actions/upload-artifact@v7.0.1
