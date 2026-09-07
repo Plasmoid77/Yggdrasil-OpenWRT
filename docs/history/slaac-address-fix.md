@@ -30,7 +30,7 @@ Yggdrasil не менялись.
 
 ## Исправление в v5
 
-В [RPC-бэкенде](source/yggdrasil-status-v5/root/usr/libexec/rpcd/luci.yggdrasil-status)
+В [RPC-бэкенде](../../source/yggdrasil-status/root/usr/libexec/rpcd/luci.yggdrasil-status)
 реализован выбор адреса по принципу stable-first:
 
 1. Если для устройства закреплён канонический адрес в `config domain`, LuCI
@@ -74,4 +74,4 @@ forwarding и не создаёт дополнительную Yggdrasil-иде�
 
 Изменение выпущено коммитом `1f9360c`; уточнение модели адресов полноценных
 Yggdrasil-узлов — коммитом `11d3e19`. Общая архитектура описана в
-[README](README.md), а регрессионные проверки — в [TEST_PLAN](TEST_PLAN.md).
+[README](../architecture.md), а регрессионные проверки — в [TEST_PLAN](../development.md).
