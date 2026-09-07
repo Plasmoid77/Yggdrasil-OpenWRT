@@ -18,12 +18,12 @@ regression tests cover these paths and run in CI.
 ### Verified again from a factory reset
 
 The complete path was repeated on a Cudy WBR3000UAX v1 running OpenWrt 25.12.5:
-temporary Wi-Fi bootstrap, Fibocom L860-GL installation and reboot, LTE-only
-uplink, Yggdrasil deployment, an identical second deployment, and a final
-reboot. The second deployment retained the node address and routed `/64` and
-left exactly the requested four peer sections. After the final reboot the LTE
-health check, `ygg0`, LAN SLAAC, trusted-source SSH, TCP/UDP DNS, LuCI and its
-RPC backend were all operational.
+temporary Wi-Fi bootstrap, installation of the router's LTE modem package and
+its reboot, LTE uplink, Yggdrasil deployment, an identical second deployment,
+and a final The second deployment retained the node address and routed `/64` and left
+exactly the requested four peer sections. After the final reboot the uplink,
+`ygg0`, LAN SLAAC, trusted-source SSH, TCP/UDP DNS, LuCI and its RPC backend
+were all operational.
 
 The no-restart variant was also tested, rather than inferred: after installing
 the packages, netifd did not recognize the new Yggdrasil protocol handler and
