@@ -1,5 +1,5 @@
 #!/bin/sh
-# shellcheck disable=SC2034,SC2329
+# shellcheck disable=SC2034,SC2317,SC2329
 # Functions extracted with awk/eval deliberately hide their variable and
 # function references from ShellCheck.
 

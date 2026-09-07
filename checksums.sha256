@@ -23,4 +23,4 @@ cd1c06f586e5a6ba46dccb85ef68ea8c7b597be5a1ff5be4b5f97065974f0368  ./source/yggdr
 b37e5028f7fc787b671390187959959fbbdd5a657287cff78b01cdd2b5b6b345  ./source/yggdrasil-status-v5/root/usr/share/luci/menu.d/yggdrasil-status.json
 8bf275e8e75e569a117eb8cf48b939353991d9e3421f556794ec8c84ed2fd0c3  ./source/yggdrasil-status-v5/root/usr/share/rpcd/acl.d/yggdrasil-status.json
 02a985f72d470a0efb137c67e3b0f57fbbaa2b97c52e62ced9407d07c8fd19a1  ./source/yggdrasil-status-v5/www/luci-static/resources/view/status/yggdrasil.js
-19402edd29a5ef33121ae57a9bd82b5cc7b894d3d4c1a202397729fcd6bf9207  ./tests/deploy-secret-handling.sh
+8994fd1097dad9b15ba9f337957567863068f377abaed4b44bac1d16b87fbb0a  ./tests/deploy-secret-handling.sh
