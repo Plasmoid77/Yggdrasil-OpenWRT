@@ -20,7 +20,7 @@ jobs:
         run: sh tools/check.sh
       - name: Build a development distribution from this revision
         run: python3 tools/package.py "dev-${GITHUB_SHA}" --output dist
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7.0.1
         with:
           name: status-development-package
           path: dist/
