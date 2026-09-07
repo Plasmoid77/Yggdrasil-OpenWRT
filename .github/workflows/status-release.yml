@@ -1,0 +1,76 @@
+name: Prepare status release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'New status version, e.g. v5.2 or v5.2.0 (never reuse a tag)'
+        required: true
+        type: string
+      revision:
+        description: 'Full 40-character commit SHA already merged into main'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: status-release
+  cancel-in-progress: false
+
+jobs:
+  draft:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ inputs.version }}
+      REVISION: ${{ inputs.revision }}
+    steps:
+      - name: Validate inputs before checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$VERSION" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(\.(0|[1-9][0-9]*))?$ ]]
+          [[ "$REVISION" =~ ^[0-9a-f]{40}$ ]]
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.revision }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require an exact reviewed revision from main
+        run: |
+          test "$(git rev-parse HEAD)" = "$REVISION"
+          git merge-base --is-ancestor "$REVISION" origin/main
+      - name: Install host check dependencies
+        run: sudo apt-get update && sudo apt-get install -y shellcheck busybox jq
+      - name: Run checks and build clean release candidate
+        run: |
+          sh tools/check.sh
+          python3 tools/package.py "$VERSION" --release --output dist
+          (cd dist && sha256sum -c *.sha256)
+      - name: Create a new tag and draft without replacing existing releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="status-$VERSION"
+          # This atomic create fails if the tag exists. Never force-update tags.
+          gh api --method POST "repos/$GH_REPO/git/refs" \
+            -f ref="refs/tags/$tag" -f sha="$REVISION"
+          printf '%s\n' \
+            "Status-module candidate $VERSION from commit $REVISION." \
+            '' \
+            'Host checks passed. Review the package and complete the relevant OpenWrt integration tests before publishing this draft.' \
+            'This workflow does not claim hardware validation, publish automatically, or update the deployer pin.' \
+            > "$RUNNER_TEMP/release-notes.md"
+          gh release create "$tag" "dist/yggdrasil-status-$VERSION.tar.gz" \
+            "dist/yggdrasil-status-$VERSION.tar.gz.sha256" \
+            --verify-tag --title "Yggdrasil Status $VERSION" \
+            --notes-file "$RUNNER_TEMP/release-notes.md" --draft --latest=false
+          echo "Draft $tag created; review before publishing. Deployer pin is unchanged." >> "$GITHUB_STEP_SUMMARY"

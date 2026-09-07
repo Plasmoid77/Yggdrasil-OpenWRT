@@ -15,7 +15,7 @@
 set -u
 umask 077
 
-VERSION='1.5.1'
+VERSION='1.5.2'
 SELF="${0##*/}"
 # Piped straight from a URL — wget -qO- ... | sh -s -- ... — $0 is the shell, so
 # the banner and the usage text would announce themselves as "sh".
@@ -42,10 +42,12 @@ DNS_DOMAIN='home.arpa'
 DNS_ROUTER='router'
 DNS_HOSTS=''
 STATUS_PKG=''
-STATUS_BASE='https://raw.githubusercontent.com/Plasmoid77/Yggdrasil-OpenWRT/main/packages'
-# Newest first. v5.1 fixes the prefix-class lookup; v5 only resolves the routed
-# /64 when the Yggdrasil interface happens to be named 'ygg'.
-STATUS_VERSIONS='yggdrasil-status-v5.1 yggdrasil-status-v5'
+# Pin version AND bytes. New releases never change an existing deployer's payload.
+STATUS_VERSION='v5.1'
+STATUS_SHA256='49dd2e2c57027b000ce62fa710d48abeb17cbe1ee532dfa0d504d4f2f0041e0a'
+STATUS_BASE="https://github.com/Plasmoid77/Yggdrasil-OpenWRT/releases/download/status-$STATUS_VERSION"
+# Compatibility mirror for networks that cannot reach GitHub release assets.
+STATUS_FALLBACK_BASE='https://raw.githubusercontent.com/Plasmoid77/Yggdrasil-OpenWRT/f8abee9bab3a5f1be3c91e7e1bdff8047161c8b2/packages'
 PRIVATE_KEY_FILE=''
 SUPPLIED_KEY=''
 DRY_RUN=0
@@ -127,7 +129,7 @@ Scope:
   --no-firewall         Do not create the ygg zone or trusted rules
   --no-status           Do not install the LuCI status module
   --no-dns              Do not serve <name>.$DNS_DOMAIN over Yggdrasil
-  --status-pkg PATH     Install the status module from a local tarball
+  --status-pkg PATH     Install a local tarball; PATH.sha256 is required
 
 Behaviour:
   -n, --dry-run         Print what would change; touch nothing
@@ -1011,98 +1013,103 @@ ${_h%%=*}.${DNS_DOMAIN} ${_h#*=}"
 
 # ================================================== stage 7: LuCI status module
 
+status_fetch() { # $1 = HTTPS URL, $2 = destination
+    wget -q -O "$2" "$1" 2>/dev/null \
+        || uclient-fetch -q -O "$2" "$1" 2>/dev/null \
+        || curl -fsSL -o "$2" "$1" 2>/dev/null
+}
+
+status_verify() { # $1 = tarball, $2 = required SHA-256
+    sv_expected="$(printf '%s' "$2" | tr 'A-F' 'a-f')"
+    case "$sv_expected" in
+        ''|*[!0-9a-f]*) warn "missing or invalid status package SHA-256"; return 1 ;;
+    esac
+    [ "${#sv_expected}" -eq 64 ] || { warn "invalid status package SHA-256 length"; return 1; }
+    have sha256sum || { warn "sha256sum missing - refusing unverified status package"; return 1; }
+    sv_result="$(sha256sum "$1" 2>/dev/null)" || { warn "cannot hash status package"; return 1; }
+    sv_got="${sv_result%% *}"
+    [ "$sv_expected" = "$sv_got" ] || {
+        warn "status module checksum mismatch - refusing to install"
+        warn "  expected $sv_expected"
+        warn "  got      $sv_got"
+        return 1
+    }
+    ok "checksum verified"
+}
+
+status_acquire() { # $1 = destination, $2 = optional checkout package directory
+    sa_dest="$1"
+    sa_cache="$2"
+    sa_name="yggdrasil-status-$STATUS_VERSION.tar.gz"
+    if [ -n "$STATUS_PKG" ]; then
+        [ -r "$STATUS_PKG" ] || { warn "cannot read $STATUS_PKG"; return 1; }
+        [ -r "$STATUS_PKG.sha256" ] || { warn "required checksum missing: $STATUS_PKG.sha256"; return 1; }
+        # Read one digest, never follow paths supplied by an untrusted checksum file.
+        sa_expected="$(awk 'NF { n++; digest=$1 } END { if (n != 1) exit 1; print digest }' "$STATUS_PKG.sha256")" \
+            || { warn "local checksum file must contain exactly one entry"; return 1; }
+        cp "$STATUS_PKG" "$sa_dest" || { warn "cannot copy local status package"; return 1; }
+        info "using local package $STATUS_PKG"
+        status_verify "$sa_dest" "$sa_expected"
+        return $?
+    fi
+
+    # Preserve offline installs from a checkout, but a cached archive cannot
+    # override the release pin. Custom builds must use --status-pkg explicitly.
+    if [ -r "$sa_cache/$sa_name" ]; then
+        cp "$sa_cache/$sa_name" "$sa_dest" || { warn "cannot copy cached status package"; return 1; }
+        info "using pinned $STATUS_VERSION from the local checkout"
+        status_verify "$sa_dest" "$STATUS_SHA256"
+        return $?
+    fi
+
+    info "downloading $STATUS_BASE/$sa_name"
+    if ! status_fetch "$STATUS_BASE/$sa_name" "$sa_dest"; then
+        # Transport fallback only. Same version, same digest, immutable commit;
+        # never downgrade to v5 or silently hide a checksum mismatch.
+        warn "release download unavailable; trying the identical pinned mirror"
+        status_fetch "$STATUS_FALLBACK_BASE/$sa_name" "$sa_dest" \
+            || { warn "neither pinned download is available"; return 1; }
+    fi
+    status_verify "$sa_dest" "$STATUS_SHA256"
+}
+
 stage_status() {
     [ "$DO_STATUS" -eq 1 ] || { info "skipping status module (--no-status)"; return 0; }
     FAILED_STAGE='LuCI status module'
-    step "Stage 7 — LuCI status module"
-
+    step "Stage 7 - LuCI status module"
     if [ "$DRY_RUN" -eq 1 ]; then
-        info "would install the status module from ${STATUS_PKG:-$STATUS_BASE}"
+        info "would install verified status module from ${STATUS_PKG:-$STATUS_BASE}"
         return 0
     fi
 
-    _tmp='/tmp/ygg-status-deploy'
-    rm -rf "$_tmp"; mkdir -p "$_tmp" || { warn "cannot create $_tmp"; return 0; }
-    _tgz="$_tmp/yggdrasil-status-v5.tar.gz"
-
-    _fetch() { # $1 = url, $2 = destination
-        wget -q -O "$2" "$1" 2>/dev/null \
-            || uclient-fetch -q -O "$2" "$1" 2>/dev/null \
-            || curl -fsSL -o "$2" "$1" 2>/dev/null
-    }
-
-    _verify() { # $1 = tarball, $2 = expected sha256 (may be empty)
-        [ -n "$2" ] || { warn "could not verify the package checksum"; return 0; }
-        have sha256sum || { warn "sha256sum missing — cannot verify the package"; return 0; }
-        _got="$(sha256sum "$1" | awk '{print $1}')"
-        [ "$2" = "$_got" ] && { ok "checksum verified"; return 0; }
-        warn "status module checksum mismatch — refusing to install"
-        warn "  expected $2"
-        warn "  got      $_got"
-        return 1
-    }
-
-    if [ -n "$STATUS_PKG" ]; then
-        [ -r "$STATUS_PKG" ] || { warn "cannot read $STATUS_PKG — skipping status module"; return 0; }
-        cp "$STATUS_PKG" "$_tgz"
-        info "using local package $STATUS_PKG"
-        [ -r "$STATUS_PKG.sha256" ] \
-            && { _verify "$_tgz" "$(awk '{print $1}' "$STATUS_PKG.sha256")" || return 0; }
-    else
-        # A checkout of this repository ships the package next to the script;
-        # prefer it, so a run from a checkout installs the version being tested.
-        _local_dir="$(dirname "$0")/../packages"
-        _got_pkg=0
-        for _v in $STATUS_VERSIONS; do
-            if [ -r "$_local_dir/$_v.tar.gz" ]; then
-                cp "$_local_dir/$_v.tar.gz" "$_tgz"
-                info "using $_v from the local checkout"
-                [ -r "$_local_dir/$_v.tar.gz.sha256" ] \
-                    && { _verify "$_tgz" "$(awk '{print $1}' "$_local_dir/$_v.tar.gz.sha256")" || return 0; }
-                _got_pkg=1; break
-            fi
-        done
-        if [ "$_got_pkg" -eq 0 ]; then
-            for _v in $STATUS_VERSIONS; do
-                info "downloading $STATUS_BASE/$_v.tar.gz"
-                if _fetch "$STATUS_BASE/$_v.tar.gz" "$_tgz"; then
-                    _fetch "$STATUS_BASE/$_v.tar.gz.sha256" "$_tgz.sha256"
-                    _verify "$_tgz" "$(awk '{print $1}' "$_tgz.sha256" 2>/dev/null)" || return 0
-                    case "$_v" in
-                        yggdrasil-status-v5)
-                            warn "fell back to v5: it resolves the routed /64 only when the"
-                            warn "  Yggdrasil interface is named 'ygg'; with '$IFACE' the LAN"
-                            warn "  clients table will show no IPv6 addresses" ;;
-                    esac
-                    _got_pkg=1; break
-                fi
-            done
+    # Isolated cleanup traps must not replace the parent deployer's rollback traps.
+    (
+        ss_tmp="$(mktemp -d "${TMPDIR:-/tmp}/ygg-status-deploy.XXXXXX")" \
+            || { warn "cannot create private status workspace"; exit 0; }
+        trap 'rm -rf "$ss_tmp"' EXIT
+        trap 'exit 1' HUP INT TERM
+        ss_tgz="$ss_tmp/status.tar.gz"
+        if ! status_acquire "$ss_tgz" "$(dirname "$0")/../packages"; then
+            warn "status module skipped; core routing is unaffected"
+            exit 0
         fi
-        if [ "$_got_pkg" -eq 0 ]; then
-            warn "no status module package available — skipping (core routing is unaffected)"
-            warn "  install it later with: $SELF --no-lan --no-firewall --status-pkg /path/to.tar.gz"
-            return 0
+        ( cd "$ss_tmp" && tar -xzf "$ss_tgz" ) \
+            || { warn "tar extraction failed - skipping status module"; exit 0; }
+        ss_inst="$(find "$ss_tmp" -name install.sh -type f 2>/dev/null | head -n1)"
+        [ -n "$ss_inst" ] || { warn "install.sh not found in the package - skipping"; exit 0; }
+        info "running $ss_inst (it has its own backup + rollback)"
+        if sh "$ss_inst"; then
+            ok "status module installed"
+        else
+            warn "status module installer failed; check its rollback messages - core routing is unaffected"
+            exit 0
         fi
-    fi
-
-    ( cd "$_tmp" && tar -xzf "$_tgz" ) || { warn "tar extraction failed — skipping"; return 0; }
-    _inst="$(find "$_tmp" -name install.sh -type f 2>/dev/null | head -n1)"
-    [ -n "$_inst" ] || { warn "install.sh not found in the package — skipping"; return 0; }
-
-    chmod +x "$_inst"
-    info "running $_inst (it has its own backup + rollback)"
-    if sh "$_inst"; then
-        ok "status module installed"
-    else
-        warn "status module install failed and rolled itself back — core routing is unaffected"
-        return 0
-    fi
-
-    if ubus -v list luci.yggdrasil-status >/dev/null 2>&1; then
-        ok "RPC object luci.yggdrasil-status is registered"
-    else
-        warn "RPC object luci.yggdrasil-status not visible — check 'logread | grep rpcd'"
-    fi
+        if ubus -v list luci.yggdrasil-status >/dev/null 2>&1; then
+            ok "RPC object luci.yggdrasil-status is registered"
+        else
+            warn "RPC object luci.yggdrasil-status not visible - check 'logread | grep rpcd'"
+        fi
+    )
 }
 
 # ==================================================== stage 8: verification

@@ -97,6 +97,22 @@ the router's Yggdrasil address and the command to reach it.
 The rest of this document is the manual equivalent, and remains the reference for
 what the script does and why.
 
+### Package source and integrity
+
+The automated installer pins status v5.1 and its SHA-256. It prefers that exact
+archive in a local checkout; otherwise it downloads the versioned GitHub Release.
+On transport failure it can use an identical copy at a fixed Git commit, never a
+moving `main`/`latest` URL or an older module. A bad checksum is not bypassed.
+If neither verified copy is available, the optional status stage is skipped
+with a warning; the routing stages remain independent.
+
+For offline or custom builds, use `--status-pkg PATH` and provide the generated
+single-entry `PATH.sha256` beside it. Both must be readable. Missing, malformed
+or mismatched checksums now refuse the status installation; older deployers
+could proceed without one. See [development](development.md#development-packaging)
+for building that pair. Do not create a checksum for an untrusted download merely
+to silence a verification failure.
+
 ## Requirements
 
 - OpenWrt 25.12+ with `apk`, firewall4, odhcpd, dnsmasq, rpcd and LuCI;
@@ -242,15 +258,19 @@ trusted Ygg client to the router node address.
 ## 4. Install the optional LuCI status module
 
 ```sh
-wget -O /tmp/yggdrasil-status-v5.1.tar.gz \
-  https://raw.githubusercontent.com/Plasmoid77/Yggdrasil-OpenWRT/main/packages/yggdrasil-status-v5.1.tar.gz
-wget -O /tmp/yggdrasil-status-v5.1.tar.gz.sha256 \
-  https://raw.githubusercontent.com/Plasmoid77/Yggdrasil-OpenWRT/main/packages/yggdrasil-status-v5.1.tar.gz.sha256
-
-cd /tmp
-sha256sum -c yggdrasil-status-v5.1.tar.gz.sha256
-tar -xzf yggdrasil-status-v5.1.tar.gz
-/tmp/yggdrasil-status-v5.1/install.sh
+(
+  set -e
+  work="$(mktemp -d /tmp/ygg-status-install.XXXXXX)"
+  trap 'rm -rf "$work"' EXIT
+  cd "$work"
+  wget -O yggdrasil-status-v5.1.tar.gz \
+    https://github.com/Plasmoid77/Yggdrasil-OpenWRT/releases/download/status-v5.1/yggdrasil-status-v5.1.tar.gz
+  printf '%s  %s\n' \
+    '49dd2e2c57027b000ce62fa710d48abeb17cbe1ee532dfa0d504d4f2f0041e0a' \
+    'yggdrasil-status-v5.1.tar.gz' | sha256sum -c -
+  tar -xzf yggdrasil-status-v5.1.tar.gz
+  sh yggdrasil-status-v5.1/install.sh
+)
 ```
 
 Open **Status → Yggdrasil**. Active DHCPv4 clients should appear without

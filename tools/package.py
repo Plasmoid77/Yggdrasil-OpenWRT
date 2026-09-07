@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a deterministic development distribution from tracked status source.
+"""Build a deterministic status distribution from tracked source.
 
 Host-side only. Does not install anything or change public download locations.
 """
@@ -83,6 +83,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("version", help="new distribution label, e.g. dev-<commit>; frozen labels are refused")
     parser.add_argument("--output", type=Path, default=ROOT / "dist")
+    parser.add_argument("--release", action="store_true",
+                        help="require a numeric version and a clean committed checkout")
     args = parser.parse_args()
     created = []
     try:
@@ -91,6 +93,13 @@ def main():
         name = f"yggdrasil-status-{args.version}"
         if (ROOT / "packages" / f"{name}.tar.gz").exists():
             raise ValueError("that frozen release label already exists; use a new development label")
+        if args.release:
+            if not re.fullmatch(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(\.(0|[1-9][0-9]*))?", args.version):
+                raise ValueError("release version must be vMAJOR.MINOR or vMAJOR.MINOR.PATCH without leading zeros")
+            if git("status", "--porcelain", "--untracked-files=no"):
+                raise ValueError("release builds require a clean committed checkout, including tooling")
+            if git("ls-files", "--others", "--exclude-standard", "--", str(SOURCE)):
+                raise ValueError("release source contains untracked files; commit or remove them first")
         epoch = int(os.environ.get("SOURCE_DATE_EPOCH", "0"))
         if not 0 <= epoch <= 0xFFFFFFFF:
             raise ValueError("SOURCE_DATE_EPOCH must fit an unsigned 32-bit timestamp")

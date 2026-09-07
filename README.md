@@ -71,10 +71,10 @@ Host requirements and the distinction between synthetic tests and router
 validation are in [Development](docs/development.md). Do not run the router
 installer on a development workstation.
 
-`source/` is the editable implementation. `packages/` temporarily retains
-unchanged released archives because existing installers download those exact
-paths. New development archives can be built reproducibly; moving public
-downloads to Releases is a separate, hardware-validated migration.
+`source/` is the editable implementation. GitHub Releases distribute versioned
+status packages. `packages/` is a frozen compatibility cache for existing raw
+URLs, not the destination for new builds. The deployer pins a release and its
+SHA-256; development and release-candidate archives are built from source.
 
 Guide and implementation by Plasmoid (Neuroslopped).
 [Sources and acknowledgements](docs/architecture.md#sources-and-acknowledgements).
