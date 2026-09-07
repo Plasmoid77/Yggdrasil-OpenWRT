@@ -1,0 +1,25 @@
+name: Review snapshot
+
+on:
+  push:
+    branches: [refactor/repository-clarity]
+    paths: [.github/workflows/review-snapshot.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: 34ccc28640627985a8e806e6076b2e2e87b52c2a
+          persist-credentials: false
+      - name: Export the reviewed baseline without Git credentials
+        run: git archive --format=tar.gz HEAD > /tmp/yggdrasil-baseline.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: yggdrasil-reviewed-baseline
+          path: /tmp/yggdrasil-baseline.tar.gz
+          retention-days: 1
