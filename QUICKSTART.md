@@ -96,13 +96,6 @@ uci add_list firewall.@zone[1].network='wwan'   # the 'wan' zone
 uci commit; /etc/init.d/network reload; wifi reload
 ```
 
-For the Fibocom L860-GL used in the factory-reset validation, the modem must be
-installed while that temporary uplink is active. Follow
-[`openwrt-fibocom-l860gl`](https://github.com/Plasmoid77/openwrt-fibocom-l860gl),
-let its installer reboot the router, and require `l860-healthcheck` to pass
-before deploying Yggdrasil. The temporary Wi-Fi station can then be removed;
-the remaining default route should use `wwan0`.
-
 ### About the netifd restart
 
 netifd reads `/lib/netifd/proto/*.sh` only at startup, so a Yggdrasil protocol
