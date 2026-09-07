@@ -1,5 +1,35 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## v5.9 — private-key handling and factory-reset revalidation
+
+`deploy/deploy-openwrt-yggdrasil.sh` 1.5.1. The status package is unchanged at
+`yggdrasil-status-v5.1`.
+
+### Hardened: keep the private key out of incidental exposure paths
+
+The deployer now creates its backups and temporary files under `umask 077`,
+sends `network.*.private_key` to `uci batch` on standard input instead of
+putting it in `uci set` process arguments, removes `YGG_PRIVATE_KEY` from the
+exported environment before spawning key-loading helpers, validates even a
+preserved UCI key before building an unquoted batch line, and redacts
+private-key values if preflight has to report pending UCI changes. Focused
+regression tests cover these paths and run in CI.
+
+### Verified again from a factory reset
+
+The complete path was repeated on a Cudy WBR3000UAX v1 running OpenWrt 25.12.5:
+temporary Wi-Fi bootstrap, Fibocom L860-GL installation and reboot, LTE-only
+uplink, Yggdrasil deployment, an identical second deployment, and a final
+reboot. The second deployment retained the node address and routed `/64` and
+left exactly the requested four peer sections. After the final reboot the LTE
+health check, `ygg0`, LAN SLAAC, trusted-source SSH, TCP/UDP DNS, LuCI and its
+RPC backend were all operational.
+
+The no-restart variant was also tested, rather than inferred: after installing
+the packages, netifd did not recognize the new Yggdrasil protocol handler and
+the run timed out without a node address. Its rollback succeeded. The existing
+conditional netifd restart is therefore required and remains unchanged.
+
 ## v5.8 — a smaller flag surface
 
 `deploy/deploy-openwrt-yggdrasil.sh` 1.5.0.

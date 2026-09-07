@@ -24,6 +24,8 @@ This archive is the complete handoff package for the current OpenWrt + Yggdrasil
   runs under BusyBox ash on the router. Idempotent, backs up
   `network`/`dhcp`/`firewall` before touching them and restores them on any
   failure, preserves an existing private key, and supports `--dry-run`.
+- `tests/deploy-secret-handling.sh` — regression checks that private keys stay
+  out of process arguments and diagnostic output.
 
 ## Ready-to-install package
 

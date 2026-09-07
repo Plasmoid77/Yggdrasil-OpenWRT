@@ -13,8 +13,9 @@
 # The peer list is the only mandatory input. Everything else has a tested default.
 
 set -u
+umask 077
 
-VERSION='1.5.0'
+VERSION='1.5.1'
 SELF="${0##*/}"
 # Piped straight from a URL — wget -qO- ... | sh -s -- ... — $0 is the shell, so
 # the banner and the usage text would announce themselves as "sh".
@@ -285,12 +286,22 @@ uci_set() {
         esac
         return 0
     fi
-    uci set "$1=$2"
+    case "$1" in
+        # Keep the node identity out of /proc/<pid>/cmdline. The value is
+        # validated as hex before this point, so no UCI quoting is required.
+        *.private_key) printf 'set %s=%s\n' "$1" "$2" | uci -q batch ;;
+        *)             uci set "$1=$2" ;;
+    esac
 }
 
 uci_add_list() {
     [ "$DRY_RUN" -eq 1 ] && { printf '    would run: uci add_list %s=%s\n' "$1" "$2" >&2; return 0; }
     uci add_list "$1=$2"
+}
+
+uci_changes_redacted() {
+    uci -q changes "$1" 2>/dev/null \
+        | sed "s/^\([^=]*\.private_key\)=.*/\1='<REDACTED>'/"
 }
 
 confirm() {
@@ -310,8 +321,26 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # router for the length of the run, and leave it in the shell history of whoever
 # typed it and in the ssh command line if the script was piped in. A file or the
 # environment keeps it out of argv.
+validate_private_key() {
+    _vpk_key="$1"
+    _vpk_src="$2"
+    # Never echo the value itself, not even in an error.
+    case "${#_vpk_key}" in
+        128) : ;;
+        *) die "private key from $_vpk_src is ${#_vpk_key} characters, expected 128 hex" ;;
+    esac
+    case "$_vpk_key" in
+        *[!0-9a-fA-F]*) die "private key from $_vpk_src contains non-hex characters" ;;
+    esac
+}
+
 load_supplied_key() {
     _k=''
+    # Copy then clear the exported value before choosing a source or spawning
+    # helpers. A key file takes precedence, but an ambient environment key must
+    # not remain available to every later child process in that case either.
+    _env_key="${YGG_PRIVATE_KEY-}"
+    unset YGG_PRIVATE_KEY
     if [ -n "$PRIVATE_KEY_FILE" ]; then
         [ -r "$PRIVATE_KEY_FILE" ] || die "cannot read private key file: $PRIVATE_KEY_FILE"
         # BusyBox find has no -printf, so the mode string comes from ls.
@@ -323,21 +352,14 @@ load_supplied_key() {
         esac
         _k="$(tr -d ' \t\r\n' < "$PRIVATE_KEY_FILE")"
         _src="$PRIVATE_KEY_FILE"
-    elif [ -n "${YGG_PRIVATE_KEY:-}" ]; then
-        _k="$(printf '%s' "$YGG_PRIVATE_KEY" | tr -d ' \t\r\n')"
+    elif [ -n "$_env_key" ]; then
+        _k="$(printf '%s' "$_env_key" | tr -d ' \t\r\n')"
         _src='the YGG_PRIVATE_KEY environment variable'
     else
         return 0
     fi
 
-    # Never echo the value itself, not even in an error.
-    case "${#_k}" in
-        128) : ;;
-        *) die "private key from $_src is ${#_k} characters, expected 128 hex" ;;
-    esac
-    case "$_k" in
-        *[!0-9a-fA-F]*) die "private key from $_src contains non-hex characters" ;;
-    esac
+    validate_private_key "$_k" "$_src"
 
     SUPPLIED_KEY="$_k"
     ok "private key loaded from $_src (128 hex chars)"
@@ -442,9 +464,9 @@ stage_preflight() {
     # refuse to run on top of uncommitted changes we would otherwise commit blindly
     if [ "$DRY_RUN" -eq 0 ]; then
         for _c in network dhcp firewall; do
-            if [ -n "$(uci -q changes "$_c" 2>/dev/null)" ]; then
+            if uci -q changes "$_c" 2>/dev/null | grep -q .; then
                 err "uncommitted UCI changes exist in '$_c':"
-                uci -q changes "$_c" >&2
+                uci_changes_redacted "$_c" >&2
                 die "commit or revert them first — refusing to mix them into this deployment"
             fi
         done
@@ -574,6 +596,9 @@ stage_yggdrasil() {
             ok "generated a new key pair"
         fi
     fi
+    # Existing UCI state did not pass through load_supplied_key(). Validate the
+    # selected value here as well before the unquoted, hex-only uci batch line.
+    validate_private_key "$_priv" "the selected Yggdrasil identity"
     _pub="$(pub_from_priv "$_priv")"
 
     uci_set "network.$IFACE" 'interface'

@@ -19,6 +19,7 @@ Required:
 6. install.sh passes `sh -n`
 7. archive passes gzip/tar integrity check
 8. checksum file matches archive
+9. `tests/deploy-secret-handling.sh` passes
 ```
 
 Also compare embedded code in README against packaged source if README contains full source listings.
