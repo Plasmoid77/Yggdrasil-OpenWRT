@@ -23,6 +23,22 @@ the way out: after the router's Yggdrasil identity changes, everything
 remembered under the old prefix is dead, and offering one as if it still worked
 would be worse than showing nothing.
 
+Memory only covers a device that was seen at least once. A device that has just
+joined, or one that simply never sends anything, was still shown with an empty
+address column - observed on a freshly connected server that stayed blank for
+minutes while it was plainly online. The address cannot be derived from the MAC
+or from the host's link-local address, because RFC 7217 mixes the prefix into
+the interface identifier, so the backend now asks for it. ICMPv6 echo requests to
+`ff02::1`, sourced from the router's own routed address, make every device reply
+from the address it would use to reach that prefix; each address that turns up
+is then confirmed with one unicast probe, because the kernel records a neighbour
+when it transmits, not when it receives. Three multicast requests are sent
+rather than one - on the test LAN a single request drew no replies at all, since
+a device must first resolve the router's routed address. The whole exchange is
+detached, capped, and runs only when a row was online while its address was
+missing or recalled, so a settled LAN is never probed and an open page never
+waits.
+
 The `AGENTS.md` invariant that NDP must not create persistent history was the
 proxy for a stricter rule that still holds and is now stated directly: a
 memory's lifetime never exceeds the lifetime of the row it belongs to. The
