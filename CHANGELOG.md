@@ -1,5 +1,24 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## Deployer 1.6.1 - release discovery can authenticate
+
+Anonymous `api.github.com` requests are limited per source IP. A shared address
+exhausts that budget through no fault of its own and release discovery then
+fails for an hour, which is not something a retry can fix. This bit CI once on
+`main`, and it applies equally to a router behind CGNAT.
+
+`status_resolve_version` now sends `Authorization: Bearer $GITHUB_TOKEN` when
+that variable is set, and `status_fetch` takes an optional header argument to
+carry it. The header reaches only the fixed `api.github.com` lookup: a release
+asset redirects to another host, so a credential on those requests would leak
+off-site. `uclient-fetch` has no header option and is skipped in that branch
+rather than silently dropping the header. Unset, every path behaves as before,
+and `--status-version vX.Y` still avoids the lookup entirely.
+
+The token reaches `wget` as a process argument, so the documentation says to use
+it on CI or a single-user host rather than a shared router. CI passes the run's
+own scoped token. No new secret, and the status module is unchanged.
+
 ## Status v5.3 - a pinned row remembers its node address across a reboot
 
 A remembered native node address is now stored in the same storage class as the

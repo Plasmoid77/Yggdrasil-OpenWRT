@@ -151,7 +151,7 @@ depends on them.
 
 ## Version identities
 
-Historical changelog headings (for example v5.9), deployer VERSION (1.6.0) and
+Historical changelog headings (for example v5.9), deployer VERSION (1.6.1) and
 status distribution (v5.3) name different things. Do not renumber old history.
 The current source directory has no version suffix; Git identifies revisions.
 Repository maintenance is recorded by its PR/commits, not an invented release number.

@@ -15,7 +15,7 @@
 set -u
 umask 077
 
-VERSION='1.6.0'
+VERSION='1.6.1'
 SELF="${0##*/}"
 # Piped straight from a URL — wget -qO- ... | sh -s -- ... — $0 is the shell, so
 # the banner and the usage text would announce themselves as "sh".
