@@ -18,8 +18,14 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y shellcheck busybox jq
       - name: Run the same checks used by maintainers and agents
         run: sh tools/check.sh
-      - name: Verify public pinned release and mirror downloads (no installation)
+      # Anonymous api.github.com calls are limited per source IP and runner
+      # addresses are shared, so release discovery here fails at random. The
+      # run's own scoped token raises that limit; it reaches only the fixed
+      # api.github.com lookup, never a release-asset download.
+      - name: Verify public release discovery and download (no installation)
         run: sh tests/status-download.sh --live
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
       - name: Build a development distribution from this revision
         run: python3 tools/package.py "dev-${GITHUB_SHA}" --output dist
       - uses: actions/upload-artifact@v7.0.1

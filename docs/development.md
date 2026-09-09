@@ -33,7 +33,7 @@ Do not call that a full pass or merge without the complete CI check.
 | Documentation | Local Markdown links and heading fragments, shared Claude instructions |
 | Packaging | Exact tracked payload bytes, permissions, provenance, manifest, determinism, unsafe labels, no overwrite, exclusion of untracked files |
 | Frozen downloads | Existing archive SHA-256 files |
-| Status downloader | Release discovery and tag validation; explicit version bypass; required local and published checksums; corrupt/missing/ambiguous/unavailable downloads; offline checkout; dry-run/no-status; temporary cleanup |
+| Status downloader | Release discovery and tag validation; explicit version bypass; required local and published checksums; corrupt/missing/ambiguous/unavailable downloads; offline checkout; dry-run/no-status; temporary cleanup; an optional API token reaching the release lookup and nothing else |
 | Release builds | Numeric version, clean tracked checkout, no forgotten source files |
 
 Fixtures execute actual extracted backend functions with controlled OpenWrt
@@ -151,7 +151,7 @@ depends on them.
 
 ## Version identities
 
-Historical changelog headings (for example v5.9), deployer VERSION (1.6.0) and
+Historical changelog headings (for example v5.9), deployer VERSION (1.6.1) and
 status distribution (v5.3) name different things. Do not renumber old history.
 The current source directory has no version suffix; Git identifies revisions.
 Repository maintenance is recorded by its PR/commits, not an invented release number.

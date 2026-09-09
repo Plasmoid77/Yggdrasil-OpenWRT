@@ -113,12 +113,14 @@ pass 'verified but invalid archive is not installed and is cleaned'
 
 
 FETCH_LOG="$TMP/fetches"
+HEADER_LOG="$TMP/headers"
 SCENARIO='release'
 API_TAG='status-v9.9'
 GOOD_SHA="$(sha256sum "$TMP/good.tar.gz" | awk '{print $1}')"
 REL="$STATUS_RELEASE_BASE/status-v9.9/yggdrasil-status-v9.9.tar.gz"
 status_fetch() {
     printf '%s\n' "$1" >> "$FETCH_LOG"
+    printf '%s|%s\n' "$1" "${3:-}" >> "$HEADER_LOG"
     case "$SCENARIO:$1" in
         *:"$STATUS_API")           printf '{"tag_name":"%s","draft":false}\n' "$API_TAG" > "$2" ;;
         noapi:*)                   return 1 ;;
@@ -144,6 +146,22 @@ cmp "$TMP/good.tar.gz" "$TMP/result.tar.gz"
 [ "$(cat "$FETCH_LOG")" = "$(printf '%s\n' "$STATUS_API" "$REL" "$REL.sha256")" ] \
     || fail 'unexpected fetch sequence'
 pass 'newest release is resolved and verified against its published checksum'
+
+# A credential is never attached without one being provided.
+[ "$(cat "$HEADER_LOG")" = "$(printf '%s|\n' "$STATUS_API" "$REL" "$REL.sha256")" ] \
+    || fail 'a request carried a header with no token set'
+
+# With a token, only the fixed API lookup may carry it. Release assets redirect
+# to another host, so a credential on those requests would leak off-site.
+STATUS_VERSION=''
+: > "$FETCH_LOG"
+: > "$HEADER_LOG"
+GITHUB_TOKEN='fixture-token' status_acquire "$TMP/result.tar.gz" "$TMP/no-checkout" \
+    || fail 'authenticated release fetch failed'
+[ "$(cat "$HEADER_LOG")" = "$(printf '%s|Authorization: Bearer fixture-token\n%s|\n%s|\n' \
+    "$STATUS_API" "$REL" "$REL.sha256")" ] \
+    || fail 'token was omitted from the API call or leaked onto a download'
+pass 'an optional API token reaches only the release lookup'
 
 # An explicitly requested version must not consult the release list at all.
 STATUS_VERSION='v9.9'

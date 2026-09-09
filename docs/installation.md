@@ -112,6 +112,16 @@ compromised release; use `--status-pkg` with your own verified build when that
 distinction matters. If no verified copy is available the optional status stage
 is skipped with a warning; the routing stages remain independent.
 
+Release discovery calls `api.github.com`, which limits anonymous requests per
+source IP. A shared address — a CI runner, or a router behind CGNAT — can
+exhaust that budget through no fault of its own, and discovery then fails until
+the window resets. `--status-version vX.Y` keeps working, because it skips the
+lookup entirely. Setting `GITHUB_TOKEN` in the environment raises the limit; it
+is attached only to that one fixed lookup and never to a release download, which
+redirects to a different host. The token reaches `wget` as a process argument
+and is visible in `/proc/<pid>/cmdline` while the request runs, so use it on CI
+or a single-user host rather than a shared router.
+
 For offline or custom builds, use `--status-pkg PATH` and provide the generated
 single-entry `PATH.sha256` beside it. Both must be readable. Missing, malformed
 or mismatched checksums now refuse the status installation; older deployers
