@@ -1,6 +1,6 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
-## Unreleased - a pinned row remembers its node address across a reboot
+## Status v5.3 - a pinned row remembers its node address across a reboot
 
 A remembered native node address is now stored in the same storage class as the
 row it belongs to. Rows backed by a `config host` — that is, pinned devices —
@@ -20,7 +20,7 @@ This narrows the previous "no cache on flash" invariant to what it was actually
 protecting: a row's memory must never outlive the row — and, for a row that
 survives a reboot on its own, must not die before it either.
 
-## Superseded - status v5.2 and a release-following deployer (1.6.0)
+## Status v5.2 and a release-following deployer (1.6.0)
 
 Status downloads moved to versioned GitHub Releases with verified bytes.
 `--status-pkg` builds require a single-entry checksum file, missing verification

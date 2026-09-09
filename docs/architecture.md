@@ -159,6 +159,15 @@ removes it from the flash memory. Nothing is written to UCI or a database, the
 file is not configuration and is never read as such, and the installer neither
 creates nor removes it.
 
+The flash memory survives a reboot and a power cut, which is what it exists for.
+It does **not** survive a `sysupgrade`: OpenWrt's default keep list covers
+`/etc/config/` but not this file, so an upgrade preserves the pin and loses the
+address until the device peers once more. Adding the path to
+`/etc/sysupgrade.conf` closes that gap; the installer does not do it, because
+editing an upgrade policy is not a status page's business. A factory reset
+clears both, and a device that rotates its MAC becomes a different identity with
+no pin, exactly as it does for every other row.
+
 A native address is never probed for presence — reaching it would test the
 overlay, not the LAN — and is never merged into the routed-prefix address set.
 

@@ -89,6 +89,15 @@ class DocumentationTests(unittest.TestCase):
             doc.write_text("# Present\n[ok](#present)\n```text\n[example](missing.md)\n```\n")
             self.assertEqual([], link_errors(doc, root))
 
+    def test_installation_does_not_pin_a_release_digest(self):
+        # A release archive embeds the commit it was built from, so its digest
+        # cannot be known before that commit exists. A pinned digest here can
+        # only ever be a post-release edit, and one of them silently went stale
+        # while still being presented as the way to verify a download. The
+        # documented path fetches the published .sha256 instead.
+        doc = (ROOT / "docs/installation.md").read_text()
+        self.assertNotRegex(doc, r"\b[0-9a-f]{64}\b")
+
     def test_claude_imports_shared_instructions(self):
         self.assertEqual("@AGENTS.md\n", (ROOT / "CLAUDE.md").read_text())
         self.assertTrue((ROOT / "AGENTS.md").is_file())

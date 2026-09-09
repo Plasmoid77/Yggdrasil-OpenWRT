@@ -263,21 +263,42 @@ trusted Ygg client to the router node address.
 
 ## 4. Install the optional LuCI status module
 
+This follows the newest published release, exactly like the automated
+installer. A release archive embeds the commit it was built from, so its digest
+cannot be known before that commit exists; pinning one here would have to be
+edited after every release and would silently rot the day someone forgot.
+
 ```sh
 (
   set -e
+  repo='Plasmoid77/Yggdrasil-OpenWRT'
   work="$(mktemp -d /tmp/ygg-status-install.XXXXXX)"
   trap 'rm -rf "$work"' EXIT
   cd "$work"
-  wget -O yggdrasil-status-v5.2.tar.gz \
-    https://github.com/Plasmoid77/Yggdrasil-OpenWRT/releases/download/status-v5.2/yggdrasil-status-v5.2.tar.gz
-  printf '%s  %s\n' \
-    '49dd2e2c57027b000ce62fa710d48abeb17cbe1ee532dfa0d504d4f2f0041e0a' \
-    'yggdrasil-status-v5.2.tar.gz' | sha256sum -c -
-  tar -xzf yggdrasil-status-v5.2.tar.gz
-  sh yggdrasil-status-v5.2/install.sh
+
+  wget -qO release.json "https://api.github.com/repos/$repo/releases/latest"
+  tag="$(jsonfilter -i release.json -e '@.tag_name')"
+  case "$tag" in
+    status-v[0-9]*) ;;
+    *) echo "unexpected release tag: $tag" >&2; exit 1 ;;
+  esac
+  ver="${tag#status-}"
+  base="https://github.com/$repo/releases/download/$tag"
+
+  wget -O "yggdrasil-status-$ver.tar.gz" "$base/yggdrasil-status-$ver.tar.gz"
+  wget -O checksum "$base/yggdrasil-status-$ver.tar.gz.sha256"
+  sha256sum -c checksum
+
+  tar -xzf "yggdrasil-status-$ver.tar.gz"
+  sh "yggdrasil-status-$ver/install.sh"
 )
 ```
+
+The checksum travels in the same release as the archive, so it catches a
+truncated or corrupted download but is not a defence against a compromised
+release — the same trade-off as the automated installer above. To get an
+independent check, build the package yourself from a reviewed revision and
+compare, or use `--status-pkg` with that build.
 
 Open **Status → Yggdrasil**. Active DHCPv4 clients should appear without
 manual enrollment. The IPv6 column prefers a canonical or observed stable
