@@ -15,7 +15,7 @@
 set -u
 umask 077
 
-VERSION='1.5.2'
+VERSION='1.6.0'
 SELF="${0##*/}"
 # Piped straight from a URL — wget -qO- ... | sh -s -- ... — $0 is the shell, so
 # the banner and the usage text would announce themselves as "sh".
@@ -42,12 +42,18 @@ DNS_DOMAIN='home.arpa'
 DNS_ROUTER='router'
 DNS_HOSTS=''
 STATUS_PKG=''
-# Pin version AND bytes. New releases never change an existing deployer's payload.
-STATUS_VERSION='v5.1'
-STATUS_SHA256='49dd2e2c57027b000ce62fa710d48abeb17cbe1ee532dfa0d504d4f2f0041e0a'
-STATUS_BASE="https://github.com/Plasmoid77/Yggdrasil-OpenWRT/releases/download/status-$STATUS_VERSION"
-# Compatibility mirror for networks that cannot reach GitHub release assets.
-STATUS_FALLBACK_BASE='https://raw.githubusercontent.com/Plasmoid77/Yggdrasil-OpenWRT/f8abee9bab3a5f1be3c91e7e1bdff8047161c8b2/packages'
+# Follow the newest published status release instead of a version baked into
+# this script, so a new module does not require a new deployer. --status-version
+# pins one explicitly. Bytes are always checked against the checksum published
+# beside the archive: that catches truncation and corruption, but the checksum
+# and the archive come from the same release, so it is not a defence against a
+# compromised release. Use --status-pkg with your own verified build when that
+# distinction matters.
+STATUS_VERSION=''
+STATUS_REPO='Plasmoid77/Yggdrasil-OpenWRT'
+STATUS_API="https://api.github.com/repos/$STATUS_REPO/releases/latest"
+STATUS_RELEASE_BASE="https://github.com/$STATUS_REPO/releases/download"
+STATUS_BASE=''
 PRIVATE_KEY_FILE=''
 SUPPLIED_KEY=''
 DRY_RUN=0
@@ -130,6 +136,8 @@ Scope:
   --no-status           Do not install the LuCI status module
   --no-dns              Do not serve <name>.$DNS_DOMAIN over Yggdrasil
   --status-pkg PATH     Install a local tarball; PATH.sha256 is required
+  --status-version VER  Install this status release (e.g. v5.2) instead of the
+                        newest published one
 
 Behaviour:
   -n, --dry-run         Print what would change; touch nothing
@@ -216,6 +224,10 @@ while [ $# -gt 0 ]; do
         --dns-router)  [ $# -ge 2 ] || die "--dns-router needs a value";  DNS_ROUTER="$2";  shift 2 ;;
         --dns-host)    [ $# -ge 2 ] || die "--dns-host needs a value";    add_dns_host "$2"; shift 2 ;;
         --status-pkg)  [ $# -ge 2 ] || die "--status-pkg needs a value";  STATUS_PKG="$2";  shift 2 ;;
+        --status-version)
+            [ $# -ge 2 ] || die "--status-version needs a value"
+            status_valid_version "$2" || die "invalid status version '$2' (expected vMAJOR.MINOR[.PATCH])"
+            STATUS_VERSION="$2"; shift 2 ;;
         --wait)        [ $# -ge 2 ] || die "--wait needs a value";        WAIT_SECS="$2";   shift 2 ;;
         -n|--dry-run)  DRY_RUN=1;          shift ;;
         -y|--yes)      ASSUME_YES=1;       shift ;;
@@ -1019,6 +1031,45 @@ status_fetch() { # $1 = HTTPS URL, $2 = destination
         || curl -fsSL -o "$2" "$1" 2>/dev/null
 }
 
+status_valid_version() { # $1 = candidate version label
+    printf '%s\n' "$1" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(\.(0|[1-9][0-9]*))?$'
+}
+
+# Read exactly one digest from a checksum file. A file naming several artifacts
+# is ambiguous, and a path inside it is never followed.
+status_expected_digest() { # $1 = checksum file
+    [ -r "$1" ] || { warn "required checksum missing: $1"; return 1; }
+    sed_digest="$(awk 'NF { n++; digest=$1 } END { if (n != 1) exit 1; print digest }' "$1")" || {
+        warn "checksum file must contain exactly one entry: $1"
+        return 1
+    }
+    printf '%s\n' "$sed_digest"
+}
+
+# Ask GitHub for the newest published release. Only a status tag in the expected
+# shape is accepted, so a release name can never steer the download path.
+status_resolve_version() {
+    srv_tmp="$(mktemp "${TMPDIR:-/tmp}/ygg-release.XXXXXX")" || return 1
+    if ! status_fetch "$STATUS_API" "$srv_tmp"; then
+        rm -f "$srv_tmp"
+        return 1
+    fi
+    # jsonfilter is a router dependency; the sed path keeps this function usable
+    # on a plain host, and both results go through the same strict validation.
+    if have jsonfilter; then
+        srv_tag="$(jsonfilter -i "$srv_tmp" -e '@.tag_name' 2>/dev/null)"
+    else
+        srv_tag="$(sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$srv_tmp" | head -n 1)"
+    fi
+    rm -f "$srv_tmp"
+    case "$srv_tag" in
+        status-v*) srv_version="${srv_tag#status-}" ;;
+        *) return 1 ;;
+    esac
+    status_valid_version "$srv_version" || return 1
+    printf '%s\n' "$srv_version"
+}
+
 status_verify() { # $1 = tarball, $2 = required SHA-256
     sv_expected="$(printf '%s' "$2" | tr 'A-F' 'a-f')"
     case "$sv_expected" in
@@ -1040,37 +1091,47 @@ status_verify() { # $1 = tarball, $2 = required SHA-256
 status_acquire() { # $1 = destination, $2 = optional checkout package directory
     sa_dest="$1"
     sa_cache="$2"
-    sa_name="yggdrasil-status-$STATUS_VERSION.tar.gz"
+
     if [ -n "$STATUS_PKG" ]; then
         [ -r "$STATUS_PKG" ] || { warn "cannot read $STATUS_PKG"; return 1; }
-        [ -r "$STATUS_PKG.sha256" ] || { warn "required checksum missing: $STATUS_PKG.sha256"; return 1; }
-        # Read one digest, never follow paths supplied by an untrusted checksum file.
-        sa_expected="$(awk 'NF { n++; digest=$1 } END { if (n != 1) exit 1; print digest }' "$STATUS_PKG.sha256")" \
-            || { warn "local checksum file must contain exactly one entry"; return 1; }
+        sa_expected="$(status_expected_digest "$STATUS_PKG.sha256")" || return 1
         cp "$STATUS_PKG" "$sa_dest" || { warn "cannot copy local status package"; return 1; }
         info "using local package $STATUS_PKG"
         status_verify "$sa_dest" "$sa_expected"
         return $?
     fi
 
-    # Preserve offline installs from a checkout, but a cached archive cannot
-    # override the release pin. Custom builds must use --status-pkg explicitly.
+    if [ -z "$STATUS_VERSION" ]; then
+        STATUS_VERSION="$(status_resolve_version)" || {
+            warn "cannot determine the newest status release"
+            warn "  use --status-version VER for a known release, or --status-pkg PATH"
+            return 1
+        }
+        info "newest published status release is $STATUS_VERSION"
+    fi
+
+    sa_name="yggdrasil-status-$STATUS_VERSION.tar.gz"
+    STATUS_BASE="$STATUS_RELEASE_BASE/status-$STATUS_VERSION"
+
+    # Preserve offline installs from a checkout. A cached archive still has to
+    # prove its bytes with its own checksum file; it is not trusted for being
+    # local. Custom builds must use --status-pkg explicitly.
     if [ -r "$sa_cache/$sa_name" ]; then
+        sa_expected="$(status_expected_digest "$sa_cache/$sa_name.sha256")" || return 1
         cp "$sa_cache/$sa_name" "$sa_dest" || { warn "cannot copy cached status package"; return 1; }
-        info "using pinned $STATUS_VERSION from the local checkout"
-        status_verify "$sa_dest" "$STATUS_SHA256"
+        info "using $STATUS_VERSION from the local checkout"
+        status_verify "$sa_dest" "$sa_expected"
         return $?
     fi
 
     info "downloading $STATUS_BASE/$sa_name"
-    if ! status_fetch "$STATUS_BASE/$sa_name" "$sa_dest"; then
-        # Transport fallback only. Same version, same digest, immutable commit;
-        # never downgrade to v5 or silently hide a checksum mismatch.
-        warn "release download unavailable; trying the identical pinned mirror"
-        status_fetch "$STATUS_FALLBACK_BASE/$sa_name" "$sa_dest" \
-            || { warn "neither pinned download is available"; return 1; }
-    fi
-    status_verify "$sa_dest" "$STATUS_SHA256"
+    status_fetch "$STATUS_BASE/$sa_name" "$sa_dest" \
+        || { warn "status package download failed"; return 1; }
+    # No unverified install: without the published checksum this stops here.
+    status_fetch "$STATUS_BASE/$sa_name.sha256" "$sa_dest.sha256" \
+        || { warn "published checksum unavailable - refusing unverified package"; return 1; }
+    sa_expected="$(status_expected_digest "$sa_dest.sha256")" || return 1
+    status_verify "$sa_dest" "$sa_expected"
 }
 
 stage_status() {
@@ -1078,7 +1139,13 @@ stage_status() {
     FAILED_STAGE='LuCI status module'
     step "Stage 7 - LuCI status module"
     if [ "$DRY_RUN" -eq 1 ]; then
-        info "would install verified status module from ${STATUS_PKG:-$STATUS_BASE}"
+        if [ -n "$STATUS_PKG" ]; then
+            info "would install verified status module from $STATUS_PKG"
+        elif [ -n "$STATUS_VERSION" ]; then
+            info "would install verified status module $STATUS_VERSION from $STATUS_RELEASE_BASE"
+        else
+            info "would install the newest published status module from $STATUS_RELEASE_BASE"
+        fi
         return 0
     fi
 

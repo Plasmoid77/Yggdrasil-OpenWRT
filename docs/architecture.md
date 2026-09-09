@@ -366,6 +366,7 @@ config rule 'ygg_dns'
 | apk only | opkg releases are unvalidated and have incompatible assumptions; fail at preflight instead of promising unsupported compatibility |
 | Replace supplied peer list | Idempotent desired state rather than `--add-peers` accumulation |
 | Local `--status-pkg`, no `--status-url` | Local/fork/offline builds do not need another arbitrary download switch |
+| Follow the newest release, no baked-in version | A new status module must not require a new deployer; the resolved tag is strictly validated before it reaches a URL |
 | Restart netifd after new proto packages | Reload alone did not register the new handler in the recorded hardware test |
 | `list server '/home.arpa/'` | Avoid the observed invalid joined dnsmasq `list local` output |
 
