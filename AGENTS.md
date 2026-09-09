@@ -28,8 +28,10 @@ pointers for older links/comments, not competing sources of truth.
 2. Active DHCPv4 leases create dynamic rows; native `config host` creates
    persistence; merge by MAC. NDP only enriches addresses and must not extend
    row lifetime or create persistent history. A remembered Yggdrasil node
-   address is bounded by the same rule: tmpfs only, pruned to existing rows,
-   never extending a row's lifetime and never reaching flash.
+   address is bounded by the same rule: pruned to existing rows and never
+   extending a row's lifetime. Its storage class matches the row's — tmpfs for
+   a lease-backed row, flash only for a `config host` row that already lives on
+   flash, rewritten solely when the address actually changes.
 3. Prefer canonical IPv6, then an **observed** modified EUI-64, then all unique
    observed privacy addresses. Do not invent EUI-64 reachability or force it
    on clients. Only persistent identities may inherit canonical DNS metadata.

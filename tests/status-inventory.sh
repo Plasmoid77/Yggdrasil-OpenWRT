@@ -1,5 +1,5 @@
 #!/bin/sh
-# shellcheck disable=SC2034,SC2317,SC2329
+# shellcheck disable=SC2012,SC2034,SC2317,SC2329
 # Production functions are extracted verbatim; OpenWrt I/O is supplied by fixtures.
 set -eu
 ROOT="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
@@ -18,11 +18,12 @@ load() {
     eval "$body"
 }
 for fn in lower normalize_mac valid_mac valid_hostname valid_ipv4 first_ipv4 \
-    lease_is_active mac_was_emitted remember_emitted_mac find_active_lease_by_mac \
+    lease_is_active mac_was_emitted remember_emitted_mac remember_persistent_mac \
+    find_active_lease_by_mac \
     eui64_ipv6_for_mac append_unique_ipv6 observed_ipv6_for_mac build_known_ipv6 \
     neighbor_recently_reachable probe_online emit_dynamic_leases emit_persistent_host \
     mac_for_neighbor ygg_peer_endpoints ygg_node_rows ygg_node_addresses_for_mac \
-    merge_node_cache save_node_cache ygg_node_is_live \
+    merge_node_cache write_node_memory save_node_cache ygg_node_is_live \
     emit_client rpc_pin rpc_unpin; do load "$fn"; done
 COUNT=0
 run() {
@@ -117,6 +118,8 @@ ygg_node_map() {
 # A remembered address survives exactly as long as the row it belongs to.
 node_memory() {
     NODE_CACHE_FILE="$TMP/nodes"
+    NODE_STORE_FILE="$TMP/nodes.flash"
+    PERSISTENT_MACS=''
     NODE='200:f2ca:2ec4:9077:ed8b:b013:228d:75d0'
     MAC='14:4f:8a:8d:19:77'
     GONE='aa:bb:cc:dd:ee:01'
@@ -154,6 +157,61 @@ node_memory() {
     YGG_NODE_ROWS=''
     merge_node_cache
     eq '' "$YGG_NODE_ROWS"
+}
+
+# A pinned row lives on flash, so its remembered address must too: it has to
+# come back after a reboot wipes tmpfs, and go away when the pin does.
+pinned_node_memory() {
+    NODE_CACHE_FILE="$TMP/pin-nodes"
+    NODE_STORE_FILE="$TMP/pin-nodes.flash"
+    PINNED='14:4f:8a:8d:19:77'
+    LEASED='aa:bb:cc:dd:ee:02'
+    NODE='200:f2ca:2ec4:9077:ed8b:b013:228d:75d0'
+
+    # Both devices peer; only the pinned one reaches the flash memory.
+    YGG_NODE_ROWS="$(printf '%s\n' "$PINNED $NODE 1" "$LEASED 200:cccc::3 1")"
+    merge_node_cache
+    EMITTED_MACS="|$PINNED||$LEASED|"
+    PERSISTENT_MACS="|$PINNED|"
+    save_node_cache
+    eq "$(printf '%s\n' "$PINNED $NODE" "$LEASED 200:cccc::3")" "$(cat "$NODE_CACHE_FILE")"
+    eq "$PINNED $NODE" "$(cat "$NODE_STORE_FILE")"
+
+    # An unchanged run must not rewrite flash: the file is replaced by rename,
+    # so an unchanged inode proves no write happened.
+    INODE="$(ls -i "$NODE_STORE_FILE" | awk '{print $1}')"
+    merge_node_cache
+    save_node_cache
+    eq "$INODE" "$(ls -i "$NODE_STORE_FILE" | awk '{print $1}')"
+
+    # Reboot: tmpfs is gone, the daemon has not seen any peer yet. The pinned
+    # row recovers its address; the lease-backed row is forgotten, as intended.
+    rm -f "$NODE_CACHE_FILE"
+    YGG_NODE_ROWS=''
+    merge_node_cache
+    eq "$PINNED $NODE 0" "$YGG_NODE_ROWS"
+    eq "$NODE" "$(ygg_node_addresses_for_mac "$PINNED")"
+    if ygg_node_is_live "$PINNED"; then fail 'recalled address reported as live'; fi
+    eq '' "$(ygg_node_addresses_for_mac "$LEASED")"
+
+    # The recalled address is written straight back to both memories.
+    EMITTED_MACS="|$PINNED|"
+    save_node_cache
+    eq "$PINNED $NODE" "$(cat "$NODE_CACHE_FILE")"
+
+    # A live observation still wins over the flash memory.
+    YGG_NODE_ROWS="$PINNED 200:aaaa::9 1"
+    merge_node_cache
+    eq "$PINNED 200:aaaa::9 1" "$YGG_NODE_ROWS"
+    save_node_cache
+    eq "$PINNED 200:aaaa::9" "$(cat "$NODE_STORE_FILE")"
+
+    # Unpin: the MAC stops being persistent, so flash forgets it while the
+    # tmpfs memory keeps it for the remaining lease-backed row.
+    PERSISTENT_MACS=''
+    save_node_cache
+    eq '' "$(cat "$NODE_STORE_FILE")"
+    eq "$PINNED 200:aaaa::9" "$(cat "$NODE_CACHE_FILE")"
 }
 
 presence() {
@@ -227,6 +285,7 @@ canonical_guard() {
     CANONICAL_IPV6=stale
     DNS_ALIAS=stale
     EMITTED_MACS=''
+    PERSISTENT_MACS=''
     LOOKED_UP=0
     find_canonical_domain() { LOOKED_UP=1; CANONICAL_IPV6='300:1111:2222:3333::1'; DNS_ALIAS=host.home.arpa; }
     build_known_ipv6() { KNOWN_IPV6="$CANONICAL_IPV6"; }
@@ -238,9 +297,11 @@ canonical_guard() {
     eq 0 "$LOOKED_UP"
     eq '' "$CANONICAL_IPV6"
     eq '' "$DNS_ALIAS"
+    eq '' "$PERSISTENT_MACS"
     emit_client host aa:bb:cc:dd:ee:ff 192.0.2.1 1 200 '' 0 0 0 0
     eq 1 "$LOOKED_UP"
     eq host.home.arpa "$DNS_ALIAS"
+    eq '|aa:bb:cc:dd:ee:ff|' "$PERSISTENT_MACS"
 }
 
 # RPC guard fixtures stop at the UCI boundary: any unexpected mutation fails.
@@ -316,6 +377,7 @@ run 'DHCP expiry boundary and unlimited leases' lease_lifetime
 run 'canonical, observed EUI-64, privacy and foreign-prefix selection' ipv6_selection
 run 'LAN Yggdrasil node addresses correlated by MAC' ygg_node_map
 run 'remembered node addresses live and die with their row' node_memory
+run 'a pinned row keeps its node address across a reboot' pinned_node_memory
 run 'REACHABLE shortcut, ARP, IPv6 and failed presence' presence
 run 'DHCP lifetime, MAC merge and persistent lease-free rows' identity_lifetime
 run 'dynamic hostnames cannot inherit canonical metadata' canonical_guard

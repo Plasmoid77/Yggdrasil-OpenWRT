@@ -66,7 +66,7 @@ hardening, not the current default. Trusted DNS permits TCP/UDP 53 separately.
 | Active `/tmp/dhcp.leases` entry | Dynamic identity, current IPv4 and hostname | Until lease expires/disappears; expiry `0` means unlimited |
 | `/etc/config/dhcp` `config host` | Persistent identity and optional reservation | Until explicit removal; may exist without a lease or IPv4 reservation |
 | Kernel `ip -6 neigh` | Observed IPv6 enrichment matched by MAC | Runtime only; never creates persistence or extends row lifetime |
-| Established Yggdrasil peer link | Native node address of a LAN device running its own daemon | Remembered in tmpfs for exactly the lifetime of the row it belongs to; never creates a row or extends one |
+| Established Yggdrasil peer link | Native node address of a LAN device running its own daemon | Remembered for exactly the lifetime of the row it belongs to, in that row's own storage class; never creates a row or extends one |
 | `config domain` | Optional canonical IPv6 and DNS name | Persistent metadata for an existing persistent identity |
 | Recent reachability / active probes | Online/Offline | A presence result, independent of identity lifetime |
 
@@ -132,19 +132,35 @@ shape. An upstream field rename therefore degrades to shape matching instead of
 silently emptying the column.
 
 A device that stops peering keeps its last known native address. The memory is
-`/tmp/yggdrasil-status-nodes`, a tmpfs file of `<mac> <address>` lines rewritten
-on every inventory pass and pruned to the MACs still emitted, so an address
-lives exactly as long as the row it belongs to — the DHCP lease or `config host`
-still decides that lifetime — and vanishes with it. A fresh observation replaces
-everything remembered for that MAC, so a node that changes its identity is
-corrected as soon as the router sees the new address. `ygg_node_live` reports
-whether the address comes from a current link or from that memory; the LuCI page
-dims a remembered address.
+two files of `<mac> <address>` lines, both rewritten on every inventory pass and
+pruned to the MACs still emitted, so an address lives exactly as long as the row
+it belongs to — the DHCP lease or `config host` still decides that lifetime —
+and vanishes with it. A fresh observation replaces everything remembered for
+that MAC, so a node that changes its identity is corrected as soon as the router
+sees the new address. `ygg_node_live` reports whether the address comes from a
+current link or from that memory; the LuCI page dims a remembered address.
 
-Nothing is written to flash, UCI or a database, and a reboot starts from an
-empty memory. A native address is never probed for presence — reaching it would
-test the overlay, not the LAN — and is never merged into the routed-prefix
-address set.
+The rule is that a row's memory shares that row's storage class, because the
+memory must not outlive the row and must not die before it either:
+
+| File | Covers | Survives a reboot |
+| --- | --- | --- |
+| `/tmp/yggdrasil-status-nodes` | every emitted row | No; a lease-backed row does not survive one either |
+| `/etc/yggdrasil-status-nodes` | only rows backed by a `config host` | Yes, exactly like the `config host` that produced the row |
+
+A pinned device that is switched off when the power fails therefore comes back
+with its node address intact, while a guest's address is forgotten with its
+lease. Precedence on each pass is live observation, then the tmpfs memory, then
+the flash memory. The flash copy is replaced only when its content actually
+changes, so the 15-second poll behind an open LuCI page does not write to flash
+on every tick; a node address changes only when the device changes its key.
+Unpinning a device drops its MAC from the persistent set, so the next pass
+removes it from the flash memory. Nothing is written to UCI or a database, the
+file is not configuration and is never read as such, and the installer neither
+creates nor removes it.
+
+A native address is never probed for presence — reaching it would test the
+overlay, not the LAN — and is never merged into the routed-prefix address set.
 
 ### Presence
 
@@ -354,6 +370,7 @@ config rule 'ygg_dns'
 | Native netifd/UCI/odhcpd/firewall4 | One owner for routing, prefix advertisement and policy; no container or parallel network manager |
 | SLAAC rather than stateful DHCPv6 | Ordinary IPv6 clients form their own addresses; do not assume universal EUI-64 support |
 | DHCP lease lifetime plus `config host` persistence | Guests disappear naturally; no custom TTL, history DB or cron cleanup |
+| A row's remembered node address stored like the row itself | A pinned row survives a reboot, so its address must too; a lease-backed one must not. Storage class follows row lifetime instead of a blanket "never touch flash" rule |
 | MAC-centric identity | Changing IP/privacy addresses do not create separate device identities; randomized MACs still do |
 | NDP enrichment, not `getHostHints` authority | Neighbor churn must not erase persistent identities or preserve expired guests |
 | Native `config domain` | Shared canonical address/DNS metadata without custom `option ygg_ipv6`, a new UCI inventory file, generated hosts file or resolver |

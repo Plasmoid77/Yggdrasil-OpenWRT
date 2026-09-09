@@ -12,8 +12,10 @@
 #   - active DHCPv4 lease -> dynamic row for exactly the lease lifetime
 #   - neighbour entries   -> stable-first runtime IPv6 enrichment; never persisted
 #   - Yggdrasil peer link -> native node address of a LAN device that runs its
-#                            own daemon; remembered in tmpfs for exactly as
-#                            long as the row itself lives
+#                            own daemon; remembered for exactly as long as the
+#                            row itself lives, in the same storage class as the
+#                            row: tmpfs for a lease-backed row, flash for a
+#                            config-host row that already survives a reboot
 #   - config domain       -> optional canonical Ygg IPv6 + DNS alias
 #
 # Management model:
@@ -29,7 +31,8 @@
 # No daemon.
 # No cron.
 # No DB.
-# No cache that outlives the rows it belongs to, and none on flash.
+# No cache that outlives the rows it belongs to. A row's memory shares that
+# row's storage class, so it can never survive longer than the row does.
 # No getHostHints as inventory source.
 #
 
@@ -43,6 +46,7 @@ DHCP_CONFIG='/etc/config/dhcp'
 PIN_SECTION_PREFIX='ygg_status_'
 DHCP_LOCK_FILE='/var/lock/yggdrasil-status-dhcp.lock'
 NODE_CACHE_FILE='/tmp/yggdrasil-status-nodes'
+NODE_STORE_FILE='/etc/yggdrasil-status-nodes'
 
 
 lower() {
@@ -123,6 +127,15 @@ remember_emitted_mac() {
 	local rem_mac
 	rem_mac="$(normalize_mac "$1")"
 	EMITTED_MACS="${EMITTED_MACS}|${rem_mac}|"
+}
+
+
+# The subset of emitted MACs whose row came from a config host. Those rows are
+# stored on flash themselves, so their remembered node address may be too.
+remember_persistent_mac() {
+	local rpm_mac
+	rpm_mac="$(normalize_mac "$1")"
+	PERSISTENT_MACS="${PERSISTENT_MACS}|${rpm_mac}|"
 }
 
 
@@ -580,15 +593,35 @@ collect_ygg_nodes() {
 
 # Keep the last known node address of a device that is not peering right now.
 #
-# The memory lives in tmpfs, is keyed by the same MAC the table merges on, and
-# is pruned to the rows that still exist, so an address survives exactly as long
-# as its device's row does and disappears with it. A fresh observation replaces
-# everything remembered for that MAC, so a node that changes its address is
-# corrected as soon as the router sees the new one.
+# The memory is keyed by the same MAC the table merges on and is pruned to the
+# rows that still exist, so an address survives exactly as long as its device's
+# row does and disappears with it. It is split across two files so that it also
+# does not die *before* the row: tmpfs for a lease-backed row, flash for a
+# config-host row that survives a reboot on its own.
+#
+# This replays both memories over the peers observed in this run. Precedence is
+# live observation, then tmpfs, then flash, so a device that is peering right
+# now always overrides whatever was remembered about it, and a node that changes
+# its address is corrected as soon as the router sees the new one.
 merge_node_cache() {
 	YGG_NODE_ROWS="$(
 		printf '%s\n' "$YGG_NODE_ROWS" |
-			awk -v cache="$NODE_CACHE_FILE" '
+			awk -v cache="$NODE_CACHE_FILE" -v store="$NODE_STORE_FILE" '
+			function replay(file,   line, remembered) {
+				while ((getline line < file) > 0) {
+					split(line, remembered, " ")
+
+					if (remembered[1] == "" || remembered[2] == "")
+						continue
+
+					if (remembered[1] in live || remembered[1] in recalled)
+						continue
+
+					recalled[remembered[1]] = 1
+					print remembered[1] " " remembered[2] " 0"
+				}
+			}
+
 			NF == 3 {
 				live[$1] = 1
 				print
@@ -596,36 +629,51 @@ merge_node_cache() {
 			}
 
 			END {
-				while ((getline line < cache) > 0) {
-					split(line, remembered, " ")
-
-					if (remembered[1] == "" || remembered[2] == "")
-						continue
-
-					if (remembered[1] in live)
-						continue
-
-					print remembered[1] " " remembered[2] " 0"
-				}
+				replay(cache)
+				replay(store)
 			}
 		'
 	)"
 }
 
 
-save_node_cache() {
-	local snc_temp="${NODE_CACHE_FILE}.$$"
+# Rewrite one memory file with the remembered address of every MAC in the given
+# list. The file is replaced only when its content actually changes, so the
+# 15-second poll behind an open LuCI tab never writes to flash on every tick.
+write_node_memory() {
+	local wnm_file="$1"
+	local wnm_macs="$2"
+	local wnm_wanted wnm_current wnm_temp
 
-	if ! printf '%s\n' "$YGG_NODE_ROWS" |
-		awk -v emitted="$EMITTED_MACS" '
-			NF == 3 && index(emitted, "|" $1 "|") > 0 { print $1 " " $2 }
-		' > "$snc_temp" 2>/dev/null
-	then
-		rm -f "$snc_temp"
+	wnm_wanted="$(
+		printf '%s\n' "$YGG_NODE_ROWS" |
+			awk -v macs="$wnm_macs" '
+				NF == 3 && index(macs, "|" $1 "|") > 0 { print $1 " " $2 }
+			'
+	)" || return 0
+
+	wnm_current="$(cat "$wnm_file" 2>/dev/null)"
+	[ "$wnm_wanted" = "$wnm_current" ] && return 0
+
+	[ -n "$wnm_wanted" ] && wnm_wanted="${wnm_wanted}
+"
+
+	wnm_temp="${wnm_file}.$$"
+	if ! printf '%s' "$wnm_wanted" > "$wnm_temp" 2>/dev/null; then
+		rm -f "$wnm_temp"
 		return 0
 	fi
 
-	mv "$snc_temp" "$NODE_CACHE_FILE" 2>/dev/null || rm -f "$snc_temp"
+	mv "$wnm_temp" "$wnm_file" 2>/dev/null || rm -f "$wnm_temp"
+}
+
+
+# Prune both memories to the rows that were actually emitted, so neither can
+# outlive them: the tmpfs copy covers every row, the flash copy only the
+# config-host rows that survive a reboot on their own.
+save_node_cache() {
+	write_node_memory "$NODE_CACHE_FILE" "$EMITTED_MACS"
+	write_node_memory "$NODE_STORE_FILE" "$PERSISTENT_MACS"
 }
 
 
@@ -829,6 +877,10 @@ emit_client() {
 	json_close_object
 
 	remember_emitted_mac "$ec_mac"
+
+	if [ "$ec_persistent" -eq 1 ]; then
+		remember_persistent_mac "$ec_mac"
+	fi
 }
 
 
@@ -914,6 +966,7 @@ rpc_clients() {
 	collect_ygg_nodes
 	merge_node_cache
 	EMITTED_MACS=''
+	PERSISTENT_MACS=''
 
 	acquire_dhcp_lock shared || true
 	config_load dhcp

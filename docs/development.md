@@ -27,6 +27,7 @@ Do not call that a full pass or merge without the complete CI check.
 | JSON and LuCI JavaScript syntax | ACL/menu and frontend |
 | Secret handling | Existing deployer stdin, environment, validation, redaction and umask regressions |
 | Inventory fixtures | DHCP expiry including unlimited leases; MAC deduplication and persistent lease-free rows; canonical/EUI-64/privacy selection; foreign prefix/MAC filtering; canonical identity guard |
+| Node-address memory fixtures | Peer-to-MAC correlation and upstream field renames; recall and pruning with the row; a pinned row recovering its address after a reboot wipes tmpfs; no flash rewrite when the address is unchanged |
 | Presence fixtures | REACHABLE shortcut, ARP success, IPv6 success, failure |
 | Mutation guards | Pin existing/expired/pending/busy; Unpin duplicate/shared/complex/static-confirmation/pending/busy |
 | Documentation | Local Markdown links and heading fragments, shared Claude instructions |
