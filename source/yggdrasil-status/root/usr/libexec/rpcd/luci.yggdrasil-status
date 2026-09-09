@@ -11,6 +11,9 @@
 #   - config host         -> persistent row
 #   - active DHCPv4 lease -> dynamic row for exactly the lease lifetime
 #   - neighbour entries   -> stable-first runtime IPv6 enrichment; never persisted
+#   - Yggdrasil peer link -> native node address of a LAN device that runs its
+#                            own daemon; remembered in tmpfs for exactly as
+#                            long as the row itself lives
 #   - config domain       -> optional canonical Ygg IPv6 + DNS alias
 #
 # Management model:
@@ -26,7 +29,7 @@
 # No daemon.
 # No cron.
 # No DB.
-# No persistent runtime cache.
+# No cache that outlives the rows it belongs to, and none on flash.
 # No getHostHints as inventory source.
 #
 
@@ -39,6 +42,7 @@ LEASE_FILE='/tmp/dhcp.leases'
 DHCP_CONFIG='/etc/config/dhcp'
 PIN_SECTION_PREFIX='ygg_status_'
 DHCP_LOCK_FILE='/var/lock/yggdrasil-status-dhcp.lock'
+NODE_CACHE_FILE='/tmp/yggdrasil-status-nodes'
 
 
 lower() {
@@ -407,6 +411,247 @@ observed_ipv6_for_mac() {
 }
 
 
+# Resolve a LAN neighbour address to its MAC. Used to attribute a Yggdrasil
+# peer link to a device this inventory already knows by MAC.
+mac_for_neighbor() {
+	local mfn_addr="$1"
+
+	case "$mfn_addr" in
+		*:*) ip -6 neigh show to "$mfn_addr" dev "$LAN_DEV" 2>/dev/null ;;
+		*)   ip neigh show to "$mfn_addr" dev "$LAN_DEV" 2>/dev/null ;;
+	esac | awk '
+		{
+			for (i = 1; i <= NF; i++) {
+				if ($i == "lladdr" && (i + 1) <= NF) {
+					print tolower($(i + 1))
+					exit
+				}
+			}
+		}
+	'
+}
+
+
+# Emit "<peer-endpoint-address> <native-node-address>" for every established
+# peer link whose transport endpoint is on this LAN.
+#
+# A LAN device running its own daemon peers with the router, normally through
+# multicast discovery, so the peer URI carries that device's link-local address
+# with the LAN device as its zone (percent-encoded), or its LAN IP for an
+# explicitly configured peering. Non-literal and off-LAN endpoints are dropped
+# here because they cannot belong to a LAN client row.
+ygg_peer_endpoints() {
+	yggdrasilctl -endpoint="unix:///tmp/yggdrasil/${YGG_NET}.sock" \
+		-json getPeers 2>/dev/null |
+		jsonfilter -e '@.peers[*]' 2>/dev/null |
+		awk -v dev="$LAN_DEV" '
+		# Every "name": "value" pair of one peer object.
+		function parse_pairs(line,   rest, pair, name, value) {
+			pair_count = 0
+			rest = line
+
+			while (match(rest, /"[A-Za-z_][A-Za-z0-9_]*"[ \t]*:[ \t]*"[^"]*"/) > 0) {
+				pair = substr(rest, RSTART, RLENGTH)
+				rest = substr(rest, RSTART + RLENGTH)
+
+				name = pair
+				sub(/"[ \t]*:.*$/, "", name)
+				sub(/^"/, "", name)
+
+				value = pair
+				sub(/^"[A-Za-z_][A-Za-z0-9_]*"[ \t]*:[ \t]*"/, "", value)
+				sub(/"$/, "", value)
+				gsub(/\\\//, "/", value)
+
+				pair_count++
+				pair_name[pair_count] = name
+				pair_value[pair_count] = value
+			}
+		}
+
+		function named(wanted,   want, i, j) {
+			split(wanted, want, " ")
+
+			for (j = 1; j in want; j++)
+				for (i = 1; i <= pair_count; i++)
+					if (pair_name[i] == want[j] && pair_value[i] != "")
+						return pair_value[i]
+
+			return ""
+		}
+
+		function shaped(pattern,   i) {
+			for (i = 1; i <= pair_count; i++)
+				if (pair_value[i] ~ pattern)
+					return pair_value[i]
+
+			return ""
+		}
+
+		# A field is read by name when the name is one this code knows, and by
+		# shape otherwise: a transport URI and a 0200::/8 node address are both
+		# unambiguous on sight. Upstream has renamed these fields before, so a
+		# rename must degrade to shape matching, never to an empty column.
+		{
+			if ($0 ~ /"up"[ \t]*:[ \t]*false/)
+				next
+
+			parse_pairs($0)
+
+			remote = named("remote endpoint uri url")
+			if (remote !~ /:\/\//)
+				remote = shaped("^[A-Za-z0-9.+-]+://")
+
+			address = named("address ip ipv6 addr")
+			if (address !~ /^0?2[0-9a-fA-F][0-9a-fA-F]:/)
+				address = shaped("^0?2[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F:]+$")
+
+			if (remote == "" || address == "")
+				next
+
+			sub(/^[A-Za-z0-9.+-]+:\/\//, "", remote)
+
+			if (substr(remote, 1, 1) == "[") {
+				end = index(remote, "]")
+				if (end < 3)
+					next
+				host = substr(remote, 2, end - 2)
+			}
+			else {
+				host = remote
+				sub(/:[0-9]+$/, "", host)
+			}
+
+			gsub(/%25/, "%", host)
+			zone = ""
+			separator = index(host, "%")
+			if (separator > 0) {
+				zone = substr(host, separator + 1)
+				host = substr(host, 1, separator - 1)
+			}
+
+			if (zone != "" && zone != dev)
+				next
+
+			if (host !~ /:/ && host !~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/)
+				next
+
+			if (host ~ /[^0-9A-Fa-f:.]/)
+				next
+
+			print tolower(host) " " tolower(address)
+		}
+	'
+}
+
+
+# "<mac> <native-node-address>" for each LAN peer link, deduplicated: a device
+# normally appears twice, once inbound and once outbound.
+ygg_node_rows() {
+	local ynr_host ynr_address ynr_mac
+
+	ygg_peer_endpoints |
+		while read -r ynr_host ynr_address; do
+			[ -n "$ynr_host" ] || continue
+
+			ynr_mac="$(mac_for_neighbor "$ynr_host")"
+			valid_mac "$ynr_mac" || continue
+
+			printf '%s %s 1\n' "$ynr_mac" "$ynr_address"
+		done |
+		awk '!seen[$0]++'
+}
+
+
+# Native node addresses of LAN devices that run Yggdrasil themselves, keyed by
+# MAC. Runtime enrichment exactly like NDP: it never creates a row, never
+# extends a row lifetime and is never persisted.
+collect_ygg_nodes() {
+	YGG_NODE_ROWS=''
+
+	[ -n "$YGG_NET" ] || return 0
+	[ -S "/tmp/yggdrasil/${YGG_NET}.sock" ] || return 0
+	command -v yggdrasilctl >/dev/null 2>&1 || return 0
+	command -v jsonfilter >/dev/null 2>&1 || return 0
+
+	YGG_NODE_ROWS="$(ygg_node_rows)"
+}
+
+
+# Keep the last known node address of a device that is not peering right now.
+#
+# The memory lives in tmpfs, is keyed by the same MAC the table merges on, and
+# is pruned to the rows that still exist, so an address survives exactly as long
+# as its device's row does and disappears with it. A fresh observation replaces
+# everything remembered for that MAC, so a node that changes its address is
+# corrected as soon as the router sees the new one.
+merge_node_cache() {
+	YGG_NODE_ROWS="$(
+		printf '%s\n' "$YGG_NODE_ROWS" |
+			awk -v cache="$NODE_CACHE_FILE" '
+			NF == 3 {
+				live[$1] = 1
+				print
+				next
+			}
+
+			END {
+				while ((getline line < cache) > 0) {
+					split(line, remembered, " ")
+
+					if (remembered[1] == "" || remembered[2] == "")
+						continue
+
+					if (remembered[1] in live)
+						continue
+
+					print remembered[1] " " remembered[2] " 0"
+				}
+			}
+		'
+	)"
+}
+
+
+save_node_cache() {
+	local snc_temp="${NODE_CACHE_FILE}.$$"
+
+	if ! printf '%s\n' "$YGG_NODE_ROWS" |
+		awk -v emitted="$EMITTED_MACS" '
+			NF == 3 && index(emitted, "|" $1 "|") > 0 { print $1 " " $2 }
+		' > "$snc_temp" 2>/dev/null
+	then
+		rm -f "$snc_temp"
+		return 0
+	fi
+
+	mv "$snc_temp" "$NODE_CACHE_FILE" 2>/dev/null || rm -f "$snc_temp"
+}
+
+
+ygg_node_is_live() {
+	local ynl_wanted
+	ynl_wanted="$(normalize_mac "$1")"
+
+	printf '%s\n' "$YGG_NODE_ROWS" |
+		awk -v wanted="$ynl_wanted" '
+			$1 == wanted && $3 == 1 { found = 1 }
+			END { exit found ? 0 : 1 }
+		'
+}
+
+
+ygg_node_addresses_for_mac() {
+	local yna_wanted
+	yna_wanted="$(normalize_mac "$1")"
+
+	[ -n "$YGG_NODE_ROWS" ] || return 0
+
+	printf '%s\n' "$YGG_NODE_ROWS" |
+		awk -v wanted="$yna_wanted" '$1 == wanted { print $2 }'
+}
+
+
 eui64_ipv6_for_mac() {
 	local e64_mac e64_old_ifs e64_first
 
@@ -514,6 +759,7 @@ emit_client() {
 	local ec_ambiguous_host="${10}"
 	local ec_online=0
 	local ec_primary_ipv6=''
+	local ec_node_addresses ec_node_primary ec_node_live=0
 	local ec_addr ec_protected_host=0
 
 	[ -n "$ec_mac" ] || return 0
@@ -533,6 +779,15 @@ emit_client() {
 	ec_primary_ipv6="$CANONICAL_IPV6"
 	[ -n "$ec_primary_ipv6" ] || ec_primary_ipv6="${KNOWN_IPV6%% *}"
 
+	# A native node address identifies a self-contained Yggdrasil machine. It
+	# is reported separately from the routed-prefix LAN addresses and is never
+	# probed for presence: reaching it would test the overlay, not the LAN.
+	ec_node_addresses="$(ygg_node_addresses_for_mac "$ec_mac")"
+	ec_node_primary="$(printf '%s' "$ec_node_addresses" | head -n 1)"
+	if [ -n "$ec_node_primary" ] && ygg_node_is_live "$ec_mac"; then
+		ec_node_live=1
+	fi
+
 	if probe_online "$ec_ipv4"; then
 		ec_online=1
 	fi
@@ -548,6 +803,14 @@ emit_client() {
 		json_add_string "" "$ec_addr"
 	done
 	json_close_array
+	json_add_string ygg_node_ipv6 "$ec_node_primary"
+	json_add_array ygg_node_addresses
+	for ec_addr in $ec_node_addresses; do
+		json_add_string "" "$ec_addr"
+	done
+	json_close_array
+	json_add_int ygg_node "$([ -n "$ec_node_primary" ] && echo 1 || echo 0)"
+	json_add_int ygg_node_live "$ec_node_live"
 	json_add_string dns "$DNS_ALIAS"
 	json_add_int online "$ec_online"
 	json_add_int persistent "$ec_persistent"
@@ -648,6 +911,8 @@ rpc_clients() {
 	config_load network
 	config_foreach select_ygg_network interface
 	LAN_YGG_PREFIX="$(find_lan_ygg_prefix)"
+	collect_ygg_nodes
+	merge_node_cache
 	EMITTED_MACS=''
 
 	acquire_dhcp_lock shared || true
@@ -658,6 +923,7 @@ rpc_clients() {
 	emit_dynamic_leases
 	config_foreach emit_persistent_host host
 	json_close_array
+	save_node_cache
 	json_dump
 }
 

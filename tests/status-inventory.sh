@@ -21,6 +21,8 @@ for fn in lower normalize_mac valid_mac valid_hostname valid_ipv4 first_ipv4 \
     lease_is_active mac_was_emitted remember_emitted_mac find_active_lease_by_mac \
     eui64_ipv6_for_mac append_unique_ipv6 observed_ipv6_for_mac build_known_ipv6 \
     neighbor_recently_reachable probe_online emit_dynamic_leases emit_persistent_host \
+    mac_for_neighbor ygg_peer_endpoints ygg_node_rows ygg_node_addresses_for_mac \
+    merge_node_cache save_node_cache ygg_node_is_live \
     emit_client rpc_pin rpc_unpin; do load "$fn"; done
 COUNT=0
 run() {
@@ -64,6 +66,94 @@ $PRIVACY lladdr $MAC REACHABLE
     NEIGHBORS=''
     build_known_ipv6 "$MAC"
     eq '' "$KNOWN_IPV6"
+}
+
+# A LAN device running its own daemon peers with the router. Only an established
+# link whose transport endpoint is a literal address on this LAN can be
+# attributed to a client row.
+ygg_node_map() {
+    LAN_DEV=br-lan
+    YGG_NET=ygg0
+    LAN_PEER='fe80::5839:1d8e:ec3b:eea8'
+    NODE='200:f2ca:2ec4:9077:ed8b:b013:228d:75d0'
+    PEERS='{ "remote": "tls:\/\/ygg-msk-1.example.net:8362", "up": true, "address": "20a:5fad::e155:42:290b:d6b5" }
+{ "remote": "tls:\/\/['"$LAN_PEER"'%25br-lan]:39767", "up": true, "inbound": false, "address": "'"$NODE"'" }
+{ "remote": "tls:\/\/['"$LAN_PEER"'%25br-lan]:42041", "up": true, "inbound": true, "address": "200:F2CA:2EC4:9077:ED8B:B013:228D:75D0" }
+{ "remote": "tls:\/\/[fe80::dead:beef%25wg0]:1234", "up": true, "address": "201:aaaa::1" }
+{ "remote": "tcp:\/\/192.168.1.50:9001", "up": true, "address": "203:bbbb::2" }
+{ "remote": "tcp:\/\/192.168.1.77:9001", "up": true, "address": "205:eeee::5" }
+{ "remote": "tls:\/\/['"$LAN_PEER"'%25br-lan]:5000", "up": false, "address": "204:cccc::3" }'
+    # The production pipeline is yggdrasilctl | jsonfilter | awk.
+    yggdrasilctl() { printf '%s\n' "$PEERS"; }
+    jsonfilter() { cat; }
+    ip() {
+        case "$*" in
+            *"to $LAN_PEER dev"*) echo "$LAN_PEER lladdr 14:4F:8A:8D:19:77 router STALE" ;;
+            *'to 192.168.1.50 dev'*) echo '192.168.1.50 dev br-lan lladdr aa:bb:cc:dd:ee:01 REACHABLE' ;;
+            *) : ;;
+        esac
+    }
+    eq "$(printf '%s\n' \
+        "$LAN_PEER $NODE" \
+        "$LAN_PEER $NODE" \
+        '192.168.1.50 203:bbbb::2' \
+        '192.168.1.77 205:eeee::5')" "$(ygg_peer_endpoints)"
+    YGG_NODE_ROWS="$(ygg_node_rows)"
+    eq "$(printf '%s\n' \
+        "14:4f:8a:8d:19:77 $NODE 1" \
+        'aa:bb:cc:dd:ee:01 203:bbbb::2 1')" "$YGG_NODE_ROWS"
+    eq "$NODE" "$(ygg_node_addresses_for_mac 14:4F:8A:8D:19:77)"
+    eq '' "$(ygg_node_addresses_for_mac 2a:32:f9:81:71:23)"
+    YGG_NODE_ROWS=''
+    eq '' "$(ygg_node_addresses_for_mac 14:4f:8a:8d:19:77)"
+
+    # An upstream rename must degrade to shape matching, not to an empty column.
+    PEERS='{ "endpoint": "tls:\/\/['"$LAN_PEER"'%25br-lan]:39767", "up": true, "ip": "'"$NODE"'" }'
+    eq "$LAN_PEER $NODE" "$(ygg_peer_endpoints)"
+    PEERS='{ "somethingelse": "tls:\/\/['"$LAN_PEER"'%25br-lan]:39767", "up": true, "whatever": "'"$NODE"'", "key": "9648f51ce4bcd53700bf21a8a2878703f6e05ce7133ce89a770f79e667d0256c", "last_error": "read tcp 10.0.0.1:1-\u003e10.0.0.2:2: i\/o timeout" }'
+    eq "$LAN_PEER $NODE" "$(ygg_peer_endpoints)"
+}
+
+# A remembered address survives exactly as long as the row it belongs to.
+node_memory() {
+    NODE_CACHE_FILE="$TMP/nodes"
+    NODE='200:f2ca:2ec4:9077:ed8b:b013:228d:75d0'
+    MAC='14:4f:8a:8d:19:77'
+    GONE='aa:bb:cc:dd:ee:01'
+
+    # First pass: two peering devices are observed live and remembered.
+    YGG_NODE_ROWS="$(printf '%s\n' "$MAC $NODE 1" "$GONE 203:bbbb::2 1")"
+    merge_node_cache
+    EMITTED_MACS="|$MAC||$GONE|"
+    save_node_cache
+    eq "$(printf '%s\n' "$MAC $NODE" "$GONE 203:bbbb::2")" "$(cat "$NODE_CACHE_FILE")"
+
+    # Second pass: neither device is peering, both rows still exist.
+    YGG_NODE_ROWS=''
+    merge_node_cache
+    eq "$(printf '%s\n' "$MAC $NODE 0" "$GONE 203:bbbb::2 0")" "$YGG_NODE_ROWS"
+    eq "$NODE" "$(ygg_node_addresses_for_mac "$MAC")"
+    if ygg_node_is_live "$MAC"; then fail 'remembered address reported as live'; fi
+
+    # The row for one device disappears; its memory is pruned with it.
+    EMITTED_MACS="|$MAC|"
+    save_node_cache
+    eq "$MAC $NODE" "$(cat "$NODE_CACHE_FILE")"
+
+    # A fresh observation replaces everything remembered for that MAC.
+    YGG_NODE_ROWS="$MAC 200:aaaa::9 1"
+    merge_node_cache
+    eq "$MAC 200:aaaa::9 1" "$YGG_NODE_ROWS"
+    eq '200:aaaa::9' "$(ygg_node_addresses_for_mac "$MAC")"
+    ygg_node_is_live "$MAC" || fail 'fresh observation not reported as live'
+    save_node_cache
+    eq "$MAC 200:aaaa::9" "$(cat "$NODE_CACHE_FILE")"
+
+    # A missing cache file is an empty memory, not an error.
+    rm -f "$NODE_CACHE_FILE"
+    YGG_NODE_ROWS=''
+    merge_node_cache
+    eq '' "$YGG_NODE_ROWS"
 }
 
 presence() {
@@ -132,6 +222,8 @@ LEASES
 }
 
 canonical_guard() {
+    YGG_NODE_ROWS=''
+    ygg_node_is_live() { return 1; }
     CANONICAL_IPV6=stale
     DNS_ALIAS=stale
     EMITTED_MACS=''
@@ -222,6 +314,8 @@ pin_guards() {
 
 run 'DHCP expiry boundary and unlimited leases' lease_lifetime
 run 'canonical, observed EUI-64, privacy and foreign-prefix selection' ipv6_selection
+run 'LAN Yggdrasil node addresses correlated by MAC' ygg_node_map
+run 'remembered node addresses live and die with their row' node_memory
 run 'REACHABLE shortcut, ARP, IPv6 and failed presence' presence
 run 'DHCP lifetime, MAC merge and persistent lease-free rows' identity_lifetime
 run 'dynamic hostnames cannot inherit canonical metadata' canonical_guard
