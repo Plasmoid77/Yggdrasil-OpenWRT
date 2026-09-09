@@ -17,7 +17,8 @@ extract() {
 # Load actual distribution pins, then real functions. Missing new helpers are
 # tolerated here so the first regression also runs against the old deployer.
 eval "$(sed -n '/^STATUS_[A-Z0-9_]*=/p' "$SCRIPT")"
-for fn in status_fetch status_verify status_acquire stage_status; do
+for fn in status_valid_version status_expected_digest status_resolve_version \
+    status_fetch status_verify status_acquire stage_status; do
     eval "$(extract "$fn")"
 done
 info() { printf '%s\n' "$*" >> "$TMP/messages"; }
@@ -31,29 +32,37 @@ pass() { echo "PASS: $*"; }
 
 if [ "${1:-}" = '--live' ]; then
     # No shell stubs for network/verification, no archive extraction or install.
-    status_fetch "$STATUS_BASE/yggdrasil-status-$STATUS_VERSION.tar.gz" "$TMP/release.tar.gz"
-    status_verify "$TMP/release.tar.gz" "$STATUS_SHA256"
-    status_fetch "$STATUS_FALLBACK_BASE/yggdrasil-status-$STATUS_VERSION.tar.gz" "$TMP/mirror.tar.gz"
-    status_verify "$TMP/mirror.tar.gz" "$STATUS_SHA256"
-    cmp "$TMP/release.tar.gz" "$TMP/mirror.tar.gz"
-    if [ -r "$ROOT/packages/yggdrasil-status-$STATUS_VERSION.tar.gz" ]; then
-        cmp "$ROOT/packages/yggdrasil-status-$STATUS_VERSION.tar.gz" "$TMP/release.tar.gz"
+    LIVE_VERSION="$(status_resolve_version)" || fail 'could not resolve the newest status release'
+    status_valid_version "$LIVE_VERSION" || fail 'resolved version is not a valid label'
+    LIVE_BASE="$STATUS_RELEASE_BASE/status-$LIVE_VERSION"
+    LIVE_NAME="yggdrasil-status-$LIVE_VERSION.tar.gz"
+    status_fetch "$LIVE_BASE/$LIVE_NAME" "$TMP/release.tar.gz" || fail 'release asset download failed'
+    status_fetch "$LIVE_BASE/$LIVE_NAME.sha256" "$TMP/release.sha256" || fail 'published checksum download failed'
+    LIVE_SHA="$(status_expected_digest "$TMP/release.sha256")" || fail 'published checksum is not a single entry'
+    status_verify "$TMP/release.tar.gz" "$LIVE_SHA" || fail 'published archive does not match its published checksum'
+    if [ -r "$ROOT/packages/$LIVE_NAME" ]; then
+        cmp "$ROOT/packages/$LIVE_NAME" "$TMP/release.tar.gz" \
+            || fail 'preserved archive differs from the published release of the same version'
     fi
-    pass 'public release, immutable mirror and legacy archive are identical'
+    pass "newest published release $LIVE_VERSION resolves and matches its published checksum"
     exit 0
 fi
 
-if [ -r "$ROOT/packages/yggdrasil-status-$STATUS_VERSION.tar.gz" ]; then
-    status_verify "$ROOT/packages/yggdrasil-status-$STATUS_VERSION.tar.gz" "$STATUS_SHA256" \
-        || fail 'embedded pin disagrees with the preserved package'
-fi
-case "$STATUS_BASE" in
-    */releases/download/status-"$STATUS_VERSION") : ;;
-    *) fail 'default URL is not a versioned release' ;;
+[ -z "$STATUS_VERSION" ] || fail 'deployer still ships a hardcoded status version'
+status_valid_version v5.2 || fail 'valid version rejected'
+status_valid_version v5.2.1 || fail 'valid patch version rejected'
+for bad in 'v5.2; rm -rf /' '../../etc' 'v05.2' 'status-v5.2' '' 'v5'; do
+    if status_valid_version "$bad"; then fail "unsafe version accepted: [$bad]"; fi
+done
+case "$STATUS_RELEASE_BASE" in
+    https://github.com/*/releases/download) : ;;
+    *) fail 'release base is not a GitHub releases download path' ;;
 esac
-printf '%s\n' "$STATUS_FALLBACK_BASE" | grep -Eq '/[0-9a-f]{40}/packages$' \
-    || fail 'mirror URL is not pinned to a commit'
-pass 'real release pins agree with the preserved distribution'
+case "$STATUS_API" in
+    https://api.github.com/repos/*/releases/latest) : ;;
+    *) fail 'release lookup is not the releases/latest endpoint' ;;
+esac
+pass 'version tracking is dynamic, strictly validated and path-safe'
 
 mkdir -p "$TMP/payload/module" "$TMP/work"
 INSTALL_MARKER="$TMP/installed"
@@ -105,51 +114,83 @@ pass 'verified but invalid archive is not installed and is cleaned'
 
 FETCH_LOG="$TMP/fetches"
 SCENARIO='release'
+API_TAG='status-v9.9'
+GOOD_SHA="$(sha256sum "$TMP/good.tar.gz" | awk '{print $1}')"
+REL="$STATUS_RELEASE_BASE/status-v9.9/yggdrasil-status-v9.9.tar.gz"
 status_fetch() {
     printf '%s\n' "$1" >> "$FETCH_LOG"
     case "$SCENARIO:$1" in
-        release:*) cp "$TMP/good.tar.gz" "$2" ;;
-        mirror:"$STATUS_BASE"/*) printf 'partial\n' > "$2"; return 1 ;;
-        mirror:"$STATUS_FALLBACK_BASE"/*) cp "$TMP/good.tar.gz" "$2" ;;
-        corrupt:*) cp "$TMP/corrupt.tar.gz" "$2" ;;
-        down:*) return 1 ;;
+        *:"$STATUS_API")           printf '{"tag_name":"%s","draft":false}\n' "$API_TAG" > "$2" ;;
+        noapi:*)                   return 1 ;;
+        nosum:*.tar.gz.sha256)     return 1 ;;
+        badsum:*.tar.gz.sha256)    printf '%s  a\n%s  b\n' "$GOOD_SHA" "$GOOD_SHA" > "$2" ;;
+        wrongsum:*.tar.gz.sha256)  printf '%064d  x\n' 0 > "$2" ;;
+        down:*.tar.gz)             return 1 ;;
+        corrupt:*.tar.gz)          cp "$TMP/corrupt.tar.gz" "$2" ;;
+        *:*.tar.gz.sha256)         printf '%s  x\n' "$GOOD_SHA" > "$2" ;;
+        *:*.tar.gz)                cp "$TMP/good.tar.gz" "$2" ;;
         *) fail "unexpected fetch: $SCENARIO $1" ;;
     esac
 }
 STATUS_PKG=''
+
+# The newest published release is resolved, then archive and checksum are
+# fetched from that release and verified against each other.
+STATUS_VERSION=''
 : > "$FETCH_LOG"
 status_acquire "$TMP/result.tar.gz" "$TMP/no-checkout" || fail 'release fetch failed'
 cmp "$TMP/good.tar.gz" "$TMP/result.tar.gz"
-[ "$(cat "$FETCH_LOG")" = "$STATUS_BASE/yggdrasil-status-$STATUS_VERSION.tar.gz" ] || fail 'release URL was not pinned'
-pass 'release is the default network source and verified against the pin'
+[ "$STATUS_VERSION" = 'v9.9' ] || fail 'newest release version was not resolved'
+[ "$(cat "$FETCH_LOG")" = "$(printf '%s\n' "$STATUS_API" "$REL" "$REL.sha256")" ] \
+    || fail 'unexpected fetch sequence'
+pass 'newest release is resolved and verified against its published checksum'
 
-SCENARIO='mirror'
+# An explicitly requested version must not consult the release list at all.
+STATUS_VERSION='v9.9'
 : > "$FETCH_LOG"
-status_acquire "$TMP/result.tar.gz" "$TMP/no-checkout" || fail 'immutable mirror fallback failed'
-cmp "$TMP/good.tar.gz" "$TMP/result.tar.gz"
-[ "$(wc -l < "$FETCH_LOG")" -eq 2 ] || fail 'wrong fallback count'
-[ "$(tail -n 1 "$FETCH_LOG")" = "$STATUS_FALLBACK_BASE/yggdrasil-status-$STATUS_VERSION.tar.gz" ] || fail 'fallback changed artifact version'
-pass 'transport failure falls back to identical pinned bytes, not an older version'
+status_acquire "$TMP/result.tar.gz" "$TMP/no-checkout" || fail 'explicit version fetch failed'
+if grep -Fq "$STATUS_API" "$FETCH_LOG"; then fail 'explicit version still queried the release list'; fi
+pass 'an explicit --status-version bypasses release discovery'
 
-SCENARIO='corrupt'
+# A tag that is not a well-formed status release can never reach a URL.
+for API_TAG in 'v9.9' 'status-../../evil' 'status-v9.9; rm -rf /' 'latest'; do
+    STATUS_VERSION=''
+    : > "$FETCH_LOG"
+    if status_acquire "$TMP/result.tar.gz" "$TMP/no-checkout"; then
+        fail "unsafe release tag was accepted: [$API_TAG]"
+    fi
+    [ "$(cat "$FETCH_LOG")" = "$STATUS_API" ] || fail "unsafe tag [$API_TAG] reached a download URL"
+done
+API_TAG='status-v9.9'
+STATUS_VERSION=''
 : > "$FETCH_LOG"
-if status_acquire "$TMP/result.tar.gz" "$TMP/no-checkout"; then fail 'corrupt release was accepted'; fi
-[ "$(wc -l < "$FETCH_LOG")" -eq 1 ] || fail 'checksum mismatch was hidden by fallback'
-SCENARIO='down'
-: > "$FETCH_LOG"
-if status_acquire "$TMP/result.tar.gz" "$TMP/no-checkout"; then fail 'unavailable downloads were accepted'; fi
-[ "$(wc -l < "$FETCH_LOG")" -eq 2 ] || fail 'unexpected downgrade or retry chain'
-pass 'checksum failure does not downgrade; unavailable sources refuse installation'
+SCENARIO='noapi'
+if status_acquire "$TMP/result.tar.gz" "$TMP/no-checkout"; then fail 'unreachable release list was accepted'; fi
+pass 'malformed tags and an unreachable release list refuse installation'
 
+for SCENARIO in nosum badsum wrongsum corrupt down; do
+    STATUS_VERSION=''
+    : > "$FETCH_LOG"
+    if status_acquire "$TMP/result.tar.gz" "$TMP/no-checkout"; then
+        fail "unverified download accepted in scenario [$SCENARIO]"
+    fi
+done
+SCENARIO='release'
+pass 'missing, ambiguous, wrong and corrupt downloads all refuse installation'
+
+# The checkout cache stays usable offline, but must prove its own bytes.
+STATUS_VERSION='v9.9'
 mkdir "$TMP/checkout"
-cp "$TMP/good.tar.gz" "$TMP/checkout/yggdrasil-status-$STATUS_VERSION.tar.gz"
+cp "$TMP/good.tar.gz" "$TMP/checkout/yggdrasil-status-v9.9.tar.gz"
 : > "$FETCH_LOG"
+if status_acquire "$TMP/result.tar.gz" "$TMP/checkout"; then fail 'checkout package without a checksum was accepted'; fi
+printf '%s  yggdrasil-status-v9.9.tar.gz\n' "$GOOD_SHA" > "$TMP/checkout/yggdrasil-status-v9.9.tar.gz.sha256"
 status_acquire "$TMP/result.tar.gz" "$TMP/checkout" || fail 'offline checkout cache failed'
 [ ! -s "$FETCH_LOG" ] || fail 'offline checkout used network'
-cp "$TMP/corrupt.tar.gz" "$TMP/checkout/yggdrasil-status-$STATUS_VERSION.tar.gz"
+cp "$TMP/corrupt.tar.gz" "$TMP/checkout/yggdrasil-status-v9.9.tar.gz"
 if status_acquire "$TMP/result.tar.gz" "$TMP/checkout"; then fail 'corrupt checkout package was accepted'; fi
-[ ! -s "$FETCH_LOG" ] || fail 'corrupt local cache silently fell back'
-pass 'checkout cache works offline but cannot override pinned integrity'
+[ ! -s "$FETCH_LOG" ] || fail 'corrupt local cache silently fell back to the network'
+pass 'checkout cache works offline but must prove its own checksum'
 
 if (have() { return 1; }; status_verify "$TMP/good.tar.gz" "$STATUS_SHA256"); then
     fail 'verification succeeded without sha256sum'

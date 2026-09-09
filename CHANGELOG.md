@@ -1,25 +1,50 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
-## Unreleased - pinned status releases (deployer 1.5.2)
+## Unreleased - status v5.2 and a release-following deployer (1.6.0)
 
-The default status download now uses `status-v5.1` on GitHub Releases and an
-embedded SHA-256. Transport failures may fall back to the identical archive at
-an immutable Git commit, never to v5 or a moving branch. Local checkout archives
-must match the same pin; explicit `--status-pkg` builds require a single-entry
-checksum file. Missing verification tools/checksums and mismatches refuse the
-optional installation. Status workspaces are private and cleaned on exit.
+Status downloads moved to versioned GitHub Releases with verified bytes.
+`--status-pkg` builds require a single-entry checksum file, missing verification
+tools/checksums and mismatches refuse the optional installation, and status
+workspaces are private and cleaned on exit. The embedded version/digest pin and
+the raw-commit mirror introduced here were **superseded within this same
+unreleased cycle** by release discovery, described below.
 
 Existing v4/v5/v5.1 archives and checksums have been preserved as Release assets
 without rebuilding. Copies in `packages/` remain unchanged for old raw URLs;
 new builds go to Releases, not the source tree.
 
 A manual workflow prepares a draft from a clean, exact main-branch revision;
-it creates a fresh tag, refuses existing tags and never publishes or changes
-the deployer pin automatically. Download/error-path tests run under sh and
-BusyBox; CI verifies real public release/mirror bytes. No new real-router test
-is claimed. Core network and client DNS behavior are unchanged.
+it creates a fresh tag, refuses existing tags and never publishes automatically.
+Download/error-path tests run under sh and BusyBox; CI verifies the real public
+release download. Core network and client DNS behavior are unchanged.
 
-### Status: native node addresses in the LAN clients table
+### Deployer 1.6.0: follow the newest published status release
+
+The deployer no longer carries a status version and digest, so publishing a
+status module no longer requires shipping a new deployer. It asks GitHub for the
+newest release, accepts the answer only as a `status-vX.Y[.Z]` tag matching a
+strict pattern, and only then builds a download URL, so a release name can never
+steer the path. It then fetches the `.sha256` published beside the archive in
+that same release and refuses any disagreement. A checkout copy of the same
+version is still usable offline but must now carry its own checksum file rather
+than inheriting a digest from the script.
+
+New `--status-version vX.Y` installs a specific release and skips discovery
+entirely. `--status-pkg PATH` is unchanged. Every failure path stays fail-closed:
+an unreachable release list, a malformed tag, a missing, ambiguous, mismatched or
+unfetchable checksum, and a corrupt archive all skip the optional status module
+rather than installing anything unverified. The raw-commit mirror is gone; it
+could not exist for a version that is deliberately not committed to
+`main/packages`.
+
+**Known limit, stated deliberately.** The published checksum ships in the same
+release as the archive, so it proves transport integrity, not provenance. The
+previous embedded pin additionally covered substitution of a release asset after
+a trusted deployer copy was obtained; that property was traded for not needing a
+deployer change per release. Operators who need it should build the module
+themselves and install it with `--status-pkg`.
+
+### Status v5.2: native node addresses in the LAN clients table
 
 The LAN table gains a `Yggdrasil node` column. When a LAN device runs its own
 Yggdrasil daemon and peers with the router, the backend reads the router's peer
@@ -45,7 +70,8 @@ New `clients` fields: `ygg_node_ipv6`, `ygg_node_addresses`, `ygg_node` and
 the routed-prefix set. `yggdrasilctl` is optional: without it, or with nothing
 peering and nothing remembered, the column is simply empty. Covered by two new
 backend fixture groups and verified on the test router, including the
-remembered path.
+remembered path. Released as
+[`status-v5.2`](https://github.com/Plasmoid77/Yggdrasil-OpenWRT/releases/tag/status-v5.2).
 
 ## v5.9 — private-key handling and factory-reset revalidation
 

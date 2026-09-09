@@ -99,12 +99,18 @@ what the script does and why.
 
 ### Package source and integrity
 
-The automated installer pins status v5.1 and its SHA-256. It prefers that exact
-archive in a local checkout; otherwise it downloads the versioned GitHub Release.
-On transport failure it can use an identical copy at a fixed Git commit, never a
-moving `main`/`latest` URL or an older module. A bad checksum is not bypassed.
-If neither verified copy is available, the optional status stage is skipped
-with a warning; the routing stages remain independent.
+The automated installer follows the **newest published status release**. It asks
+GitHub for that release, accepts the answer only when it is a `status-vX.Y` tag
+in the expected shape, then downloads that release's archive together with the
+`.sha256` published beside it and refuses anything whose bytes disagree. A local
+checkout copy of the same version is preferred when it carries its own checksum
+file. `--status-version vX.Y` installs a specific release instead of the newest.
+
+The published checksum protects against a truncated or corrupted download. It
+travels in the same release as the archive, so it is **not** a defence against a
+compromised release; use `--status-pkg` with your own verified build when that
+distinction matters. If no verified copy is available the optional status stage
+is skipped with a warning; the routing stages remain independent.
 
 For offline or custom builds, use `--status-pkg PATH` and provide the generated
 single-entry `PATH.sha256` beside it. Both must be readable. Missing, malformed
@@ -263,13 +269,13 @@ trusted Ygg client to the router node address.
   work="$(mktemp -d /tmp/ygg-status-install.XXXXXX)"
   trap 'rm -rf "$work"' EXIT
   cd "$work"
-  wget -O yggdrasil-status-v5.1.tar.gz \
-    https://github.com/Plasmoid77/Yggdrasil-OpenWRT/releases/download/status-v5.1/yggdrasil-status-v5.1.tar.gz
+  wget -O yggdrasil-status-v5.2.tar.gz \
+    https://github.com/Plasmoid77/Yggdrasil-OpenWRT/releases/download/status-v5.2/yggdrasil-status-v5.2.tar.gz
   printf '%s  %s\n' \
     '49dd2e2c57027b000ce62fa710d48abeb17cbe1ee532dfa0d504d4f2f0041e0a' \
-    'yggdrasil-status-v5.1.tar.gz' | sha256sum -c -
-  tar -xzf yggdrasil-status-v5.1.tar.gz
-  sh yggdrasil-status-v5.1/install.sh
+    'yggdrasil-status-v5.2.tar.gz' | sha256sum -c -
+  tar -xzf yggdrasil-status-v5.2.tar.gz
+  sh yggdrasil-status-v5.2/install.sh
 )
 ```
 
