@@ -27,11 +27,12 @@ pointers for older links/comments, not competing sources of truth.
    addresses distinct. Do not rename a working remote management interface.
 2. Active DHCPv4 leases create dynamic rows; native `config host` creates
    persistence; merge by MAC. NDP only enriches addresses and must not extend
-   row lifetime or create persistent history. A remembered Yggdrasil node
-   address is bounded by the same rule: pruned to existing rows and never
-   extending a row's lifetime. Its storage class matches the row's — tmpfs for
-   a lease-backed row, flash only for a `config host` row that already lives on
-   flash, rewritten solely when the address actually changes.
+   row lifetime. A remembered address — routed or Yggdrasil node — is bounded by
+   the same rule: pruned to existing rows and never extending a row's lifetime.
+   Its storage class matches the row's — tmpfs for a lease-backed row, flash
+   only for a `config host` row that already lives on flash, rewritten solely
+   when the address actually changes. A remembered routed address is discarded
+   when its prefix is no longer the router's.
 3. Prefer canonical IPv6, then an **observed** modified EUI-64, then all unique
    observed privacy addresses. Do not invent EUI-64 reachability or force it
    on clients. Only persistent identities may inherit canonical DNS metadata.

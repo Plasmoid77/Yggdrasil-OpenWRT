@@ -105,8 +105,26 @@ otherwise -> all unique observed addresses for that MAC in the Ygg prefix
 
 The computed EUI-64 must actually be observed. Never invent an address merely
 from a MAC. The canonical address is the primary IPv6 and rendered in bold;
-otherwise the first selected address is primary. Runtime addresses are not
-written to UCI, files, caches or a database.
+otherwise the first selected address is primary. Runtime addresses are never
+written to UCI or a database.
+
+They are remembered, though. The neighbour table forgets a device within
+minutes of it going quiet, which is far shorter than the lifetime of the row it
+belongs to, so a switched-off pinned machine or an idle BMC would show an empty
+address column. When a MAC has no observed address and no canonical record, the
+backend replays the addresses it saw last and reports `ipv6_live: 0` so the page
+can dim them. A canonical address needs no memory: it is `config domain`
+metadata and already persistent. The memory follows the storage rule below, and
+an address whose prefix is not the router's current routed prefix is dropped on
+the way out — after the router's Yggdrasil identity changes, every address
+remembered under the old prefix is dead, and showing one would be worse than
+showing nothing.
+
+A recalled address stays eligible for presence probing. That is deliberate: a
+pinned row with no active lease has no IPv4 to `arping`, so before this memory
+existed such a row had no address to probe at all and was always reported
+Offline. Presence still follows the order in [Presence](#presence) and a
+recalled address only ever adds a probe, never a verdict of its own.
 
 This stable-first policy avoids repeatedly displaying/probing historical
 privacy IIDs when a stable address is available. It does not remove addresses
@@ -131,42 +149,47 @@ are unambiguous on sight, and a value picked by name is re-checked against that
 shape. An upstream field rename therefore degrades to shape matching instead of
 silently emptying the column.
 
-A device that stops peering keeps its last known native address. The memory is
-two files of `<mac> <address>` lines, both rewritten on every inventory pass and
-pruned to the MACs still emitted, so an address lives exactly as long as the row
-it belongs to — the DHCP lease or `config host` still decides that lifetime —
-and vanishes with it. A fresh observation replaces everything remembered for
-that MAC, so a node that changes its identity is corrected as soon as the router
-sees the new address. `ygg_node_live` reports whether the address comes from a
-current link or from that memory; the LuCI page dims a remembered address.
+A device that stops peering keeps its last known native address, and a device
+the neighbour table has forgotten keeps its last known routed addresses. Both
+memories are files of `<mac> <address>` lines, all rewritten on every inventory
+pass and pruned to the MACs still emitted, so an address lives exactly as long
+as the row it belongs to — the DHCP lease or `config host` still decides that
+lifetime — and vanishes with it. A fresh observation replaces everything
+remembered for that MAC, so a node that changes its identity is corrected as
+soon as the router sees the new address. `ygg_node_live` and `ipv6_live` report
+whether each column comes from a current observation or from memory; the LuCI
+page dims a remembered address.
 
 The rule is that a row's memory shares that row's storage class, because the
 memory must not outlive the row and must not die before it either:
 
-| File | Covers | Survives a reboot |
-| --- | --- | --- |
-| `/tmp/yggdrasil-status-nodes` | every emitted row | No; a lease-backed row does not survive one either |
-| `/etc/yggdrasil-status-nodes` | only rows backed by a `config host` | Yes, exactly like the `config host` that produced the row |
+| File | Holds | Covers | Survives a reboot |
+| --- | --- | --- | --- |
+| `/tmp/yggdrasil-status-nodes` | native node address | every emitted row | No; a lease-backed row does not survive one either |
+| `/etc/yggdrasil-status-nodes` | native node address | only rows backed by a `config host` | Yes, exactly like the `config host` that produced the row |
+| `/tmp/yggdrasil-status-lan` | routed-prefix addresses | every emitted row | No; a lease-backed row does not survive one either |
+| `/etc/yggdrasil-status-lan` | routed-prefix addresses | only rows backed by a `config host` | Yes, exactly like the `config host` that produced the row |
 
 A pinned device that is switched off when the power fails therefore comes back
-with its node address intact, while a guest's address is forgotten with its
+with both of its address columns intact, while a guest's are forgotten with the
 lease. Precedence on each pass is live observation, then the tmpfs memory, then
-the flash memory. The flash copy is replaced only when its content actually
+the flash memory. A flash copy is replaced only when its content actually
 changes, so the 15-second poll behind an open LuCI page does not write to flash
-on every tick; a node address changes only when the device changes its key.
+on every tick; a node address changes only when the device changes its key, and
+a routed address only when the client changes its interface identifier.
 Unpinning a device drops its MAC from the persistent set, so the next pass
-removes it from the flash memory. Nothing is written to UCI or a database, the
-file is not configuration and is never read as such, and the installer neither
-creates nor removes it.
+removes it from both flash memories. Nothing is written to UCI or a database,
+the files are not configuration and are never read as such, and the installer
+neither creates nor removes them.
 
-The flash memory survives a reboot and a power cut, which is what it exists for.
-It does **not** survive a `sysupgrade`: OpenWrt's default keep list covers
-`/etc/config/` but not this file, so an upgrade preserves the pin and loses the
-address until the device peers once more. Adding the path to
+The flash memories survive a reboot and a power cut, which is what they exist
+for. They do **not** survive a `sysupgrade`: OpenWrt's default keep list covers
+`/etc/config/` but not these files, so an upgrade preserves the pin and loses
+the addresses until the device is seen once more. Adding the paths to
 `/etc/sysupgrade.conf` closes that gap; the installer does not do it, because
 editing an upgrade policy is not a status page's business. A factory reset
-clears both, and a device that rotates its MAC becomes a different identity with
-no pin, exactly as it does for every other row.
+clears everything, and a device that rotates its MAC becomes a different
+identity with no pin, exactly as it does for every other row.
 
 A native address is never probed for presence — reaching it would test the
 overlay, not the LAN — and is never merged into the routed-prefix address set.
@@ -379,7 +402,8 @@ config rule 'ygg_dns'
 | Native netifd/UCI/odhcpd/firewall4 | One owner for routing, prefix advertisement and policy; no container or parallel network manager |
 | SLAAC rather than stateful DHCPv6 | Ordinary IPv6 clients form their own addresses; do not assume universal EUI-64 support |
 | DHCP lease lifetime plus `config host` persistence | Guests disappear naturally; no custom TTL, history DB or cron cleanup |
-| A row's remembered node address stored like the row itself | A pinned row survives a reboot, so its address must too; a lease-backed one must not. Storage class follows row lifetime instead of a blanket "never touch flash" rule |
+| A row's remembered addresses stored like the row itself | A pinned row survives a reboot, so what is remembered about it must too; a lease-backed one must not. Storage class follows row lifetime instead of a blanket "never touch flash" rule |
+| Remembered routed addresses discarded on a prefix change | A routed address is only meaningful under the prefix it was formed from; showing one from a retired prefix is worse than showing nothing |
 | MAC-centric identity | Changing IP/privacy addresses do not create separate device identities; randomized MACs still do |
 | NDP enrichment, not `getHostHints` authority | Neighbor churn must not erase persistent identities or preserve expired guests |
 | Native `config domain` | Shared canonical address/DNS metadata without custom `option ygg_ipv6`, a new UCI inventory file, generated hosts file or resolver |
