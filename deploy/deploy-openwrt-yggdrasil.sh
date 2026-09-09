@@ -1025,10 +1025,19 @@ ${_h%%=*}.${DNS_DOMAIN} ${_h#*=}"
 
 # ================================================== stage 7: LuCI status module
 
-status_fetch() { # $1 = HTTPS URL, $2 = destination
-    wget -q -O "$2" "$1" 2>/dev/null \
-        || uclient-fetch -q -O "$2" "$1" 2>/dev/null \
-        || curl -fsSL -o "$2" "$1" 2>/dev/null
+# $3 is only ever set for the fixed api.github.com lookup below. A release
+# asset download redirects to a different host, so a credential must never be
+# attached to one. uclient-fetch has no header option and is skipped in that
+# branch rather than silently dropping the header.
+status_fetch() { # $1 = HTTPS URL, $2 = destination, $3 = optional request header
+    if [ -n "${3:-}" ]; then
+        wget -q --header="$3" -O "$2" "$1" 2>/dev/null \
+            || curl -fsSL -H "$3" -o "$2" "$1" 2>/dev/null
+    else
+        wget -q -O "$2" "$1" 2>/dev/null \
+            || uclient-fetch -q -O "$2" "$1" 2>/dev/null \
+            || curl -fsSL -o "$2" "$1" 2>/dev/null
+    fi
 }
 
 status_valid_version() { # $1 = candidate version label
@@ -1048,9 +1057,16 @@ status_expected_digest() { # $1 = checksum file
 
 # Ask GitHub for the newest published release. Only a status tag in the expected
 # shape is accepted, so a release name can never steer the download path.
+# Anonymous api.github.com calls are limited per source IP. A shared address —
+# CI runners, or a router behind CGNAT — can exhaust that budget through no
+# fault of its own, and release discovery then fails for an hour. GITHUB_TOKEN
+# raises the limit. It is optional and off by default; note that it reaches
+# wget as a process argument, so set it where that is acceptable.
 status_resolve_version() {
+    srv_auth=''
+    [ -n "${GITHUB_TOKEN:-}" ] && srv_auth="Authorization: Bearer ${GITHUB_TOKEN}"
     srv_tmp="$(mktemp "${TMPDIR:-/tmp}/ygg-release.XXXXXX")" || return 1
-    if ! status_fetch "$STATUS_API" "$srv_tmp"; then
+    if ! status_fetch "$STATUS_API" "$srv_tmp" "$srv_auth"; then
         rm -f "$srv_tmp"
         return 1
     fi

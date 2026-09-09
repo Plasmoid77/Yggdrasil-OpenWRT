@@ -33,7 +33,7 @@ Do not call that a full pass or merge without the complete CI check.
 | Documentation | Local Markdown links and heading fragments, shared Claude instructions |
 | Packaging | Exact tracked payload bytes, permissions, provenance, manifest, determinism, unsafe labels, no overwrite, exclusion of untracked files |
 | Frozen downloads | Existing archive SHA-256 files |
-| Status downloader | Release discovery and tag validation; explicit version bypass; required local and published checksums; corrupt/missing/ambiguous/unavailable downloads; offline checkout; dry-run/no-status; temporary cleanup |
+| Status downloader | Release discovery and tag validation; explicit version bypass; required local and published checksums; corrupt/missing/ambiguous/unavailable downloads; offline checkout; dry-run/no-status; temporary cleanup; an optional API token reaching the release lookup and nothing else |
 | Release builds | Numeric version, clean tracked checkout, no forgotten source files |
 
 Fixtures execute actual extracted backend functions with controlled OpenWrt
