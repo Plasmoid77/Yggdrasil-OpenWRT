@@ -47,6 +47,8 @@ PIN_SECTION_PREFIX='ygg_status_'
 DHCP_LOCK_FILE='/var/lock/yggdrasil-status-dhcp.lock'
 NODE_CACHE_FILE='/tmp/yggdrasil-status-nodes'
 NODE_STORE_FILE='/etc/yggdrasil-status-nodes'
+LAN_CACHE_FILE='/tmp/yggdrasil-status-lan'
+LAN_STORE_FILE='/etc/yggdrasil-status-lan'
 
 
 lower() {
@@ -131,7 +133,7 @@ remember_emitted_mac() {
 
 
 # The subset of emitted MACs whose row came from a config host. Those rows are
-# stored on flash themselves, so their remembered node address may be too.
+# stored on flash themselves, so what is remembered about them may be too.
 remember_persistent_mac() {
 	local rpm_mac
 	rpm_mac="$(normalize_mac "$1")"
@@ -638,42 +640,86 @@ merge_node_cache() {
 
 
 # Rewrite one memory file with the remembered address of every MAC in the given
-# list. The file is replaced only when its content actually changes, so the
-# 15-second poll behind an open LuCI tab never writes to flash on every tick.
-write_node_memory() {
-	local wnm_file="$1"
-	local wnm_macs="$2"
-	local wnm_wanted wnm_current wnm_temp
+# list, taking the addresses from one of the "<mac> <address> <live>" tables
+# built during this run. The file is replaced only when its content actually
+# changes, so the 15-second poll behind an open LuCI tab never writes to flash
+# on every tick.
+write_address_memory() {
+	local wam_file="$1"
+	local wam_macs="$2"
+	local wam_rows="$3"
+	local wam_wanted wam_current wam_temp
 
-	wnm_wanted="$(
-		printf '%s\n' "$YGG_NODE_ROWS" |
-			awk -v macs="$wnm_macs" '
+	wam_wanted="$(
+		printf '%s\n' "$wam_rows" |
+			awk -v macs="$wam_macs" '
 				NF == 3 && index(macs, "|" $1 "|") > 0 { print $1 " " $2 }
 			'
 	)" || return 0
 
-	wnm_current="$(cat "$wnm_file" 2>/dev/null)"
-	[ "$wnm_wanted" = "$wnm_current" ] && return 0
+	wam_current="$(cat "$wam_file" 2>/dev/null)"
+	[ "$wam_wanted" = "$wam_current" ] && return 0
 
-	[ -n "$wnm_wanted" ] && wnm_wanted="${wnm_wanted}
+	[ -n "$wam_wanted" ] && wam_wanted="${wam_wanted}
 "
 
-	wnm_temp="${wnm_file}.$$"
-	if ! printf '%s' "$wnm_wanted" > "$wnm_temp" 2>/dev/null; then
-		rm -f "$wnm_temp"
+	wam_temp="${wam_file}.$$"
+	if ! printf '%s' "$wam_wanted" > "$wam_temp" 2>/dev/null; then
+		rm -f "$wam_temp"
 		return 0
 	fi
 
-	mv "$wnm_temp" "$wnm_file" 2>/dev/null || rm -f "$wnm_temp"
+	mv "$wam_temp" "$wam_file" 2>/dev/null || rm -f "$wam_temp"
 }
 
 
-# Prune both memories to the rows that were actually emitted, so neither can
+# Prune every memory to the rows that were actually emitted, so none can
 # outlive them: the tmpfs copy covers every row, the flash copy only the
 # config-host rows that survive a reboot on their own.
-save_node_cache() {
-	write_node_memory "$NODE_CACHE_FILE" "$EMITTED_MACS"
-	write_node_memory "$NODE_STORE_FILE" "$PERSISTENT_MACS"
+save_address_memory() {
+	write_address_memory "$NODE_CACHE_FILE" "$EMITTED_MACS" "$YGG_NODE_ROWS"
+	write_address_memory "$NODE_STORE_FILE" "$PERSISTENT_MACS" "$YGG_NODE_ROWS"
+	write_address_memory "$LAN_CACHE_FILE" "$EMITTED_MACS" "$LAN_ADDR_ROWS"
+	write_address_memory "$LAN_STORE_FILE" "$PERSISTENT_MACS" "$LAN_ADDR_ROWS"
+}
+
+
+# The last known routed-prefix addresses of a device the router cannot see in
+# its NDP table right now. Unlike the node memory this is replayed per row
+# rather than merged up front, because the addresses are gathered per client.
+#
+# Addresses carrying a prefix other than the current one are dropped on the way
+# out: after the router's Yggdrasil identity changes, every address remembered
+# under the old routed prefix is dead, and silently showing one would be worse
+# than showing nothing.
+recall_lan_addresses() {
+	local rla_wanted
+	rla_wanted="$(normalize_mac "$1")"
+
+	[ -n "$LAN_YGG_PREFIX" ] || return 0
+
+	cat "$LAN_CACHE_FILE" "$LAN_STORE_FILE" 2>/dev/null |
+		awk -v wanted="$rla_wanted" -v prefix="$LAN_YGG_PREFIX" '
+			$1 == wanted && index(tolower($2), prefix) == 1 && !seen[$2]++ {
+				print $2
+			}
+		'
+}
+
+
+# Record what this run decided a device's routed addresses are, so the next run
+# can replay them. Recalled addresses are recorded again exactly as they were,
+# which is what keeps the memory alive while the device stays quiet - and what
+# keeps the file byte-identical, so a quiet device never triggers a flash write.
+remember_lan_addresses() {
+	local rma_mac="$1"
+	local rma_live="$2"
+	local rma_addr
+
+	for rma_addr in $KNOWN_IPV6; do
+		LAN_ADDR_ROWS="${LAN_ADDR_ROWS}${rma_mac} ${rma_addr} ${rma_live}
+"
+	done
 }
 
 
@@ -807,6 +853,7 @@ emit_client() {
 	local ec_ambiguous_host="${10}"
 	local ec_online=0
 	local ec_primary_ipv6=''
+	local ec_ipv6_live=1
 	local ec_node_addresses ec_node_primary ec_node_live=0
 	local ec_addr ec_protected_host=0
 
@@ -823,6 +870,14 @@ emit_client() {
 	fi
 
 	build_known_ipv6 "$ec_mac"
+
+	# A canonical address is persistent metadata of its own and needs no
+	# memory. Anything else came from NDP, which forgets a device that stops
+	# talking long before its row expires, so fall back to what was seen last.
+	if [ -z "$CANONICAL_IPV6" ] && [ -z "$KNOWN_IPV6" ]; then
+		KNOWN_IPV6="$(recall_lan_addresses "$ec_mac")"
+		[ -n "$KNOWN_IPV6" ] && ec_ipv6_live=0
+	fi
 
 	ec_primary_ipv6="$CANONICAL_IPV6"
 	[ -n "$ec_primary_ipv6" ] || ec_primary_ipv6="${KNOWN_IPV6%% *}"
@@ -851,6 +906,7 @@ emit_client() {
 		json_add_string "" "$ec_addr"
 	done
 	json_close_array
+	json_add_int ipv6_live "$ec_ipv6_live"
 	json_add_string ygg_node_ipv6 "$ec_node_primary"
 	json_add_array ygg_node_addresses
 	for ec_addr in $ec_node_addresses; do
@@ -877,6 +933,7 @@ emit_client() {
 	json_close_object
 
 	remember_emitted_mac "$ec_mac"
+	[ -n "$CANONICAL_IPV6" ] || remember_lan_addresses "$ec_mac" "$ec_ipv6_live"
 
 	if [ "$ec_persistent" -eq 1 ]; then
 		remember_persistent_mac "$ec_mac"
@@ -967,6 +1024,7 @@ rpc_clients() {
 	merge_node_cache
 	EMITTED_MACS=''
 	PERSISTENT_MACS=''
+	LAN_ADDR_ROWS=''
 
 	acquire_dhcp_lock shared || true
 	config_load dhcp
@@ -976,7 +1034,7 @@ rpc_clients() {
 	emit_dynamic_leases
 	config_foreach emit_persistent_host host
 	json_close_array
-	save_node_cache
+	save_address_memory
 	json_dump
 }
 

@@ -1,5 +1,34 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## Status v5.4 - a pinned row also remembers its routed addresses
+
+v5.3 gave the Yggdrasil node column a memory. The routed-prefix column still had
+none, so it emptied out for any device the neighbour table had forgotten — which
+is every device that simply stops talking. A pinned desktop switched off during
+a power cut came back showing its `0200::/8` node address and a blank
+`303::/8` address, and an idle BMC that never initiates IPv6 traffic showed a
+blank address the whole time even while it was online and reachable.
+
+The routed addresses are now remembered through the same mechanism and under the
+same rule: `/tmp/yggdrasil-status-lan` for a lease-backed row,
+`/etc/yggdrasil-status-lan` for a `config host` row, pruned to the MACs still
+emitted and rewritten only when an address actually changes. A canonical
+`config domain` address is not remembered, because it is already persistent
+metadata of its own.
+
+A recalled address is reported as `ipv6_live: 0` and dimmed on the page, so it
+can never be mistaken for something the router is observing right now. An
+address whose prefix is not the router's current routed prefix is discarded on
+the way out: after the router's Yggdrasil identity changes, everything
+remembered under the old prefix is dead, and offering one as if it still worked
+would be worse than showing nothing.
+
+The `AGENTS.md` invariant that NDP must not create persistent history was the
+proxy for a stricter rule that still holds and is now stated directly: a
+memory's lifetime never exceeds the lifetime of the row it belongs to. The
+`sysupgrade` limitation is unchanged and now covers both files — OpenWrt's keep
+list covers `/etc/config/`, not these paths.
+
 ## Deployer 1.6.1 - release discovery can authenticate
 
 Anonymous `api.github.com` requests are limited per source IP. A shared address

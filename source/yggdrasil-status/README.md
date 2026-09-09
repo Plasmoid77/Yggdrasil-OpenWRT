@@ -21,18 +21,22 @@ Active DHCPv4 leases create dynamic rows until expiry; native `config host`
 provides persistent identity. Sources merge by MAC. NDP provides runtime IPv6
 only: canonical `config domain` wins, otherwise an observed modified EUI-64
 wins, otherwise all observed privacy addresses remain eligible. No client
-addresses are assigned or removed and no runtime history is persisted.
+addresses are assigned or removed. A device the neighbour table has forgotten
+keeps its last known addresses, dimmed, for exactly as long as its row exists;
+addresses formed from a retired routed prefix are discarded rather than shown.
 
 A LAN device running its own Yggdrasil daemon also shows its native `0200::/8`
 node address, taken from the router's peer table and attributed by MAC through
 the neighbour table, in a separate column from its routed-prefix LAN addresses.
 A device that stops peering keeps its last known address, dimmed, for exactly as
-long as its row exists; a fresh observation replaces it. The memory is pruned to
-existing rows and stored the way the row itself is: `/tmp/yggdrasil-status-nodes`
-for a lease-backed row, `/etc/yggdrasil-status-nodes` for a pinned one, so a
-pinned device that is switched off still shows its node address after a reboot
-while a guest's is forgotten with its lease. The flash copy is rewritten only
-when the address actually changes. The address is never probed for presence.
+long as its row exists; a fresh observation replaces it. Both this memory and
+the one for routed addresses are pruned to existing rows and stored the way the
+row itself is: `/tmp/yggdrasil-status-nodes` and `/tmp/yggdrasil-status-lan` for
+a lease-backed row, `/etc/yggdrasil-status-nodes` and `/etc/yggdrasil-status-lan`
+for a pinned one, so a pinned device that is switched off still shows both of its
+address columns after a reboot while a guest's are forgotten with its lease. A
+flash copy is rewritten only when an address actually changes. The node address
+is never probed for presence.
 
 Canonical metadata attaches only to persistent identities. Recent kernel
 `REACHABLE` results avoid redundant probes; otherwise ARP/IPv6 probes determine

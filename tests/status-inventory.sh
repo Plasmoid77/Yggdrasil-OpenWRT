@@ -23,8 +23,18 @@ for fn in lower normalize_mac valid_mac valid_hostname valid_ipv4 first_ipv4 \
     eui64_ipv6_for_mac append_unique_ipv6 observed_ipv6_for_mac build_known_ipv6 \
     neighbor_recently_reachable probe_online emit_dynamic_leases emit_persistent_host \
     mac_for_neighbor ygg_peer_endpoints ygg_node_rows ygg_node_addresses_for_mac \
-    merge_node_cache write_node_memory save_node_cache ygg_node_is_live \
+    merge_node_cache write_address_memory save_address_memory ygg_node_is_live \
+    recall_lan_addresses remember_lan_addresses \
     emit_client rpc_pin rpc_unpin; do load "$fn"; done
+
+# The production constants point at /tmp and /etc. Default every memory into
+# the sandbox so no group can touch a real path by forgetting to override one.
+NODE_CACHE_FILE="$TMP/default-nodes"
+NODE_STORE_FILE="$TMP/default-nodes.flash"
+LAN_CACHE_FILE="$TMP/default-lan"
+LAN_STORE_FILE="$TMP/default-lan.flash"
+LAN_ADDR_ROWS=''
+LAN_YGG_PREFIX=''
 COUNT=0
 run() {
     COUNT=$((COUNT + 1))
@@ -128,7 +138,7 @@ node_memory() {
     YGG_NODE_ROWS="$(printf '%s\n' "$MAC $NODE 1" "$GONE 203:bbbb::2 1")"
     merge_node_cache
     EMITTED_MACS="|$MAC||$GONE|"
-    save_node_cache
+    save_address_memory
     eq "$(printf '%s\n' "$MAC $NODE" "$GONE 203:bbbb::2")" "$(cat "$NODE_CACHE_FILE")"
 
     # Second pass: neither device is peering, both rows still exist.
@@ -140,7 +150,7 @@ node_memory() {
 
     # The row for one device disappears; its memory is pruned with it.
     EMITTED_MACS="|$MAC|"
-    save_node_cache
+    save_address_memory
     eq "$MAC $NODE" "$(cat "$NODE_CACHE_FILE")"
 
     # A fresh observation replaces everything remembered for that MAC.
@@ -149,7 +159,7 @@ node_memory() {
     eq "$MAC 200:aaaa::9 1" "$YGG_NODE_ROWS"
     eq '200:aaaa::9' "$(ygg_node_addresses_for_mac "$MAC")"
     ygg_node_is_live "$MAC" || fail 'fresh observation not reported as live'
-    save_node_cache
+    save_address_memory
     eq "$MAC 200:aaaa::9" "$(cat "$NODE_CACHE_FILE")"
 
     # A missing cache file is an empty memory, not an error.
@@ -173,7 +183,7 @@ pinned_node_memory() {
     merge_node_cache
     EMITTED_MACS="|$PINNED||$LEASED|"
     PERSISTENT_MACS="|$PINNED|"
-    save_node_cache
+    save_address_memory
     eq "$(printf '%s\n' "$PINNED $NODE" "$LEASED 200:cccc::3")" "$(cat "$NODE_CACHE_FILE")"
     eq "$PINNED $NODE" "$(cat "$NODE_STORE_FILE")"
 
@@ -181,7 +191,7 @@ pinned_node_memory() {
     # so an unchanged inode proves no write happened.
     INODE="$(ls -i "$NODE_STORE_FILE" | awk '{print $1}')"
     merge_node_cache
-    save_node_cache
+    save_address_memory
     eq "$INODE" "$(ls -i "$NODE_STORE_FILE" | awk '{print $1}')"
 
     # Reboot: tmpfs is gone, the daemon has not seen any peer yet. The pinned
@@ -196,20 +206,20 @@ pinned_node_memory() {
 
     # The recalled address is written straight back to both memories.
     EMITTED_MACS="|$PINNED|"
-    save_node_cache
+    save_address_memory
     eq "$PINNED $NODE" "$(cat "$NODE_CACHE_FILE")"
 
     # A live observation still wins over the flash memory.
     YGG_NODE_ROWS="$PINNED 200:aaaa::9 1"
     merge_node_cache
     eq "$PINNED 200:aaaa::9 1" "$YGG_NODE_ROWS"
-    save_node_cache
+    save_address_memory
     eq "$PINNED 200:aaaa::9" "$(cat "$NODE_STORE_FILE")"
 
     # Unpin: the MAC stops being persistent, so flash forgets it while the
     # tmpfs memory keeps it for the remaining lease-backed row.
     PERSISTENT_MACS=''
-    save_node_cache
+    save_address_memory
     eq '' "$(cat "$NODE_STORE_FILE")"
     eq "$PINNED 200:aaaa::9" "$(cat "$NODE_CACHE_FILE")"
 }
@@ -304,6 +314,88 @@ canonical_guard() {
     eq '|aa:bb:cc:dd:ee:ff|' "$PERSISTENT_MACS"
 }
 
+# The routed-prefix addresses come from NDP, which forgets a device as soon as
+# it goes quiet - long before its row expires. A pinned row keeps them the same
+# way it keeps its node address, and on the same storage class.
+pinned_lan_memory() {
+    LAN_CACHE_FILE="$TMP/pin-lan"
+    LAN_STORE_FILE="$TMP/pin-lan.flash"
+    LAN_YGG_PREFIX='303:170f:3ab2:166e:'
+    PINNED='14:4f:8a:8d:19:77'
+    LEASED='aa:bb:cc:dd:ee:03'
+    ADDR='303:170f:3ab2:166e:976f:bee8:ff00:b602'
+    OTHER='303:170f:3ab2:166e:6e92:bfff:fe2f:aa2a'
+    YGG_NODE_ROWS=''
+
+    # Both devices are seen on the LAN; only the pinned one reaches flash.
+    LAN_ADDR_ROWS=''
+    KNOWN_IPV6="$ADDR"; remember_lan_addresses "$PINNED" 1
+    KNOWN_IPV6="$OTHER"; remember_lan_addresses "$LEASED" 1
+    EMITTED_MACS="|$PINNED||$LEASED|"
+    PERSISTENT_MACS="|$PINNED|"
+    save_address_memory
+    eq "$(printf '%s\n' "$PINNED $ADDR" "$LEASED $OTHER")" "$(cat "$LAN_CACHE_FILE")"
+    eq "$PINNED $ADDR" "$(cat "$LAN_STORE_FILE")"
+
+    # An unchanged run must not rewrite flash: the file is replaced by rename,
+    # so an unchanged inode proves no write happened.
+    INODE="$(ls -i "$LAN_STORE_FILE" | awk '{print $1}')"
+    save_address_memory
+    eq "$INODE" "$(ls -i "$LAN_STORE_FILE" | awk '{print $1}')"
+
+    # Reboot: tmpfs is gone and nothing has been seen yet. The pinned row
+    # recalls its address; the lease-backed row is forgotten, as intended.
+    rm -f "$LAN_CACHE_FILE"
+    eq "$ADDR" "$(recall_lan_addresses "$PINNED")"
+    eq '' "$(recall_lan_addresses "$LEASED")"
+
+    # A device with several addresses keeps all of them, deduplicated across
+    # the two memories.
+    LAN_ADDR_ROWS=''
+    KNOWN_IPV6="$ADDR $OTHER"; remember_lan_addresses "$PINNED" 1
+    EMITTED_MACS="|$PINNED|"
+    save_address_memory
+    eq "$(printf '%s\n' "$ADDR" "$OTHER")" "$(recall_lan_addresses "$PINNED")"
+
+    # Once the router's routed prefix changes, every address remembered under
+    # the old one is dead and must not be offered as if it still worked.
+    LAN_YGG_PREFIX='303:dead:beef:1:'
+    eq '' "$(recall_lan_addresses "$PINNED")"
+    LAN_YGG_PREFIX='303:170f:3ab2:166e:'
+
+    # Unpin: flash forgets the row while tmpfs keeps it for as long as the row
+    # itself lasts.
+    PERSISTENT_MACS=''
+    save_address_memory
+    eq '' "$(cat "$LAN_STORE_FILE")"
+    eq "$(printf '%s\n' "$PINNED $ADDR" "$PINNED $OTHER")" "$(cat "$LAN_CACHE_FILE")"
+
+    # A missing memory is an empty memory, not an error.
+    rm -f "$LAN_CACHE_FILE" "$LAN_STORE_FILE"
+    eq '' "$(recall_lan_addresses "$PINNED")"
+
+    # A recalled address is reported as not live, so the UI can grey it out
+    # instead of presenting it as a current observation.
+    LAN_ADDR_ROWS=''
+    KNOWN_IPV6="$ADDR"; remember_lan_addresses "$PINNED" 1
+    EMITTED_MACS="|$PINNED|"; PERSISTENT_MACS="|$PINNED|"
+    save_address_memory
+    LIVE=''
+    ygg_node_is_live() { return 1; }
+    find_canonical_domain() { CANONICAL_IPV6=''; DNS_ALIAS=''; }
+    build_known_ipv6() { KNOWN_IPV6=''; }
+    probe_online() { return 1; }
+    json_add_object() { :; }; json_close_object() { :; }
+    json_add_array() { :; }; json_close_array() { :; }
+    json_add_string() { :; }
+    json_add_int() { if [ "$1" = ipv6_live ]; then LIVE="$2"; fi; }
+    CANONICAL_IPV6=''; DNS_ALIAS=''
+    LAN_ADDR_ROWS=''
+    emit_client pc "$PINNED" 192.0.2.5 1 200 '' 0 0 0 0
+    eq 0 "$LIVE"
+    eq "$PINNED $ADDR 0" "$(printf '%s' "$LAN_ADDR_ROWS" | head -n 1)"
+}
+
 # RPC guard fixtures stop at the UCI boundary: any unexpected mutation fails.
 setup_rpc() {
     CODE=''
@@ -381,6 +473,7 @@ run 'a pinned row keeps its node address across a reboot' pinned_node_memory
 run 'REACHABLE shortcut, ARP, IPv6 and failed presence' presence
 run 'DHCP lifetime, MAC merge and persistent lease-free rows' identity_lifetime
 run 'dynamic hostnames cannot inherit canonical metadata' canonical_guard
+run 'a pinned row keeps its routed addresses across a reboot' pinned_lan_memory
 run 'Unpin destructive and pending-change guards' unpin_guards
 run 'Pin existing, expired, pending-change and busy guards' pin_guards
 printf '%s backend fixture groups passed\n' "$COUNT"

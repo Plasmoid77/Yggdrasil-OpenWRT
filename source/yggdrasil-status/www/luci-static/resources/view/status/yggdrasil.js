@@ -126,12 +126,27 @@ function ipv6Cell(client) {
 	if (!addresses.length)
 		return '—';
 
-	return E('div', {}, addresses.map(function(addr) {
+	/*
+	 * ipv6_live is 0 when the router has no current neighbour entry for the
+	 * device and the addresses come from what it saw last. Mark those the same
+	 * way a remembered node address is marked, so a stale address can never be
+	 * mistaken for one the router is observing right now.
+	 */
+	var live = client.ipv6_live === undefined || !!client.ipv6_live;
+
+	return E('div', {
+		'title': live
+			? null
+			: _('Last known routed-prefix addresses; the router does not see this device on the LAN right now')
+	}, addresses.map(function(addr) {
 		var attrs = {};
 
 		if (client.canonical_ipv6 && addr === client.canonical_ipv6) {
 			attrs.style = 'font-weight: 600';
 			attrs.title = _('Canonical address');
+		}
+		else if (!live) {
+			attrs.style = 'opacity: .55';
 		}
 
 		return E('div', attrs, addr);
