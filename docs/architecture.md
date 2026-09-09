@@ -21,8 +21,9 @@ LAN multicast; each is separately skippable. Optional means independent, not
 necessarily disabled by default.
 
 The profile targets OpenWrt 25.12+ with apk, netifd, odhcpd, dnsmasq and
-firewall4. Status uses rpcd, LuCI, UCI, libubox jshn, BusyBox ash, flock and
-iputils-arping. Host-side Python/Node tooling is not a router dependency.
+firewall4. Status uses rpcd, LuCI, UCI, libubox jshn, jsonfilter, BusyBox ash, flock and
+iputils-arping. It also reads the Yggdrasil admin socket through `yggdrasilctl`
+when present; without it the LAN table simply reports no native node addresses. Host-side Python/Node tooling is not a router dependency.
 
 ## Core network
 
@@ -32,9 +33,12 @@ a native `2xx:` address and routes a `3xx:...::/64`; ordinary LAN clients use
 that routed prefix without a local Yggdrasil daemon.
 
 Full Yggdrasil nodes may coexist on the LAN and multicast-peer with the router.
-Their native TUN/node address belongs in the peer table; their router-prefix
-Wi-Fi/Ethernet SLAAC address belongs in the LAN table. An NDP `router` flag does
-not change the MAC identity or create another device.
+The two address kinds stay distinct: a node's router-prefix Wi-Fi/Ethernet SLAAC
+address is its LAN address, and its native TUN/node address remains peer-table
+data. The LAN table reports that native address in its own column, attributed
+by MAC, so a self-contained node is distinguishable from a device that reaches
+Yggdrasil only through the router. An NDP `router` flag does not change the MAC
+identity or create another device.
 
 The current clean-install interface name is `ygg0`; older deployments used
 `ygg`. netifd derives a delegated prefix's class from its providing interface
@@ -62,6 +66,7 @@ hardening, not the current default. Trusted DNS permits TCP/UDP 53 separately.
 | Active `/tmp/dhcp.leases` entry | Dynamic identity, current IPv4 and hostname | Until lease expires/disappears; expiry `0` means unlimited |
 | `/etc/config/dhcp` `config host` | Persistent identity and optional reservation | Until explicit removal; may exist without a lease or IPv4 reservation |
 | Kernel `ip -6 neigh` | Observed IPv6 enrichment matched by MAC | Runtime only; never creates persistence or extends row lifetime |
+| Established Yggdrasil peer link | Native node address of a LAN device running its own daemon | Remembered in tmpfs for exactly the lifetime of the row it belongs to; never creates a row or extends one |
 | `config domain` | Optional canonical IPv6 and DNS name | Persistent metadata for an existing persistent identity |
 | Recent reachability / active probes | Online/Offline | A presence result, independent of identity lifetime |
 
@@ -107,6 +112,39 @@ This stable-first policy avoids repeatedly displaying/probing historical
 privacy IIDs when a stable address is available. It does not remove addresses
 from clients or force every privacy-only client down to one address. The full
 [SLAAC incident report](history/slaac-address-fix.md) is preserved separately.
+
+### Native node addresses
+
+`yggdrasilctl -json getPeers` on `unix:///tmp/yggdrasil/<ygg-interface>.sock`
+reports every peer link with its native `0200::/8` address. A LAN node found by
+multicast peers over its link-local address with the LAN device as the URI zone
+(percent-encoded), and an explicitly configured LAN peering uses its LAN IP.
+The backend keeps only established links whose endpoint is a literal address on
+this LAN, resolves that endpoint to a MAC through the kernel neighbour table,
+and deduplicates the inbound/outbound pair a device normally produces. The
+neighbour table is the only mapping from a peer's address to a MAC, which is
+the identity this inventory merges on.
+
+Peer fields are read by name when the name is known (`remote`/`endpoint`/`uri`,
+`address`/`ip`) and by shape otherwise: a transport URI and a `0200::/8` address
+are unambiguous on sight, and a value picked by name is re-checked against that
+shape. An upstream field rename therefore degrades to shape matching instead of
+silently emptying the column.
+
+A device that stops peering keeps its last known native address. The memory is
+`/tmp/yggdrasil-status-nodes`, a tmpfs file of `<mac> <address>` lines rewritten
+on every inventory pass and pruned to the MACs still emitted, so an address
+lives exactly as long as the row it belongs to — the DHCP lease or `config host`
+still decides that lifetime — and vanishes with it. A fresh observation replaces
+everything remembered for that MAC, so a node that changes its identity is
+corrected as soon as the router sees the new address. `ygg_node_live` reports
+whether the address comes from a current link or from that memory; the LuCI page
+dims a remembered address.
+
+Nothing is written to flash, UCI or a database, and a reboot starts from an
+empty memory. A native address is never probed for presence — reaching it would
+test the overlay, not the LAN — and is never merged into the routed-prefix
+address set.
 
 ### Presence
 
@@ -173,6 +211,10 @@ The rpcd object is `luci.yggdrasil-status`:
 | `ipv6` | String; primary selected IPv6 |
 | `canonical_ipv6` | String; empty when absent |
 | `ipv6_addresses` | Array of strings; stable-first selected set |
+| `ygg_node_ipv6` | String; primary native node address, empty when the device runs no daemon |
+| `ygg_node_addresses` | Array of strings; all native node addresses seen for that MAC |
+| `ygg_node` | Integer 0/1; the device is a self-contained Yggdrasil node |
+| `ygg_node_live` | Integer 0/1; the address comes from a current peer link rather than memory |
 | `dns` | String; lowercase JSON key, optional canonical DNS alias |
 | `online`, `persistent`, `static_ipv4` | Integer 0/1 flags |
 | `reserved_ipv4` | String; configured valid reservation or empty |

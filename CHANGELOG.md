@@ -17,7 +17,35 @@ A manual workflow prepares a draft from a clean, exact main-branch revision;
 it creates a fresh tag, refuses existing tags and never publishes or changes
 the deployer pin automatically. Download/error-path tests run under sh and
 BusyBox; CI verifies real public release/mirror bytes. No new real-router test
-is claimed. Core network, status runtime and client DNS behavior are unchanged.
+is claimed. Core network and client DNS behavior are unchanged.
+
+### Status: native node addresses in the LAN clients table
+
+The LAN table gains a `Yggdrasil node` column. When a LAN device runs its own
+Yggdrasil daemon and peers with the router, the backend reads the router's peer
+list, keeps the established links whose endpoint is a literal address on this
+LAN, resolves that endpoint to a MAC through the neighbour table and reports the
+device's native `0200::/7` address alongside its routed-prefix addresses. A
+self-contained node is now distinguishable from a device that reaches Yggdrasil
+only through the router.
+
+A device that stops peering keeps its last known address, dimmed in the page,
+for exactly as long as its row exists. The memory is `/tmp/yggdrasil-status-nodes`,
+rewritten every pass and pruned to the MACs still emitted, so it never extends a
+row's lifetime, never reaches flash and starts empty after a reboot. A fresh
+observation replaces everything remembered for that MAC, so a node that changes
+its identity is corrected as soon as the router sees it.
+
+Peer fields are read by known name and re-checked by shape, falling back to
+shape alone, so an upstream rename of `remote`/`address` degrades to shape
+matching instead of silently emptying the column.
+
+New `clients` fields: `ygg_node_ipv6`, `ygg_node_addresses`, `ygg_node` and
+`ygg_node_live`. The address is never probed for presence and never merged into
+the routed-prefix set. `yggdrasilctl` is optional: without it, or with nothing
+peering and nothing remembered, the column is simply empty. Covered by two new
+backend fixture groups and verified on the test router, including the
+remembered path.
 
 ## v5.9 — private-key handling and factory-reset revalidation
 

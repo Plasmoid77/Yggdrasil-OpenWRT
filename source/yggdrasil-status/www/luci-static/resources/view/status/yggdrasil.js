@@ -139,6 +139,34 @@ function ipv6Cell(client) {
 }
 
 
+/*
+ * The native 0200::/7 address of a LAN device that runs Yggdrasil itself,
+ * reported by the router's peer table. Devices without one reach Yggdrasil
+ * only through the router's routed prefix.
+ */
+function nodeCell(client) {
+	var addresses = Array.isArray(client.ygg_node_addresses)
+		? client.ygg_node_addresses.slice()
+		: [];
+
+	if (!addresses.length && client.ygg_node_ipv6)
+		addresses.push(client.ygg_node_ipv6);
+
+	if (!addresses.length)
+		return '—';
+
+	var live = !!client.ygg_node_live;
+
+	return E('div', {
+		'title': live
+			? _('Native Yggdrasil node address; the device is peering now')
+			: _('Last known native Yggdrasil node address; the device is not peering right now')
+	}, addresses.map(function(addr) {
+		return E('div', { 'style': live ? null : 'opacity: .55' }, addr);
+	}));
+}
+
+
 function backendError(result) {
 	return result && result.message
 		? result.message
@@ -440,6 +468,7 @@ function makeClientTable(clients) {
 		_('MAC'),
 		_('IPv4'),
 		_('Yggdrasil IPv6'),
+		_('Yggdrasil node'),
 		_('DNS'),
 		_('State'),
 		_('Persistence')
@@ -451,6 +480,7 @@ function makeClientTable(clients) {
 			client.mac || '—',
 			client.ipv4 || '—',
 			ipv6Cell(client),
+			nodeCell(client),
 			client.dns || '—',
 			client.online
 				? E('span', { 'style': 'color: #16a34a; font-weight: 600' }, _('Online'))

@@ -23,6 +23,14 @@ only: canonical `config domain` wins, otherwise an observed modified EUI-64
 wins, otherwise all observed privacy addresses remain eligible. No client
 addresses are assigned or removed and no runtime history is persisted.
 
+A LAN device running its own Yggdrasil daemon also shows its native `0200::/8`
+node address, taken from the router's peer table and attributed by MAC through
+the neighbour table, in a separate column from its routed-prefix LAN addresses.
+A device that stops peering keeps its last known address, dimmed, for exactly as
+long as its row exists; a fresh observation replaces it. The memory is a tmpfs
+file pruned to existing rows, so nothing reaches flash and a reboot starts
+empty. The address is never probed for presence.
+
 Canonical metadata attaches only to persistent identities. Recent kernel
 `REACHABLE` results avoid redundant probes; otherwise ARP/IPv6 probes determine
 Online/Offline. The page polls clients every 15 seconds while open.
