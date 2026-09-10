@@ -25,6 +25,7 @@ for fn in lower normalize_mac valid_mac valid_hostname valid_ipv4 first_ipv4 \
     mac_for_neighbor ygg_peer_endpoints ygg_node_rows ygg_node_addresses_for_mac \
     merge_node_cache write_address_memory save_address_memory ygg_node_is_live \
     recall_lan_addresses remember_lan_addresses \
+    discover_lan_addresses confirm_discovered_addresses \
     emit_client rpc_pin rpc_unpin; do load "$fn"; done
 
 # The production constants point at /tmp and /etc. Default every memory into
@@ -35,6 +36,7 @@ LAN_CACHE_FILE="$TMP/default-lan"
 LAN_STORE_FILE="$TMP/default-lan.flash"
 LAN_ADDR_ROWS=''
 LAN_YGG_PREFIX=''
+DISCOVERY_WANTED=0
 COUNT=0
 run() {
     COUNT=$((COUNT + 1))
@@ -374,6 +376,22 @@ pinned_lan_memory() {
     rm -f "$LAN_CACHE_FILE" "$LAN_STORE_FILE"
     eq '' "$(recall_lan_addresses "$PINNED")"
 
+    # A pass with no routed prefix observes nothing and recalls nothing, so it
+    # must not prune: the memory would be destroyed by a transient fault - a
+    # reboot where the Yggdrasil interface is not up yet - instead of by the row
+    # going away. The node memory is written on such a pass as before.
+    LAN_ADDR_ROWS=''
+    KNOWN_IPV6="$ADDR"; remember_lan_addresses "$PINNED" 1
+    EMITTED_MACS="|$PINNED|"; PERSISTENT_MACS="|$PINNED|"
+    save_address_memory
+    eq "$PINNED $ADDR" "$(cat "$LAN_STORE_FILE")"
+    LAN_YGG_PREFIX=''
+    LAN_ADDR_ROWS=''
+    save_address_memory
+    eq "$PINNED $ADDR" "$(cat "$LAN_STORE_FILE")"
+    eq "$PINNED $ADDR" "$(cat "$LAN_CACHE_FILE")"
+    LAN_YGG_PREFIX='303:170f:3ab2:166e:'
+
     # A recalled address is reported as not live, so the UI can grey it out
     # instead of presenting it as a current observation.
     LAN_ADDR_ROWS=''
@@ -391,9 +409,65 @@ pinned_lan_memory() {
     json_add_int() { if [ "$1" = ipv6_live ]; then LIVE="$2"; fi; }
     CANONICAL_IPV6=''; DNS_ALIAS=''
     LAN_ADDR_ROWS=''
+    DISCOVERY_WANTED=0
     emit_client pc "$PINNED" 192.0.2.5 1 200 '' 0 0 0 0
     eq 0 "$LIVE"
     eq "$PINNED $ADDR 0" "$(printf '%s' "$LAN_ADDR_ROWS" | head -n 1)"
+
+    # An absent device is no reason to disturb the LAN; a present one whose
+    # address the router cannot currently see is.
+    eq 0 "$DISCOVERY_WANTED"
+    probe_online() { return 0; }
+    emit_client pc "$PINNED" 192.0.2.5 1 200 '' 0 0 0 0
+    eq 1 "$DISCOVERY_WANTED"
+}
+
+# The router cannot derive a silent host's SLAAC address, so it asks the LAN for
+# it - sourced from the routed prefix, or the replies would be link-local only.
+address_discovery() {
+    LAN_DEV=br-lan
+    LAN_YGG_PREFIX='303:170f:3ab2:166e:'
+    PROBE="$TMP/discovery"
+    rm -f "$PROBE"
+    ip() { printf '    inet6 303:170f:3ab2:166e::1/64 scope global\n    inet6 fe80::1/64 scope link\n'; }
+    REPLIES="$TMP/replies"
+    printf '%s\n' \
+        '64 bytes from 303:170f:3ab2:166e::1: seq=0 ttl=64 time=0.3 ms' \
+        '64 bytes from 303:170f:3ab2:166e:aaaa::9: seq=0 ttl=64 time=0.6 ms (DUP!)' \
+        '64 bytes from 303:170f:3ab2:166e:aaaa::9: seq=1 ttl=64 time=0.6 ms (DUP!)' \
+        '64 bytes from fe80::1234: seq=1 ttl=64 time=0.7 ms (DUP!)' \
+        '64 bytes from 300:dead:beef:1:bbbb::7: seq=1 ttl=64 time=0.8 ms (DUP!)' > "$REPLIES"
+    ping() {
+        printf '%s\n' "$*" >> "$PROBE"
+        case "$*" in *ff02::1*) cat "$REPLIES" ;; esac
+    }
+
+    # A settled LAN is never probed.
+    DISCOVERY_WANTED=0
+    discover_lan_addresses
+    wait
+    if [ -f "$PROBE" ]; then fail 'probed a settled LAN'; fi
+
+    # The multicast ask is sourced from the router's routed address, and every
+    # address it turns up is confirmed once so the neighbour table records it
+    # with its MAC. The router's own address, a link-local reply, a foreign
+    # prefix and a repeated address must not each earn a probe.
+    DISCOVERY_WANTED=1
+    discover_lan_addresses
+    wait
+    eq "$(printf '%s\n' \
+        '-6 -c 3 -W 2 -I 303:170f:3ab2:166e::1 ff02::1%br-lan' \
+        '-6 -c 1 -W 1 303:170f:3ab2:166e:aaaa::9')" "$(cat "$PROBE")"
+
+    # Without a routed address on the bridge there is nothing to source from,
+    # and a link-local source would defeat the purpose.
+    rm -f "$PROBE"
+    ip() { printf '    inet6 fe80::1/64 scope link\n'; }
+    discover_lan_addresses
+    wait
+    if [ -f "$PROBE" ]; then fail 'probed without a routed source address'; fi
+
+    unset -f ip ping
 }
 
 # RPC guard fixtures stop at the UCI boundary: any unexpected mutation fails.
@@ -476,4 +550,5 @@ run 'dynamic hostnames cannot inherit canonical metadata' canonical_guard
 run 'a pinned row keeps its routed addresses across a reboot' pinned_lan_memory
 run 'Unpin destructive and pending-change guards' unpin_guards
 run 'Pin existing, expired, pending-change and busy guards' pin_guards
+run 'routed address discovery is sourced and gated' address_discovery
 printf '%s backend fixture groups passed\n' "$COUNT"

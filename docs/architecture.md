@@ -120,6 +120,36 @@ the way out — after the router's Yggdrasil identity changes, every address
 remembered under the old prefix is dead, and showing one would be worse than
 showing nothing.
 
+Memory covers a device the router has already seen. A device it has never seen
+needs the address to arrive somehow, and it cannot be derived: RFC 7217 mixes
+the prefix into the interface identifier, so it is neither the identifier in the
+host's link-local address nor the one in its MAC, and a privacy identifier is
+random by design. The backend therefore asks, in two steps.
+
+First it sends ICMPv6 echo requests to `ff02::1` on the LAN bridge, **sourced
+from the router's own routed address**. Each device then answers from the
+address it would use to reach that prefix — exactly the address this page
+reports. Sourcing the request from the router's link-local instead draws
+link-local replies only and is useless here. Three requests are sent rather than
+one: a device has to resolve the router's routed address before it can reply
+from its own, and on the test LAN a single request drew no replies at all while
+three drew every device.
+
+The replies name the addresses but do not record them, because the kernel
+populates the neighbour table when it transmits, not when it receives. So the
+second step sends one unicast probe to each newly named address, and that is
+what stores the address together with the MAC this inventory merges on. The
+router's own address, link-local replies, foreign prefixes and repeats are
+skipped, and the number of confirmations is capped so a crowded LAN cannot turn
+one inventory pass into an unbounded burst.
+
+The whole exchange is detached, so an open page never waits for it, and it runs
+only when some row was online while its address was missing or recalled. A LAN
+whose devices are all known sends nothing at all. The addresses it uncovers
+appear on the next pass, so a device that has just joined fills in within one
+poll instead of waiting for traffic of its own. A host that ignores echo
+requests to multicast addresses stays undiscovered until it talks.
+
 A recalled address stays eligible for presence probing. That is deliberate: a
 pinned row with no active lease has no IPv4 to `arping`, so before this memory
 existed such a row had no address to probe at all and was always reported
@@ -177,6 +207,13 @@ the flash memory. A flash copy is replaced only when its content actually
 changes, so the 15-second poll behind an open LuCI page does not write to flash
 on every tick; a node address changes only when the device changes its key, and
 a routed address only when the client changes its interface identifier.
+A pass that runs without a routed prefix - netifd has not finished bringing the
+Yggdrasil interface up after a reboot, say - can neither observe an address nor
+replay one, so it skips the routed memories entirely instead of pruning them. It
+would otherwise delete a good memory because of a transient fault rather than
+because a row went away, which is exactly what happened on the reboot that
+produced this rule.
+
 Unpinning a device drops its MAC from the persistent set, so the next pass
 removes it from both flash memories. Nothing is written to UCI or a database,
 the files are not configuration and are never read as such, and the installer

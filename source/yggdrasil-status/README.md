@@ -24,6 +24,11 @@ wins, otherwise all observed privacy addresses remain eligible. No client
 addresses are assigned or removed. A device the neighbour table has forgotten
 keeps its last known addresses, dimmed, for exactly as long as its row exists;
 addresses formed from a retired routed prefix are discarded rather than shown.
+When a device is present but its address is not visible, the backend sends
+detached ICMPv6 echo requests to `ff02::1` sourced from the router's routed
+address, so each device answers from the address this page reports, then
+confirms each answer with one unicast probe to record it against a MAC. A LAN
+whose devices are all known is never probed.
 
 A LAN device running its own Yggdrasil daemon also shows its native `0200::/8`
 node address, taken from the router's peer table and attributed by MAC through
