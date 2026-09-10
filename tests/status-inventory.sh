@@ -376,6 +376,22 @@ pinned_lan_memory() {
     rm -f "$LAN_CACHE_FILE" "$LAN_STORE_FILE"
     eq '' "$(recall_lan_addresses "$PINNED")"
 
+    # A pass with no routed prefix observes nothing and recalls nothing, so it
+    # must not prune: the memory would be destroyed by a transient fault - a
+    # reboot where the Yggdrasil interface is not up yet - instead of by the row
+    # going away. The node memory is written on such a pass as before.
+    LAN_ADDR_ROWS=''
+    KNOWN_IPV6="$ADDR"; remember_lan_addresses "$PINNED" 1
+    EMITTED_MACS="|$PINNED|"; PERSISTENT_MACS="|$PINNED|"
+    save_address_memory
+    eq "$PINNED $ADDR" "$(cat "$LAN_STORE_FILE")"
+    LAN_YGG_PREFIX=''
+    LAN_ADDR_ROWS=''
+    save_address_memory
+    eq "$PINNED $ADDR" "$(cat "$LAN_STORE_FILE")"
+    eq "$PINNED $ADDR" "$(cat "$LAN_CACHE_FILE")"
+    LAN_YGG_PREFIX='303:170f:3ab2:166e:'
+
     # A recalled address is reported as not live, so the UI can grey it out
     # instead of presenting it as a current observation.
     LAN_ADDR_ROWS=''

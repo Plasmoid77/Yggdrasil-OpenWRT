@@ -39,6 +39,12 @@ detached, capped, and runs only when a row was online while its address was
 missing or recalled, so a settled LAN is never probed and an open page never
 waits.
 
+A pass that runs without a routed prefix now skips the routed memories instead
+of pruning them. Found on a real reboot: netifd had not finished bringing the
+Yggdrasil interface up, the backend could observe nothing and replay nothing,
+and it rewrote the flash memory empty - destroying what it remembered about a
+pinned device over a transient fault rather than because the row went away.
+
 The `AGENTS.md` invariant that NDP must not create persistent history was the
 proxy for a stricter rule that still holds and is now stated directly: a
 memory's lifetime never exceeds the lifetime of the row it belongs to. The

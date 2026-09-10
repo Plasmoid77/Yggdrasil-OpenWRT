@@ -207,6 +207,13 @@ the flash memory. A flash copy is replaced only when its content actually
 changes, so the 15-second poll behind an open LuCI page does not write to flash
 on every tick; a node address changes only when the device changes its key, and
 a routed address only when the client changes its interface identifier.
+A pass that runs without a routed prefix - netifd has not finished bringing the
+Yggdrasil interface up after a reboot, say - can neither observe an address nor
+replay one, so it skips the routed memories entirely instead of pruning them. It
+would otherwise delete a good memory because of a transient fault rather than
+because a row went away, which is exactly what happened on the reboot that
+produced this rule.
+
 Unpinning a device drops its MAC from the persistent set, so the next pass
 removes it from both flash memories. Nothing is written to UCI or a database,
 the files are not configuration and are never read as such, and the installer

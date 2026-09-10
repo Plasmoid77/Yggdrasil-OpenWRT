@@ -679,6 +679,15 @@ write_address_memory() {
 save_address_memory() {
 	write_address_memory "$NODE_CACHE_FILE" "$EMITTED_MACS" "$YGG_NODE_ROWS"
 	write_address_memory "$NODE_STORE_FILE" "$PERSISTENT_MACS" "$YGG_NODE_ROWS"
+
+	# Without a routed prefix the backend cannot observe an address and cannot
+	# replay one either, so this pass has nothing to say about them. Pruning on
+	# such a pass would delete a good memory over a transient fault rather than
+	# because a row went away - observed for real on a reboot after which netifd
+	# had not finished bringing the Yggdrasil interface up, which emptied the
+	# flash memory of a pinned device that was sitting right there.
+	[ -n "$LAN_YGG_PREFIX" ] || return 0
+
 	write_address_memory "$LAN_CACHE_FILE" "$EMITTED_MACS" "$LAN_ADDR_ROWS"
 	write_address_memory "$LAN_STORE_FILE" "$PERSISTENT_MACS" "$LAN_ADDR_ROWS"
 }
