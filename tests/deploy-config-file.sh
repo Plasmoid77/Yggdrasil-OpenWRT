@@ -146,3 +146,13 @@ if grep -qE -- '--private-key\)' "$SCRIPT"; then
     fail "a --private-key option taking the key as a value exists"
 fi
 echo 'PASS: config key warns on a wide mode, sits between key file and environment, never an argument'
+
+# 5. an argument error is reported cleanly by the real script: die() used to
+#    call rollback() before that function was defined ("rollback: not found")
+out="$(sh "$SCRIPT" -n --config "$TMP/unknown-section.conf" 2>&1)" && fail "the real script accepted an unknown section"
+case "$out" in
+    *'not found'*) fail "argument error leaked a shell error: $out" ;;
+    *'unknown section'*) : ;;
+    *) fail "unexpected output for an unknown section: $out" ;;
+esac
+echo 'PASS: an argument error exits cleanly before any stage runs'

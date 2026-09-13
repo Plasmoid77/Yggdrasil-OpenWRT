@@ -74,10 +74,23 @@ readable beyond its owner draws the same warning a key file would. The Debian
 installer in Tainiy-proxy gained the same `--config` on the same day, with the
 subset of sections that apply there.
 
+Testing this on the router turned up an older defect: `die()` calls
+`rollback()`, which is defined further down the script, so an argument error -
+a bad peer URI, now also a bad section - printed `rollback: not found` after the
+real message. There is nothing to roll back at that point; `die` now calls
+`rollback` only once it exists.
+
 `tests/deploy-config-file.sh` evaluates the extracted option loop against a
 full settings file and checks every section, the ordering rules, the rejection
-cases, the mode warning and the key precedence. Not run on a router: the
-parser is the only new code, and the stages consume the same variables as before.
+cases, the mode warning and the key precedence, and runs the real script once
+with a bad section to confirm the error is reported cleanly. Validated on the
+LTE test router (OpenWrt 25.12.5, BusyBox ash): a settings file built from the
+live state with all of `[peers]` `[trusted]` `[private-key]` `[iface]` `[lan]`
+`[dns-domain]` `[dns-router]` `[dns-hosts]`, dry run then a full `-y` run -
+identity and routed `/64` unchanged, four peers up, trusted rules and the DNS
+firewall rule identical, a new `desktop.home.arpa` record resolving from a
+trusted client, LuCI and SSH reachable at `router.home.arpa`; a dry run without
+`--peer` reported the four existing sections as kept.
 
 ## Deployer 1.7.0 - the peer list is optional
 

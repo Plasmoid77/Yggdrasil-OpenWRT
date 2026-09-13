@@ -97,7 +97,9 @@ banner() {
 die() {
     err "$*"
     [ -n "$FAILED_STAGE" ] && err "failed during stage: $FAILED_STAGE"
-    rollback
+    # Argument errors die before rollback() is defined; there is nothing to
+    # roll back at that point, and ash would otherwise print "rollback: not found".
+    if command -v rollback >/dev/null 2>&1; then rollback; fi
     exit 1
 }
 
