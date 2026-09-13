@@ -51,6 +51,34 @@ memory's lifetime never exceeds the lifetime of the row it belongs to. The
 `sysupgrade` limitation is unchanged and now covers both files — OpenWrt's keep
 list covers `/etc/config/`, not these paths.
 
+## Deployer 1.8.0 - one settings file
+
+A routed deployment with peers, trusted addresses, a restored identity, DNS
+records and a couple of switches is a long command line, and a long command line
+is retyped - or pasted from a notes file - every time the router is redeployed.
+`--config FILE` reads the same settings from one file on the router instead:
+`[peers]`, `[trusted]`, `[private-key]`, `[iface]`, `[lan]`, `[dns-domain]`,
+`[dns-router]`, `[dns-hosts]`, `[status-pkg]`, `[status-version]` and `[flags]`,
+one value per line, `#` comments. The sections are the options by another name:
+every line goes through the same `add_*` and validation path, so nothing the
+command line would refuse can enter through the file, and an unknown section or
+flag is an error rather than a silently ignored typo. Options apply in the order
+given, so a value after `--config` adds to the file's lists and overrides its
+single values. `--dry-run`, `--yes` and `--wait` describe the run, not the
+node, and stay on the command line.
+
+The key keeps its rule: a `[private-key]` section is a file, not an argument,
+so it never reaches `/proc/<pid>/cmdline`; it sits between `--private-key-file`
+and `YGG_PRIVATE_KEY` in precedence, and a config file that holds a key but is
+readable beyond its owner draws the same warning a key file would. The Debian
+installer in Tainiy-proxy gained the same `--config` on the same day, with the
+subset of sections that apply there.
+
+`tests/deploy-config-file.sh` evaluates the extracted option loop against a
+full settings file and checks every section, the ordering rules, the rejection
+cases, the mode warning and the key precedence. Not run on a router: the
+parser is the only new code, and the stages consume the same variables as before.
+
 ## Deployer 1.7.0 - the peer list is optional
 
 The peer list was the one mandatory input: a run without `--peer` or
