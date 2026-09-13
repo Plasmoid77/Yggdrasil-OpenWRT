@@ -1,5 +1,13 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## Docs - waking LAN hosts from the router
+
+Operations gains a section on Wake-on-LAN: why the router is the place to send
+the magic packet from, the `etherwake` + `luci-app-wol` setup validated on the
+test router on 2026-09-14 (suspend 12 s, full power-off about two minutes),
+why the UDP-broadcast `wol` backend was not installed, and the host-side
+conditions that decide whether a wake works at all. No code changes.
+
 ## Status v5.4 - a pinned row also remembers its routed addresses
 
 v5.3 gave the Yggdrasil node column a memory. The routed-prefix column still had

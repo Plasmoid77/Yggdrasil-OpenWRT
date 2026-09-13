@@ -254,6 +254,47 @@ nslookup <HOST>.home.arpa <ROUTER_YGG_IPV6>
 
 Then test actual remote access to a permitted LAN service.
 
+## Waking LAN hosts over the mesh
+
+The router is the one LAN device that is always on and always reachable over
+Yggdrasil, which makes it the natural place to wake everything else from.
+A home server that is powered off or asleep has no mesh address to reach, but
+its MAC is on the status page, and a magic packet from the router brings it
+back without anyone touching the box.
+
+The approach used on the test router, 2026-09-14:
+
+```sh
+apk add etherwake luci-app-wol
+rm -rf /tmp/luci-indexcache* /tmp/luci-modulecache   # LuCI caches its menu at login
+/etc/init.d/rpcd reload
+```
+
+`etherwake` writes the magic packet as a raw Ethernet frame on the chosen
+interface, so it needs no IP route to the sleeping host and no broadcast
+address; the router is a member of `br-lan`, which is all it takes:
+
+```sh
+etherwake -i br-lan 6c:92:bf:2f:aa:28
+```
+
+`luci-app-wol` puts the same call under *Services -> Wake on LAN* (interface
+`br-lan`, hosts offered from the DHCP leases, or a MAC typed in). The page
+mentions an alternative backend, the `wol` package, which sends the packet as
+UDP to a broadcast address instead; it is only useful when the router is not
+on the target's segment, so it is not installed here.
+
+Measured on the test host (Debian 13, Intel NIC with `Wake-on: g`, BIOS
+wake-on-LAN enabled): back from suspend 12 s after the packet, back from a
+full power-off about two minutes including boot. Two things on the host side
+decide whether this works, and neither is the router's business: `ethtool
+<nic>` must show `Wake-on: g` (the driver default on common Intel adapters),
+and the BIOS must keep the adapter powered in S5. A host that goes to sleep
+on its own is a separate problem - on that server a desktop install's power
+management suspended it an hour after boot, and the fix was
+`/etc/systemd/sleep.conf.d/server.conf` with `AllowSuspend=no`, not a wake
+timer.
+
 ---
 
 ## Removing the setup
