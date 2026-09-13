@@ -7,15 +7,16 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
 # Usage:
-#   deploy-openwrt-yggdrasil.sh --peer tls://host:port [--peer ...] [options]
+#   deploy-openwrt-yggdrasil.sh [--peer tls://host:port ...] [options]
 #   ssh root@router sh -s -- --peer tls://host:port < deploy-openwrt-yggdrasil.sh
 #
-# The peer list is the only mandatory input. Everything else has a tested default.
+# Every option has a tested default. Peers given on the command line replace the
+# configured set; without any, the existing peer sections are kept as they are.
 
 set -u
 umask 077
 
-VERSION='1.6.1'
+VERSION='1.7.0'
 SELF="${0##*/}"
 # Piped straight from a URL — wget -qO- ... | sh -s -- ... — $0 is the shell, so
 # the banner and the usage text would announce themselves as "sh".
@@ -102,9 +103,9 @@ usage() {
     cat >&2 <<USAGE
 $SELF $VERSION — deploy routed Yggdrasil /64 on OpenWrt
 
-Required:
-  --peer URI            Public peer to configure. Repeatable.
-                        Schemes: tls tcp quic ws wss socks sockstls
+Peers (optional; without any, the existing peer sections are kept):
+  --peer URI            Public peer to configure. Repeatable. Replaces the
+                        configured set. Schemes: tls tcp quic ws wss socks sockstls
   --peers-file FILE     Read peers from FILE, one URI per line (# = comment).
 
 Node identity:
@@ -235,8 +236,6 @@ while [ $# -gt 0 ]; do
         *)             usage; die "unknown argument: $1" ;;
     esac
 done
-
-[ -n "$PEERS" ] || { usage; die "no peers given; --peer or --peers-file is required"; }
 
 # Ask for the Yggdrasil /128 addresses allowed through the firewall, unless they
 # were given on the command line or the run is explicitly non-interactive.
@@ -454,8 +453,18 @@ stage_preflight() {
         info "no existing '$IFACE' — a new key pair will be generated"
     fi
 
-    info 'peers to configure (the existing set is replaced):'
-    printf '%s\n' "$PEERS" | while IFS= read -r _p; do [ -n "$_p" ] && info "    $_p"; done
+    if [ -n "$PEERS" ]; then
+        info 'peers to configure (the existing set is replaced):'
+        printf '%s\n' "$PEERS" | while IFS= read -r _p; do [ -n "$_p" ] && info "    $_p"; done
+    else
+        _have="$(uci show network 2>/dev/null | grep -c "=yggdrasil_${IFACE}_peer\$" || true)"
+        if [ "${_have:-0}" -gt 0 ]; then
+            info "no --peer given: the $_have existing peer section(s) are kept"
+        else
+            warn "no --peer given and no peer sections exist: the node will have an"
+            warn "  address but no path into the network until peers are added"
+        fi
+    fi
     if [ -n "$TRUSTED" ]; then
         info "trusted Yggdrasil /128:"
         printf '%s\n' "$TRUSTED" | while IFS= read -r _t; do [ -n "$_t" ] && info "    $_t"; done
@@ -635,12 +644,23 @@ stage_yggdrasil() {
     fi
 
     # --- peers ---------------------------------------------------------------
-    # The peer list given on the command line is the peer list: existing
+    # A peer list given on the command line is the peer list: existing
     # sections are removed first, so a re-run cannot accumulate duplicates and
-    # the configuration always matches what was asked for.
+    # the configuration always matches what was asked for. Without one the
+    # existing sections are left alone, so a re-run for another stage - a new
+    # trusted address, the DNS module - does not need the peers repeated.
     _peer_type="yggdrasil_${IFACE}_peer"
     _n=0
-    if [ "$DRY_RUN" -eq 0 ]; then
+    if [ -z "$PEERS" ]; then
+        _have="$(uci show network 2>/dev/null | grep -c "=$_peer_type\$" || true)"
+        if [ "${_have:-0}" -gt 0 ]; then
+            info "peers: $_have existing section(s) kept (no --peer given)"
+        else
+            warn "no peers configured: the node gets an address but stays isolated"
+            warn "  pick current peers from https://github.com/yggdrasil-network/public-peers"
+            warn "  and re-run with --peer URI [--peer URI ...]"
+        fi
+    elif [ "$DRY_RUN" -eq 0 ]; then
         # delete from the end so indices stay valid
         _count="$(uci show network 2>/dev/null | grep -c "=$_peer_type\$" || true)"
         [ -z "$_count" ] && _count=0
