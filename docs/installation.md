@@ -59,6 +59,60 @@ wget -qO- https://raw.githubusercontent.com/Plasmoid77/Yggdrasil-OpenWRT/main/de
 `-q` suppresses download progress output,
 and `-O -` writes the download to standard output instead of a file.
 
+### One settings file instead of a long command line
+
+Everything that describes the node can be kept in one file on the router and
+passed with `--config FILE`. One value per line under a `[section]` header; `#`
+starts a comment, blank lines are ignored, an unknown section or flag is an
+error. Each line goes through the same validation as the option it stands for.
+
+```ini
+[peers]                 # as --peer
+tls://<host>:<port>
+wss://<host>/<path>
+
+[trusted]               # as --trusted
+<TRUSTED_YGG_IPV6>
+
+[private-key]           # as --private-key-file: the 128 hex characters
+<PRIVATE_KEY>
+
+[iface]                 # as --iface        (default ygg0)
+ygg0
+[lan]                   # as --lan          (default lan)
+lan
+
+[dns-domain]            # as --dns-domain   (default home.arpa)
+home.arpa
+[dns-router]            # as --dns-router   (default router)
+router
+[dns-hosts]             # as --dns-host, NAME=ADDR
+nas=<YGG_IPV6>
+
+[status-version]        # as --status-version
+v5.4
+[status-pkg]            # as --status-pkg
+/root/yggdrasil-status.tar.gz
+
+[flags]                 # the switches, one per line
+no-jumper
+no-dns
+```
+
+```sh
+scp ygg.conf root@<router>:/root/ygg.conf
+ssh root@<router> 'chmod 600 /root/ygg.conf; sh deploy-openwrt-yggdrasil.sh -y --config /root/ygg.conf'
+```
+
+Options are applied in the order given: a `--peer`, `--trusted` or `--dns-host`
+after `--config` is added to the file's list, a later single value such as
+`--iface` wins, and `--config` may be repeated. `-n`/`--dry-run`, `-y`/`--yes`
+and `--wait` describe the run rather than the node and stay on the command line.
+When the file holds the key, keep it mode 600 — the script warns if it is
+readable beyond its owner. Key precedence is `--private-key-file`, then the
+file's `[private-key]`, then `YGG_PRIVATE_KEY`; no option takes the key as a
+value, because `/proc/<pid>/cmdline` is world readable.
+
 ### Startup and management safety
 
 Install unrelated netifd protocol-handler packages first and let their own

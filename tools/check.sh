@@ -27,6 +27,8 @@ sh tests/deploy-secret-handling.sh
 busybox ash tests/deploy-secret-handling.sh
 sh tests/deploy-peers-optional.sh
 busybox ash tests/deploy-peers-optional.sh
+sh tests/deploy-config-file.sh
+busybox ash tests/deploy-config-file.sh
 sh tests/status-inventory.sh
 busybox ash tests/status-inventory.sh
 sh tests/status-download.sh

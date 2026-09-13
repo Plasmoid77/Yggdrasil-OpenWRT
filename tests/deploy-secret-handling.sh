@@ -70,6 +70,7 @@ eval "$(extract_function load_supplied_key)"
 
 ok() { :; }
 PRIVATE_KEY_FILE=''
+CONFIG_KEY=''
 SUPPLIED_KEY=''
 export YGG_PRIVATE_KEY="$SECRET"
 load_supplied_key

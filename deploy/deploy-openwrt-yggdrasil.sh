@@ -16,7 +16,7 @@
 set -u
 umask 077
 
-VERSION='1.7.0'
+VERSION='1.8.0'
 SELF="${0##*/}"
 # Piped straight from a URL — wget -qO- ... | sh -s -- ... — $0 is the shell, so
 # the banner and the usage text would announce themselves as "sh".
@@ -56,6 +56,8 @@ STATUS_API="https://api.github.com/repos/$STATUS_REPO/releases/latest"
 STATUS_RELEASE_BASE="https://github.com/$STATUS_REPO/releases/download"
 STATUS_BASE=''
 PRIVATE_KEY_FILE=''
+CONFIG_KEY=''
+CONFIG_KEY_SRC=''
 SUPPLIED_KEY=''
 DRY_RUN=0
 ASSUME_YES=0
@@ -95,13 +97,21 @@ banner() {
 die() {
     err "$*"
     [ -n "$FAILED_STAGE" ] && err "failed during stage: $FAILED_STAGE"
-    rollback
+    # Argument errors die before rollback() is defined; there is nothing to
+    # roll back at that point, and ash would otherwise print "rollback: not found".
+    if command -v rollback >/dev/null 2>&1; then rollback; fi
     exit 1
 }
 
 usage() {
     cat >&2 <<USAGE
 $SELF $VERSION — deploy routed Yggdrasil /64 on OpenWrt
+
+Every setting can come from the command line, from one settings file on the
+router, or both:
+  --config FILE         Read settings from FILE (format below). Repeatable.
+                        Options are applied in the order given: a later
+                        single value wins, lists accumulate.
 
 Peers (optional; without any, the existing peer sections are kept):
   --peer URI            Public peer to configure. Repeatable. Replaces the
@@ -145,6 +155,20 @@ Behaviour:
   -y, --yes             Non-interactive; do not prompt before applying
   --wait SECONDS        Seconds to wait for the Ygg prefix (default: $WAIT_SECS)
   -h, --help            This text
+
+Settings file: one value per line under a [section] header, # starts a
+comment, blank lines are ignored. Unknown sections are an error. Sections:
+  [peers]           peer URIs                  (as --peer)
+  [trusted]         Yggdrasil /128 addresses   (as --trusted)
+  [private-key]     the 128 hex character key  (as --private-key-file)
+  [iface] [lan]     one name each              (as --iface, --lan)
+  [dns-domain] [dns-router]                    (as --dns-domain, --dns-router)
+  [dns-hosts]       NAME=ADDR lines            (as --dns-host)
+  [status-pkg] [status-version]                (as --status-pkg, --status-version)
+  [flags]           one per line: no-jumper no-multicast no-lan no-firewall
+                    no-status dns no-dns       (as the switches of the same name)
+Keep the file mode 600 when it holds the key. --dry-run, --yes and --wait
+describe the run, not the node, and stay on the command line.
 USAGE
 }
 
@@ -197,8 +221,69 @@ add_dns_host() {
 }$_n=$_a"
 }
 
+# One settings file instead of a long command line. Every line goes through the
+# same add_*/validation path as the option it stands for, so nothing can enter
+# through the file that the command line would refuse.
+read_config() {
+    _cf="$1"
+    _cf_section=''
+    [ -r "$_cf" ] || die "cannot read config file: $_cf"
+    # shellcheck disable=SC2012
+    _cf_mode="$(ls -ld "$_cf" 2>/dev/null | cut -c1-10)"
+    while IFS= read -r _cf_line || [ -n "$_cf_line" ]; do
+        _cf_line="${_cf_line%%#*}"
+        _cf_line="$(printf '%s' "$_cf_line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+        [ -n "$_cf_line" ] || continue
+        case "$_cf_line" in
+            \[*\])
+                _cf_section="${_cf_line#\[}"
+                _cf_section="${_cf_section%\]}"
+                _cf_section="$(printf '%s' "$_cf_section" | tr -d ' \t')"
+                case "$_cf_section" in
+                    peers|trusted|private-key|iface|lan|dns-domain|dns-router|dns-hosts|status-pkg|status-version|flags) : ;;
+                    *) die "unknown section [$_cf_section] in $_cf" ;;
+                esac
+                continue ;;
+        esac
+        case "$_cf_section" in
+            peers)          add_peer "$_cf_line" ;;
+            trusted)        add_trusted "$_cf_line" ;;
+            dns-hosts)      add_dns_host "$_cf_line" ;;
+            iface)          IFACE="$_cf_line" ;;
+            lan)            LAN="$_cf_line" ;;
+            dns-domain)     DNS_DOMAIN="$_cf_line" ;;
+            dns-router)     DNS_ROUTER="$_cf_line" ;;
+            status-pkg)     STATUS_PKG="$_cf_line" ;;
+            status-version)
+                status_valid_version "$_cf_line" || die "invalid status version '$_cf_line' in $_cf (expected vMAJOR.MINOR[.PATCH])"
+                STATUS_VERSION="$_cf_line" ;;
+            flags)
+                case "$_cf_line" in
+                    no-jumper)    DO_JUMPER=0 ;;
+                    no-multicast) DO_MULTICAST=0 ;;
+                    no-lan)       DO_LAN=0 ;;
+                    no-firewall)  DO_FIREWALL=0 ;;
+                    no-status)    DO_STATUS=0 ;;
+                    dns)          DO_DNS=1 ;;
+                    no-dns)       DO_DNS=0 ;;
+                    *) die "unknown flag '$_cf_line' in [flags] of $_cf" ;;
+                esac ;;
+            private-key)
+                [ -z "$CONFIG_KEY" ] || die "[private-key] holds more than one line, or was given twice: $_cf"
+                CONFIG_KEY="$_cf_line"
+                CONFIG_KEY_SRC="[private-key] in $_cf"
+                case "$_cf_mode" in
+                    ????------) : ;;
+                    *) warn "config file holds the private key but is readable beyond its owner ($_cf_mode): $_cf" ;;
+                esac ;;
+            '') die "value before any [section] header in $_cf: $_cf_line" ;;
+        esac
+    done < "$_cf"
+}
+
 while [ $# -gt 0 ]; do
     case "$1" in
+        --config)      [ $# -ge 2 ] || die "--config needs a value";      read_config "$2"; shift 2 ;;
         --peer)        [ $# -ge 2 ] || die "--peer needs a value";        add_peer "$2";    shift 2 ;;
         --peers-file)  [ $# -ge 2 ] || die "--peers-file needs a value"
                        [ -r "$2" ]  || die "cannot read peers file: $2"
@@ -350,8 +435,9 @@ validate_private_key() {
 load_supplied_key() {
     _k=''
     # Copy then clear the exported value before choosing a source or spawning
-    # helpers. A key file takes precedence, but an ambient environment key must
-    # not remain available to every later child process in that case either.
+    # helpers. A key file takes precedence, then a [private-key] section of
+    # --config, then the environment; an ambient environment key must not
+    # remain available to every later child process in the other cases either.
     _env_key="${YGG_PRIVATE_KEY-}"
     unset YGG_PRIVATE_KEY
     if [ -n "$PRIVATE_KEY_FILE" ]; then
@@ -365,6 +451,9 @@ load_supplied_key() {
         esac
         _k="$(tr -d ' \t\r\n' < "$PRIVATE_KEY_FILE")"
         _src="$PRIVATE_KEY_FILE"
+    elif [ -n "$CONFIG_KEY" ]; then
+        _k="$CONFIG_KEY"
+        _src="$CONFIG_KEY_SRC"
     elif [ -n "$_env_key" ]; then
         _k="$(printf '%s' "$_env_key" | tr -d ' \t\r\n')"
         _src='the YGG_PRIVATE_KEY environment variable'
