@@ -36,6 +36,13 @@ sh deploy-openwrt-yggdrasil.sh -y \
 `-y` skips the confirmation prompt. Drop it to be asked once before anything is
 applied, and to be asked for the trusted addresses if `--trusted` was omitted.
 
+Peers given with `--peer`/`--peers-file` replace the configured set. Without
+any, the existing `yggdrasil_ygg0_peer` sections are kept, so a re-run for
+another stage — a new `--trusted` address, the DNS module — does not need the
+peers repeated. On a router that has none the script warns that the node gets
+an address but stays isolated until peers are added. Pick current entries from
+[`yggdrasil-network/public-peers`](https://github.com/yggdrasil-network/public-peers).
+
 A root login starts in `/root`, which lives on the overlay and survives a
 reboot. `/tmp` is a tmpfs: nothing prunes it on a timer, but it costs RAM and is
 empty again after a restart.

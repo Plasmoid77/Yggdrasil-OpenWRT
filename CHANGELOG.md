@@ -51,6 +51,26 @@ memory's lifetime never exceeds the lifetime of the row it belongs to. The
 `sysupgrade` limitation is unchanged and now covers both files — OpenWrt's keep
 list covers `/etc/config/`, not these paths.
 
+## Deployer 1.7.0 - the peer list is optional
+
+The peer list was the one mandatory input: a run without `--peer` or
+`--peers-file` stopped at argument parsing. That made every re-run repeat the
+peers even when the change was elsewhere - a new trusted address, the DNS module
+on an already deployed router - and it diverged from the Debian installer in
+Tainiy-proxy, where peers were optional from the start.
+
+Peers given on the command line still replace the configured set. Without any,
+the existing `yggdrasil_<iface>_peer` sections are left as they are, the
+pre-flight summary says how many are kept, and a router that has none gets a
+warning that the node will have an address but no path into the network, with
+a pointer to `public-peers`. The routed `/64` and the node address derive from
+the key, not from a peer, so the later stages are unaffected.
+
+`tests/deploy-peers-optional.sh` evaluates the extracted option loop without
+peers, checks that the mandatory check is gone and that the peers stage
+branches on an empty list, and confirms that peers which are given are still
+validated and collected.
+
 ## Deployer 1.6.1 - release discovery can authenticate
 
 Anonymous `api.github.com` requests are limited per source IP. A shared address
