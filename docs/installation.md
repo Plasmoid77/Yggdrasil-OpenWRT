@@ -9,11 +9,15 @@ Linux-client commands; run only with backups and another management path.
 ## Result
 
 ```text
-Yggdrasil routed /64 -> OpenWrt -> br-lan -> RA/SLAAC -> ordinary LAN clients
+Yggdrasil routed /64 -> OpenWrt -> br-lan -> RA (+ SLAAC or DHCPv6) -> LAN clients
 ```
 
-LAN devices receive routed Yggdrasil IPv6 without running Yggdrasil. DHCPv6
-and NAT66 are not used. Remote access is limited to trusted Ygg `/128`s.
+LAN devices receive routed Yggdrasil IPv6 without running Yggdrasil. By
+default they form their own addresses (SLAAC); with `--dhcpv6` the router
+assigns, reserves and names every address itself (stateful DHCPv6, no
+SLAAC - see [architecture](architecture.md) for what each mode implies,
+including that Android gets no routed address in managed mode). NAT66 is not
+used. Remote access is limited to trusted Ygg `/128`s.
 
 Optional modules provide a LuCI inventory, `home.arpa` names, and route-only
 Linux split DNS.
@@ -89,6 +93,10 @@ router
 [dns-hosts]             # as --dns-host, NAME=ADDR
 nas=<YGG_IPV6>
 
+[hosts]                 # as --host: DHCPv6 reservations, need the dhcpv6 flag
+nas=<MAC>=10            # <prefix>::10 for the client with this MAC
+bmc=duid:<HEX>%<IAID>=20  # by DUID (and IAID) when the DUID carries no MAC
+
 [status-version]        # as --status-version
 v5.4
 [status-pkg]            # as --status-pkg
@@ -97,6 +105,7 @@ v5.4
 [flags]                 # the switches, one per line
 no-jumper
 no-dns
+dhcpv6                  # router-managed addressing; slaac is the default
 ```
 
 ```sh
@@ -257,7 +266,8 @@ ifstatus ygg0 | jsonfilter -e '@["ipv6-prefix"][*].class'
 
 ## 2. Advertise the routed `/64` on LAN
 
-This intentionally removes the extra OpenWrt ULA and enables SLAAC-only RA:
+This intentionally removes the extra OpenWrt ULA and enables SLAAC-only RA
+(the default mode; the managed alternative follows):
 
 ```sh
 uci set network.lan.ip6assign='64'
@@ -278,6 +288,52 @@ uci commit dhcp
 /etc/init.d/network reload
 /etc/init.d/odhcpd restart
 ```
+
+### 2a. Managed alternative: stateful DHCPv6, no SLAAC
+
+What `--dhcpv6` writes instead of the `dhcp.lan` block above. RA stays (it
+carries the default route and the M/O flags); only the A flag goes:
+
+```sh
+uci set dhcp.lan.dhcpv6='server'
+uci set dhcp.lan.ra='server'
+uci set dhcp.lan.ra_slaac='0'
+uci -q delete dhcp.lan.ra_flags
+uci add_list dhcp.lan.ra_flags='managed-config'
+uci add_list dhcp.lan.ra_flags='other-config'
+uci set dhcp.lan.ra_default='2'
+uci set dhcp.lan.ra_preference='medium'
+```
+
+A reservation is a native `config host` with `hostid` (the hex IID; never 0,
+which means dynamic, and not 1, the router). Match by MAC works only for
+clients whose DUID embeds it (DUID-LLT, type 1, or DUID-LL, type 3); the
+type is the client stack's choice, not the OS's - on the test LAN a Debian
+host running dhcpcd sent DUID-LLT and a laptop sent DUID-UUID (type 4), which
+carries no MAC. Let such a client take a dynamic lease once, read its DUID
+from `ubus call dhcp ipv6leases`, and reserve by DUID, optionally `%IAID` in
+hex:
+
+```sh
+uci add dhcp host
+uci set dhcp.@host[-1].name='nas'
+uci set dhcp.@host[-1].mac='<MAC>'
+uci set dhcp.@host[-1].hostid='10'          # -> <prefix>::10
+uci commit dhcp
+/etc/init.d/odhcpd restart
+/etc/init.d/dnsmasq restart                  # config host also feeds DHCPv4
+```
+
+Mind two odhcpd facts before adding reservations by hand. A `config host`
+that has an IPv4 `ip` but no `hostid` already reserves an IPv6 IID - the last
+IPv4 octet's digits read as hex (`192.168.1.235 -> ::235`) - the moment DHCPv6
+is served, so an existing IPv4 reservation is an IPv6 one too and two sections
+can collide. And a client only gets a lease when it asks (reconnect, renew,
+reboot); the RA change alone does not move it, and a SLAAC address it already
+holds stays valid until its own lifetime ends. The deployer performs the
+collision check and reports implicit reservations; by hand, check
+`uci show dhcp | grep -E 'hostid|\.ip='` first. Verify with
+`ubus call dhcp ipv6leases`.
 
 ```sh
 ip -6 addr show dev br-lan
@@ -481,17 +537,19 @@ uci -q get network.lan.ip6class
 uci -q get dhcp.lan.dhcpv6
 uci -q get dhcp.lan.ra
 uci -q get dhcp.lan.ra_slaac
+uci -q get dhcp.lan.ra_flags
 ubus -v list luci.yggdrasil-status
 ubus call luci.yggdrasil-status clients
+ubus call dhcp ipv6leases                    # managed mode only
 ```
 
 Expected invariants:
 
 ```text
 LAN ip6class = ygg0
-DHCPv6       = disabled
 RA           = server
-RA SLAAC     = 1
+SLAAC mode:    DHCPv6 = disabled, RA SLAAC = 1, RA flags = none
+managed mode:  DHCPv6 = server,   RA SLAAC = 0, RA flags = managed-config other-config
 Ygg zone     = input REJECT / output ACCEPT / forward DROP
 no NAT66
 no blanket ygg -> lan forwarding

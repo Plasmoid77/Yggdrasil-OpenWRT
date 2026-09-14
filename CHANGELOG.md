@@ -1,5 +1,59 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## Deployer 1.9.0 and Status v5.5 - the router can own the LAN addresses
+
+Until now the routed `/64` reached LAN clients by SLAAC only. That reaches
+every client, Android included, but the router can merely watch which
+addresses the clients pick: a modern host forms a stable RFC 7217 address,
+often a rotating RFC 4941 one beside it, and no router-side rule can tell
+"the" address of a device that has not been talked to yet. The stated aim of
+the status page - one stable address a device is reachable at - was out of
+the router's hands.
+
+`--dhcpv6` (settings file: `[flags] dhcpv6`) puts it in the router's hands.
+RA stays, because it is the only carrier of the default route and the M/O
+flags; the A flag goes off, and odhcpd assigns every address from the routed
+prefix as it would from an ISP delegation. Reservations are native
+`config host` sections with `hostid`, written by `--host NAME=MAC=HOSTID` or
+`--host NAME=duid:HEX[%IAID]=HOSTID` (`[hosts]` in the file); with the DNS
+module on, `NAME.home.arpa` resolves to the reserved address, and odhcpd's
+own hosts file gives `NAME.lan` for free. The deployer refuses `hostid` 0
+(dynamic in odhcpd) and 1 (the router), refuses duplicates, and checks every
+new suffix against the existing sections - including the IID odhcpd derives
+implicitly from an IPv4 reservation without `hostid` (`.235 -> ::235`), which
+becomes a live IPv6 reservation the moment DHCPv6 is served. Existing
+sections are updated in place only when plain; shared, duplicated or
+option-laden ones are left alone, under the status module's DHCP lock.
+
+The mode is opt-in and SLAAC stays the default: a rerun of the deployer must
+never change LAN policy by itself. `--slaac` switches back. Verification
+checks the mode's exact UCI values (`ra_flags` as a set of two list entries),
+odhcpd, each reservation's `hostid`, and lists the leases bound so far.
+
+The accepted cost is written down rather than hidden: a client without a
+DHCPv6 client - Android by policy, some IoT - gets no address from the routed
+prefix in managed mode. A phone that needs Yggdrasil runs its own node. A MAC
+in `config host` matches only a DUID-LLT or DUID-LL client; a BMC with an
+all-zero DUID needs `duid:` with `%IAID` per port.
+
+Status v5.5 reads `ubus call dhcp ipv6leases` as an address source. A bound
+lease is attributed to a row through the MAC inside a DUID-LLT/LL - the rule
+odhcpd itself uses - and outranks anything merely observed, though not a
+canonical record; it is shown first and in bold, with `ipv6_source: dhcpv6`
+and `reserved_ipv6: 1` when the row's `config host` carries `hostid`. Such a
+row is protected from Unpin (`reserved_ipv6`): the reservation is removed
+where it was made, and Unpin's dnsmasq reload would not even reach odhcpd.
+`hostid` is a known option, so it no longer marks a section "complex". Rows
+still originate from DHCPv4 leases and `config host`; a DHCPv6-only client
+has no row - a known limit, not an accident.
+
+Validated on the test router (OpenWrt 25.12.5, odhcpd 5d7be43): managed ->
+SLAAC -> managed round trip through the deployer, a Debian client holding
+exactly the reserved `::10` and using it as source, `zeonux.home.arpa`
+resolved and reached from a trusted node, both the status backend and the
+page showing the lease. odhcpd's `hostid` parsing, MAC-from-DUID extraction
+and implicit-IID derivation were read in its source and confirmed live.
+
 ## Status v5.4.1 - the Node table shows the routed subnet again
 
 The **Routed subnet** column of the Node table showed a dash on every router,

@@ -26,6 +26,7 @@ for fn in lower normalize_mac valid_mac valid_hostname valid_ipv4 first_ipv4 \
     merge_node_cache write_address_memory save_address_memory ygg_node_is_live \
     recall_lan_addresses remember_lan_addresses \
     discover_lan_addresses confirm_discovered_addresses \
+    collect_dhcpv6_leases dhcpv6_lease_for_mac \
     emit_client rpc_pin rpc_unpin; do load "$fn"; done
 
 # The production constants point at /tmp and /etc. Default every memory into
@@ -316,6 +317,68 @@ canonical_guard() {
     eq '|aa:bb:cc:dd:ee:ff|' "$PERSISTENT_MACS"
 }
 
+# odhcpd's bound leases are the router's own record of the addresses it handed
+# out. A lease is attributed to a row through the MAC inside a DUID-LLT or
+# DUID-LL, exactly the way odhcpd itself matches a config host by MAC; other
+# DUID types carry no MAC and attribute nothing. In a row the lease comes first,
+# observed addresses follow, a canonical record still wins.
+dhcpv6_lease_source() {
+    LAN_YGG_PREFIX='300:1111:2222:3333:'
+    LAN_DEV=br-lan
+    MAC='aa:bb:cc:dd:ee:ff'
+    LEASE_LLT='{"duid":"00010001323A02A7AABBCCDDEEFF","ipv6-addr":[{"address":"300:1111:2222:3333::10"}]}'
+    LEASE_LL='{"duid":"00030001112233445566","ipv6-addr":[{"address":"300:1111:2222:3333::20"},{"address":"2001:db8::20"}]}'
+    LEASE_ZERO='{"duid":"00030001000000000000","ipv6-addr":[{"address":"300:1111:2222:3333::32d"}]}'
+    LEASE_UUID='{"duid":"00040001000000000000000000000000","ipv6-addr":[{"address":"300:1111:2222:3333::40"}]}'
+    ubus() { echo '{"device":{"br-lan":{"leases":[]}}}'; }
+    jsonfilter() {
+        case "$*" in
+            *'@.device[*].leases[*]'*) printf '%s\n' "$LEASE_LLT" "$LEASE_LL" "$LEASE_ZERO" "$LEASE_UUID" ;;
+            *'@.duid'*) sed -n 's/.*"duid":"\([^"]*\)".*/\1/p' ;;
+            *'ipv6-addr'*) tr ',' '\n' | sed -n 's/.*"address":"\([^"]*\)".*/\1/p' ;;
+            *) cat ;;
+        esac
+    }
+    collect_dhcpv6_leases
+    eq "$(printf '%s\n' \
+        'aa:bb:cc:dd:ee:ff 300:1111:2222:3333::10' \
+        '11:22:33:44:55:66 300:1111:2222:3333::20')" "$DHCPV6_LEASES"
+    eq '300:1111:2222:3333::10' "$(dhcpv6_lease_for_mac AA:BB:CC:DD:EE:FF)"
+    eq '' "$(dhcpv6_lease_for_mac 00:00:00:00:00:00)"
+
+    PRIVACY='300:1111:2222:3333:1234:5678:abcd:9999'
+    ip() { printf '%s\n' "$PRIVACY lladdr $MAC REACHABLE"; }
+    YGG_NODE_ROWS=''
+    EMITTED_MACS=''; PERSISTENT_MACS=''; LAN_ADDR_ROWS=''
+    LAN_CACHE_FILE="$TMP/lease-lan"; LAN_STORE_FILE="$TMP/lease-lan.flash"
+    ygg_node_is_live() { return 1; }
+    ygg_node_addresses_for_mac() { :; }
+    probe_online() { return 1; }
+    find_canonical_domain() { CANONICAL_IPV6=''; DNS_ALIAS=''; }
+    json_add_object() { :; }; json_close_object() { :; }
+    json_add_array() { :; }; json_close_array() { :; }
+    json_add_int() { :; }
+    json_add_string() { case "$1" in ipv6) GOT_IPV6="$2" ;; ipv6_source) GOT_SOURCE="$2" ;; esac; }
+    GOT_IPV6=''; GOT_SOURCE=''
+    emit_client host "$MAC" 192.0.2.1 0 200 '' 0 0 0 0
+    eq '300:1111:2222:3333::10' "$GOT_IPV6"
+    eq "300:1111:2222:3333::10 $PRIVACY" "$KNOWN_IPV6"
+    eq dhcpv6 "$GOT_SOURCE"
+    # a canonical record still outranks the lease
+    find_canonical_domain() { CANONICAL_IPV6='300:1111:2222:3333::5'; DNS_ALIAS=host.home.arpa; }
+    EMITTED_MACS=''
+    emit_client host "$MAC" 192.0.2.1 1 200 '' 0 0 0 0
+    eq '300:1111:2222:3333::5' "$GOT_IPV6"
+    eq canonical "$GOT_SOURCE"
+    # no lease for this MAC: the observed set is untouched
+    find_canonical_domain() { CANONICAL_IPV6=''; DNS_ALIAS=''; }
+    ip() { printf '%s\n' "$PRIVACY lladdr 22:33:44:55:66:77 REACHABLE"; }
+    EMITTED_MACS=''
+    emit_client other 22:33:44:55:66:77 192.0.2.2 0 200 '' 0 0 0 0
+    eq "$PRIVACY" "$GOT_IPV6"
+    eq observed "$GOT_SOURCE"
+}
+
 # The routed-prefix addresses come from NDP, which forgets a device as soon as
 # it goes quiet - long before its row expires. A pinned row keeps them the same
 # way it keeps its node address, and on the same storage class.
@@ -491,6 +554,7 @@ setup_rpc() {
     FOUND_HOST_MATCH_COUNT=1
     FOUND_HOST_MAC_COUNT=1
     FOUND_HOST_COMPLEX=0
+    FOUND_HOST_HOSTID=''
     FOUND_HOST_STATIC_IPV4=''
     FOUND_HOST_NAME=Host
     FOUND_HOST_SELECTOR=host_fixture
@@ -511,6 +575,10 @@ unpin_guards() {
     rpc_unpin
     eq complex_host "$CODE"
     FOUND_HOST_COMPLEX=0
+    FOUND_HOST_HOSTID=10
+    rpc_unpin
+    eq reserved_ipv6 "$CODE"
+    FOUND_HOST_HOSTID=''
     FOUND_HOST_STATIC_IPV4=192.0.2.1
     rpc_unpin
     eq static_confirmation_required "$CODE"
@@ -547,6 +615,7 @@ run 'a pinned row keeps its node address across a reboot' pinned_node_memory
 run 'REACHABLE shortcut, ARP, IPv6 and failed presence' presence
 run 'DHCP lifetime, MAC merge and persistent lease-free rows' identity_lifetime
 run 'dynamic hostnames cannot inherit canonical metadata' canonical_guard
+run 'DHCPv6 leases are attributed by DUID MAC and outrank observed addresses' dhcpv6_lease_source
 run 'a pinned row keeps its routed addresses across a reboot' pinned_lan_memory
 run 'Unpin destructive and pending-change guards' unpin_guards
 run 'Pin existing, expired, pending-change and busy guards' pin_guards

@@ -22,9 +22,11 @@ pointers for older links/comments, not competing sources of truth.
 
 ## Invariants and change boundaries
 
-1. Preserve Ygg identity/private keys, SLAAC-only LAN policy and trusted `/128`
-   access. No NAT66 or blanket forwarding. Keep native-node and routed-LAN
-   addresses distinct. Do not rename a working remote management interface.
+1. Preserve Ygg identity/private keys, the configured LAN addressing mode
+   (SLAAC by default; router-managed DHCPv6 only where `--dhcpv6` chose it -
+   a rerun must never flip it) and trusted `/128` access. No NAT66 or blanket
+   forwarding. Keep native-node and routed-LAN addresses distinct. Do not
+   rename a working remote management interface.
 2. Active DHCPv4 leases create dynamic rows; native `config host` creates
    persistence; merge by MAC. NDP only enriches addresses and must not extend
    row lifetime. A remembered address — routed or Yggdrasil node — is bounded by

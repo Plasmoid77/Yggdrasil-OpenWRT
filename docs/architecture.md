@@ -46,11 +46,44 @@ name. LAN `ip6class` must match that class. Setting `ip6class` on the Yggdrasil
 interface does not rename its published class. A mismatch can silently leave
 LAN without the routed prefix.
 
-LAN uses RA/SLAAC, not stateful DHCPv6. The client selects its IID and may use
-EUI-64, stable privacy, temporary addresses or several simultaneously. The
-router does not force an IID. This profile removes OpenWrt's generated ULA;
-link-local IPv6 and normal DHCPv4 remain. Keeping an additional ULA is a
-separate deliberately documented profile, not a silent default change.
+The LAN has two addressing modes, chosen at deployment and stored in
+`dhcp.<lan>`; the deployer verifies exactly one of them.
+
+**SLAAC (default, every 1.x deployment):** `dhcpv6=disabled`, `ra=server`,
+`ra_slaac=1`, `ra_flags=none`. The client selects its IID and may use EUI-64,
+stable privacy (RFC 7217), temporary addresses (RFC 4941) or several at once.
+The router does not force an IID and cannot know which address a device will
+use next; it can only observe. Every client with IPv6 gets an address, Android
+included.
+
+**Managed (`--dhcpv6`, deployer 1.9.0):** `dhcpv6=server`, `ra=server`,
+`ra_slaac=0`, `ra_flags` = `managed-config` + `other-config` (two list
+entries). RA stays because it is the only carrier of the default route, the
+on-link prefix and the M/O flags; only the autonomous flag goes away, so a
+client forms nothing itself and asks odhcpd instead. odhcpd hands out
+addresses from the delegated `/64` exactly as it would from an ISP prefix,
+keeps them in `ubus call dhcp ipv6leases`, writes `<hostname>.lan` for every
+lease with a hostname, and honours `config host` reservations: an explicit
+`option hostid` (hex IID), or, for a section that has an IPv4 `ip` but no
+`hostid`, the implicit IID odhcpd derives from the last IPv4 octet read as
+hex digits (`.235 -> ::235`). A MAC in `config host` matches only a client
+whose DUID is DUID-LLT or DUID-LL (the MAC is inside it); any other DUID type
+needs `option duid` (optionally `%IAID` in hex). `hostid` 0 means dynamic.
+Clients without a DHCPv6 client - Android by policy, some IoT - get **no**
+address from the routed prefix in this mode. That is the accepted trade: a
+phone that needs Yggdrasil runs its own node. The deployer refuses to enable
+the mode over `dhcpv6_na=0` or `ra_offlink=1` rather than override them.
+
+Switching modes on a live LAN is a rerun of the deployer with the other flag;
+it changes only `dhcp.<lan>`. A SLAAC address already formed stays valid on
+the client until its own lifetime ends (odhcpd's default cap is 90 min; the
+client decides), and a DHCPv6 lease appears only when the client next asks,
+so both can coexist for a while and the status page shows both. `--slaac`
+does not remove `hostid` options or derived DNS records; they are inert.
+
+Both modes remove OpenWrt's generated ULA; link-local IPv6 and normal DHCPv4
+remain. Keeping an additional ULA is a separate deliberately documented
+profile, not a silent default change.
 
 A dedicated `ygg` firewall zone is deny-by-default: INPUT REJECT, OUTPUT ACCEPT,
 FORWARD DROP. There is no NAT66 or blanket forwarding in either direction.
@@ -99,9 +132,19 @@ Display and probing use the same selected set:
 
 ```text
 canonical config domain present -> canonical address only
+otherwise a bound DHCPv6 lease  -> lease address(es) first, then the observed set
 otherwise observed modified EUI-64 -> that address only
 otherwise -> all unique observed addresses for that MAC in the Ygg prefix
 ```
+
+A DHCPv6 lease is attributed to a row through the MAC embedded in a DUID-LLT
+or DUID-LL - the same rule odhcpd applies when it matches `config host` by
+MAC - so a lease with any other DUID type attributes to nothing. An all-zero
+link-layer address inside a DUID is a firmware defect and is ignored. The
+lease is the router's own record of what it handed out, which is why it
+outranks anything merely observed but not the operator's canonical record.
+`ipv6_source` names the branch taken; `reserved_ipv6` is 1 when the row's
+`config host` carries `hostid`.
 
 The computed EUI-64 must actually be observed. Never invent an address merely
 from a MAC. The canonical address is the primary IPv6 and rendered in bold;
@@ -296,6 +339,8 @@ The rpcd object is `luci.yggdrasil-status`:
 | `ipv6` | String; primary selected IPv6 |
 | `canonical_ipv6` | String; empty when absent |
 | `ipv6_addresses` | Array of strings; stable-first selected set |
+| `ipv6_source` | String; `canonical`, `dhcpv6`, `eui64`, `observed`, `remembered` or empty |
+| `reserved_ipv6` | Integer 0/1; the row's `config host` carries a DHCPv6 `hostid` |
 | `ygg_node_ipv6` | String; primary native node address, empty when the device runs no daemon |
 | `ygg_node_addresses` | Array of strings; all native node addresses seen for that MAC |
 | `ygg_node` | Integer 0/1; the device is a self-contained Yggdrasil node |
@@ -316,8 +361,11 @@ Pin outcomes: `pinned`, `already_persistent`, `invalid_request`, `invalid_mac`,
 
 Unpin outcomes: `unpinned`, `already_dynamic`, `invalid_request`, `invalid_mac`,
 `busy`, `static_confirmation_required`, `ambiguous_host`, `shared_host`,
-`complex_host`, `pending_uci_changes`, `backup_failed`, `uci_failed`,
-`reload_failed`.
+`complex_host`, `reserved_ipv6`, `pending_uci_changes`, `backup_failed`,
+`uci_failed`, `reload_failed`. `hostid` is a known option, not a "complex"
+one, but a section carrying it is refused with `reserved_ipv6`: the
+reservation is removed where it was made (the deployer's `--host` or the DHCP
+page), and Unpin's dnsmasq reload would not even tell odhcpd about it.
 
 | Source relative to `source/yggdrasil-status/` | Installed path |
 | --- | --- |
@@ -437,7 +485,8 @@ config rule 'ygg_dns'
 | Decision | Reason and consequence |
 | --- | --- |
 | Native netifd/UCI/odhcpd/firewall4 | One owner for routing, prefix advertisement and policy; no container or parallel network manager |
-| SLAAC rather than stateful DHCPv6 | Ordinary IPv6 clients form their own addresses; do not assume universal EUI-64 support |
+| SLAAC as the default, stateful DHCPv6 as an opt-in mode | SLAAC reaches every client, Android included, but the router can only observe the addresses clients pick; privacy and RFC 7217 IIDs are stable per host yet not derivable, so no router-side rule can name "the" address. Managed DHCPv6 makes the router the owner of every address - assigned, known, reserved, named - with nothing configured on hosts, at the cost of clients without a DHCPv6 client. Opt-in, because a rerun of the deployer must never change LAN policy by itself |
+| Reservations through native `config host` `hostid` | odhcpd already implements matching (DUID, or MAC for DUID-LLT/LL) and the implicit IPv4-derived IID; the deployer only validates, checks collisions and writes the section |
 | DHCP lease lifetime plus `config host` persistence | Guests disappear naturally; no custom TTL, history DB or cron cleanup |
 | A row's remembered addresses stored like the row itself | A pinned row survives a reboot, so what is remembered about it must too; a lease-backed one must not. Storage class follows row lifetime instead of a blanket "never touch flash" rule |
 | Remembered routed addresses discarded on a prefix change | A routed address is only meaningful under the prefix it was formed from; showing one from a retired prefix is worse than showing nothing |
