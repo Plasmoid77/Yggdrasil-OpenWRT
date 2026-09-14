@@ -1,5 +1,16 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## Status v5.4.1 - the Node table shows the routed subnet again
+
+The **Routed subnet** column of the Node table showed a dash on every router,
+even with the `/64` prefix present and assigned to `lan`. The page selected the
+prefix with `p.class === 'ygg'`, but netifd sets a prefix's `class` to the
+interface name (`ygg0`; the proto handler calls `proto_add_ipv6_prefix` without
+a class), so the lookup never matched. The page now compares with the
+interface it is rendering, which is also correct for an interface not named
+`ygg0`. One line in `view/status/yggdrasil.js`; no backend, install or config
+change. Verified on the test router against `ubus call network.interface dump`.
+
 ## Docs - waking LAN hosts from the router
 
 Operations gains a section on Wake-on-LAN: why the router is the place to send
