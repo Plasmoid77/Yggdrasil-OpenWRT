@@ -1176,7 +1176,9 @@ section_is_client() {
 # odhcpd serves DHCPv6 - the operator should know which suffixes those are.
 report_implicit_hosts() {
     while IFS='|' read -r _es _ehid _eip _emac _eduid _eextra; do
-        [ -n "$_es" ] && [ -z "$_ehid" ] && [ -n "$_eip" ] || continue
+        [ -n "$_es" ] || continue
+        [ -z "$_ehid" ] || continue
+        [ -n "$_eip" ] || continue
         info "existing ${_es#dhcp.} (${_emac:-no mac}, ip $_eip) implies suffix ::$(implicit_hostid "$_eip")"
     done <<EH_EOF
 $(existing_hosts)
