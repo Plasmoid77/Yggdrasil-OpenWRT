@@ -1,4 +1,8 @@
-# Plan: managed (stateful DHCPv6) LAN addressing for Yggdrasil-OpenWRT
+# Plan record: managed (stateful DHCPv6) LAN addressing (2026-09-14)
+
+Historical design record for deployer 1.9.0 / status v5.5. Current behaviour
+is defined in [architecture](../architecture.md); this file is evidence of
+how the decisions were reached and reviewed, not a specification.
 
 Repo: ~/Projects/Yggdrasil-OpenWRT, branch `dhcpv6-managed-lan` (from main 1c05fe3).
 Revision 2, 2026-09-14, after two independent reviews (Codex gpt-5.6-sol and
@@ -206,3 +210,36 @@ D9. Release coordination: the deployer follows the newest status release. The
    host): `--slaac` rerun -> legacy state verified; `--dhcpv6 --host ...`
    rerun -> managed state verified, reserved address, `.lan` and `home.arpa`
    names, inbound reachability from a trusted /128, control reboot.
+
+## Implementation review (2026-09-14, Codex gpt-6-astra, effort high)
+
+Twelve findings on the first three commits, all confirmed against the code
+and fixed in the branch before the pull request:
+
+1. A rerun without a mode switch reset a managed router to SLAAC -> the
+   default became `keep`: `resolve_lan_mode` reads `dhcp.<lan>.dhcpv6` in
+   preflight, a fresh router gets SLAAC.
+2. The DHCP lock was taken after changes were staged -> taken first, with a
+   fresh pending-changes check, before any `uci set`.
+3. `--dns-host NAME` beside `--host NAME` left two answers -> refused.
+4. Two IAIDs of an all-zero DUID were one "client" -> `mac_in_key` returns
+   nothing for an all-zero MAC.
+5. A section reserved by a DUID-LLT/LL was not matched by a `--host` MAC
+   line (and vice versa; DUID lists ignored) -> `section_is_client`.
+6. `hostid='0x20'` and `%000a` escaped the duplicate checks -> normalised.
+7. `ygg_host_<name>` existing as a non-host section was converted ->
+   `uci get` on the id, any type refuses.
+8. Hostnames odhcpd rejects (leading/trailing `-`, >63) passed -> refused.
+9. Unbound DHCPv6 offers were shown as addresses -> `flags` must contain
+   `bound`.
+10. Unpin of an implicit (`ip`-derived) IPv6 reservation never reached
+    odhcpd -> `commit_and_reload_dhcp` reloads odhcpd whenever DHCPv6 is
+    served; the confirmation text says so.
+11. Verification accepted a running but disabled odhcpd and queried leases
+    only with `--host` -> `odhcpd enabled` check, leases listed in every
+    managed run.
+12. Docs told users to remove `hostid` "through the deployer", which has no
+    such operation, and claimed unconditional DNS cleanup -> rewritten.
+
+The plan itself is kept here as the design record; current behaviour is
+defined by the architecture guide.

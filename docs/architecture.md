@@ -49,7 +49,13 @@ LAN without the routed prefix.
 The LAN has two addressing modes, chosen at deployment and stored in
 `dhcp.<lan>`; the deployer verifies exactly one of them.
 
-**SLAAC (default, every 1.x deployment):** `dhcpv6=disabled`, `ra=server`,
+Without `--dhcpv6` or `--slaac` the deployer keeps the mode the router already
+runs (it reads `dhcp.<lan>.dhcpv6`); a router that runs nothing yet gets
+SLAAC. A rerun for peers, trusted addresses or DNS therefore never changes LAN
+policy. The deployer takes the status module's DHCP lock before it stages any
+`dhcp` change, so a Pin/Unpin in progress makes it stop with nothing touched.
+
+**SLAAC (fresh-router default, every 1.x deployment):** `dhcpv6=disabled`, `ra=server`,
 `ra_slaac=1`, `ra_flags=none`. The client selects its IID and may use EUI-64,
 stable privacy (RFC 7217), temporary addresses (RFC 4941) or several at once.
 The router does not force an IID and cannot know which address a device will
@@ -366,9 +372,15 @@ Unpin outcomes: `unpinned`, `already_dynamic`, `invalid_request`, `invalid_mac`,
 `busy`, `static_confirmation_required`, `ambiguous_host`, `shared_host`,
 `complex_host`, `reserved_ipv6`, `pending_uci_changes`, `backup_failed`,
 `uci_failed`, `reload_failed`. `hostid` is a known option, not a "complex"
-one, but a section carrying it is refused with `reserved_ipv6`: the
-reservation is removed where it was made (the deployer's `--host` or the DHCP
-page), and Unpin's dnsmasq reload would not even tell odhcpd about it.
+one, but a section carrying it is refused with `reserved_ipv6`: the status
+page does not delete reservations - the `hostid` option is removed in the DHCP
+page (or `uci delete dhcp.<section>.hostid`) first. Omitting a `--host` line
+from a deployer rerun does not remove it either; only its derived DNS record
+goes. A section with an IPv4 `ip` and no `hostid` is an implicit IPv6
+reservation while DHCPv6 is served (`.235 -> ::235`); it is not flagged
+`reserved_ipv6`, Unpin asks the usual static-reservation confirmation and,
+whenever any interface has `dhcpv6=server`, reloads odhcpd after dnsmasq so
+the removal actually reaches the DHCPv6 server.
 
 | Source relative to `source/yggdrasil-status/` | Installed path |
 | --- | --- |
@@ -488,7 +500,7 @@ config rule 'ygg_dns'
 | Decision | Reason and consequence |
 | --- | --- |
 | Native netifd/UCI/odhcpd/firewall4 | One owner for routing, prefix advertisement and policy; no container or parallel network manager |
-| SLAAC as the default, stateful DHCPv6 as an opt-in mode | SLAAC reaches every client, Android included, but the router can only observe the addresses clients pick; privacy and RFC 7217 IIDs are stable per host yet not derivable, so no router-side rule can name "the" address. Managed DHCPv6 makes the router the owner of every address - assigned, known, reserved, named - with nothing configured on hosts, at the cost of clients without a DHCPv6 client. Opt-in, because a rerun of the deployer must never change LAN policy by itself |
+| SLAAC on a fresh router, stateful DHCPv6 as an opt-in mode, the current mode kept on rerun | SLAAC reaches every client, Android included, but the router can only observe the addresses clients pick; privacy and RFC 7217 IIDs are stable per host yet not derivable, so no router-side rule can name "the" address. Managed DHCPv6 makes the router the owner of every address - assigned, known, reserved, named - with nothing configured on hosts, at the cost of clients without a DHCPv6 client. Opt-in, because a rerun of the deployer must never change LAN policy by itself |
 | Reservations through native `config host` `hostid` | odhcpd already implements matching (DUID, or MAC for DUID-LLT/LL) and the implicit IPv4-derived IID; the deployer only validates, checks collisions and writes the section |
 | DHCP lease lifetime plus `config host` persistence | Guests disappear naturally; no custom TTL, history DB or cron cleanup |
 | A row's remembered addresses stored like the row itself | A pinned row survives a reboot, so what is remembered about it must too; a lease-backed one must not. Storage class follows row lifetime instead of a blanket "never touch flash" rule |

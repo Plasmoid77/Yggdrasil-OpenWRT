@@ -326,14 +326,16 @@ dhcpv6_lease_source() {
     LAN_YGG_PREFIX='300:1111:2222:3333:'
     LAN_DEV=br-lan
     MAC='aa:bb:cc:dd:ee:ff'
-    LEASE_LLT='{"duid":"00010001323A02A7AABBCCDDEEFF","ipv6-addr":[{"address":"300:1111:2222:3333::10"}]}'
-    LEASE_LL='{"duid":"00030001112233445566","ipv6-addr":[{"address":"300:1111:2222:3333::20"},{"address":"2001:db8::20"}]}'
-    LEASE_ZERO='{"duid":"00030001000000000000","ipv6-addr":[{"address":"300:1111:2222:3333::32d"}]}'
-    LEASE_UUID='{"duid":"00040001000000000000000000000000","ipv6-addr":[{"address":"300:1111:2222:3333::40"}]}'
+    LEASE_LLT='{"duid":"00010001323A02A7AABBCCDDEEFF","flags":["bound"],"ipv6-addr":[{"address":"300:1111:2222:3333::10"}]}'
+    LEASE_LL='{"duid":"00030001112233445566","flags":["bound"],"ipv6-addr":[{"address":"300:1111:2222:3333::20"},{"address":"2001:db8::20"}]}'
+    LEASE_ZERO='{"duid":"00030001000000000000","flags":["bound"],"ipv6-addr":[{"address":"300:1111:2222:3333::32d"}]}'
+    LEASE_UUID='{"duid":"00040001000000000000000000000000","flags":["bound"],"ipv6-addr":[{"address":"300:1111:2222:3333::40"}]}'
+    LEASE_OFFER='{"duid":"00010001323A02A7112233445577","flags":[],"ipv6-addr":[{"address":"300:1111:2222:3333::50"}]}'
     ubus() { echo '{"device":{"br-lan":{"leases":[]}}}'; }
     jsonfilter() {
         case "$*" in
-            *'@.device[*].leases[*]'*) printf '%s\n' "$LEASE_LLT" "$LEASE_LL" "$LEASE_ZERO" "$LEASE_UUID" ;;
+            *'@.device[*].leases[*]'*) printf '%s\n' "$LEASE_LLT" "$LEASE_LL" "$LEASE_ZERO" "$LEASE_UUID" "$LEASE_OFFER" ;;
+            *'@.flags'*) tr ',' '\n' | sed -n 's/.*"flags":\["\([^"]*\)".*/\1/p' ;;
             *'@.duid'*) sed -n 's/.*"duid":"\([^"]*\)".*/\1/p' ;;
             *'ipv6-addr'*) tr ',' '\n' | sed -n 's/.*"address":"\([^"]*\)".*/\1/p' ;;
             *) cat ;;
@@ -345,6 +347,7 @@ dhcpv6_lease_source() {
         '11:22:33:44:55:66 300:1111:2222:3333::20')" "$DHCPV6_LEASES"
     eq '300:1111:2222:3333::10' "$(dhcpv6_lease_for_mac AA:BB:CC:DD:EE:FF)"
     eq '' "$(dhcpv6_lease_for_mac 00:00:00:00:00:00)"
+    eq '' "$(dhcpv6_lease_for_mac 11:22:33:44:55:77)"
 
     PRIVACY='300:1111:2222:3333:1234:5678:abcd:9999'
     ip() { printf '%s\n' "$PRIVACY lladdr $MAC REACHABLE"; }

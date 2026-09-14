@@ -105,7 +105,8 @@ v5.4
 [flags]                 # the switches, one per line
 no-jumper
 no-dns
-dhcpv6                  # router-managed addressing; slaac is the default
+dhcpv6                  # router-managed addressing; without dhcpv6/slaac the
+                        # router keeps its current mode (a fresh one: SLAAC)
 ```
 
 ```sh

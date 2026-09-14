@@ -25,10 +25,14 @@ becomes a live IPv6 reservation the moment DHCPv6 is served. Existing
 sections are updated in place only when plain; shared, duplicated or
 option-laden ones are left alone, under the status module's DHCP lock.
 
-The mode is opt-in and SLAAC stays the default: a rerun of the deployer must
-never change LAN policy by itself. `--slaac` switches back. Verification
-checks the mode's exact UCI values (`ra_flags` as a set of two list entries),
-odhcpd, each reservation's `hostid`, and lists the leases bound so far.
+The mode is opt-in: without `--dhcpv6` or `--slaac` the deployer keeps the
+mode the router already runs, and a fresh router gets SLAAC, so a rerun for
+any other reason never changes LAN policy. `--slaac` switches back. The
+deployer takes the status module's DHCP lock before staging any change, so a
+Pin/Unpin in progress stops it with nothing touched. Verification checks the
+mode's exact UCI values (`ra_flags` as a set of two list entries), that
+odhcpd runs and is enabled, each reservation's `hostid`, and lists the leases
+bound so far.
 
 The accepted cost is written down rather than hidden: a client without a
 DHCPv6 client - Android by policy, some IoT - gets no address from the routed
@@ -40,9 +44,13 @@ Status v5.5 reads `ubus call dhcp ipv6leases` as an address source. A bound
 lease is attributed to a row through the MAC inside a DUID-LLT/LL - the rule
 odhcpd itself uses - and outranks anything merely observed, though not a
 canonical record; it is shown first and in bold, with `ipv6_source: dhcpv6`
-and `reserved_ipv6: 1` when the row's `config host` carries `hostid`. Such a
-row is protected from Unpin (`reserved_ipv6`): the reservation is removed
-where it was made, and Unpin's dnsmasq reload would not even reach odhcpd.
+and `reserved_ipv6: 1` when the row's `config host` carries `hostid`. Only
+bound leases count; an offer a client never took is not an address. Such a
+row is protected from Unpin (`reserved_ipv6`): the `hostid` is removed in the
+DHCP page first, the status page deletes no reservations. A host with an IPv4
+`ip` and no `hostid` is an implicit IPv6 reservation while DHCPv6 is served;
+Unpin keeps asking its static-reservation confirmation and now reloads odhcpd
+after dnsmasq whenever DHCPv6 is served, so the removal reaches the server.
 `hostid` is a known option, so it no longer marks a section "complex". Rows
 still originate from DHCPv4 leases and `config host`; a DHCPv6-only client
 has no row - a known limit, not an accident.

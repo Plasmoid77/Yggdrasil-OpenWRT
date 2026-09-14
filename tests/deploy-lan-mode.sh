@@ -26,13 +26,13 @@ extract_function() {
 eval "$(sed -n '/^set -u$/,/^VERSION=/p' "$SCRIPT" | sed '/^set -u$/d')"
 eval "$(sed -n '/^# -* defaults -*$/,/^usage() {$/p' "$SCRIPT" | sed '$d')"
 for f in add_peer add_trusted add_dns_host lower_str mac_in_key norm_hostid add_host status_valid_version read_config \
-         reserved_addr implicit_hostid existing_hosts report_implicit_hosts apply_hosts stage_lan; do
+         resolve_lan_mode reserved_addr implicit_hostid existing_hosts section_is_client report_implicit_hosts apply_hosts stage_lan; do
     body="$(extract_function "$f")"
     [ -n "$body" ] || { echo "FAIL: function $f not found in deployer" >&2; exit 1; }
     eval "$body"
 done
 PARSER="$(sed -n '/^while \[ \$# -gt 0 \]; do$/,/^done$/p' "$SCRIPT")"
-POSTCHECK="$(sed -n '/^# A reservation only means something/,/^fi$/p' "$SCRIPT")"
+POSTCHECK="$(sed -n '/^# A reservation only means something/,/^# Ask for the Yggdrasil/p' "$SCRIPT" | sed '$d')"
 [ -n "$POSTCHECK" ] || { echo 'FAIL: --host post-parse check not found' >&2; exit 1; }
 
 DIED=''; WARNED=''; INFOD=''
@@ -48,11 +48,27 @@ usage() { :; }
 have()  { return 1; }
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
-reset() { DIED=''; WARNED=''; INFOD=''; HOSTS=''; LAN_MODE='slaac'; DO_LAN=1; DO_DNS=1; }
+reset() { DIED=''; WARNED=''; INFOD=''; HOSTS=''; DNS_HOSTS=''; LAN_MODE='keep'; DO_LAN=1; DO_DNS=1; }
 
-# 1. mode precedence: last switch wins, file flags count like switches
+# 1. mode precedence: last switch wins, file flags count like switches; without
+#    a switch the router keeps the mode it runs, a fresh router gets SLAAC
 reset; set --; eval "$PARSER"
-[ "$LAN_MODE" = slaac ] || fail "default LAN mode is not slaac"
+[ "$LAN_MODE" = keep ] || fail "default LAN mode is not keep"
+LAN='lan'
+uci() { case "$1 $2 $3" in '-q get dhcp.lan.dhcpv6') echo "$CUR_DHCPV6" ;; *) return 1 ;; esac; }
+CUR_DHCPV6='server'; reset; resolve_lan_mode
+[ "$LAN_MODE" = dhcpv6 ] || fail "a managed router was not kept managed on a plain rerun"
+CUR_DHCPV6='disabled'; reset; resolve_lan_mode
+[ "$LAN_MODE" = slaac ] || fail "a SLAAC router was not kept on SLAAC"
+CUR_DHCPV6=''; reset; resolve_lan_mode
+[ "$LAN_MODE" = slaac ] || fail "a fresh router did not default to SLAAC"
+CUR_DHCPV6='disabled'; reset; HOSTS='a mac 6c:92:bf:2f:aa:28 10'; resolve_lan_mode
+printf '%s' "$DIED" | grep -q 'needs --dhcpv6' || fail "--host on a kept SLAAC router accepted"
+CUR_DHCPV6='server'; reset; HOSTS='a mac 6c:92:bf:2f:aa:28 10'; resolve_lan_mode
+[ -z "$DIED" ] || fail "--host on a kept managed router rejected: $DIED"
+CUR_DHCPV6='server'; reset; LAN_MODE='slaac'; resolve_lan_mode
+[ "$LAN_MODE" = slaac ] || fail "an explicit --slaac did not override the current managed mode"
+unset -f uci
 reset; set -- --dhcpv6; eval "$PARSER"
 [ "$LAN_MODE" = dhcpv6 ] || fail "--dhcpv6 not applied"
 reset; set -- --dhcpv6 --slaac; eval "$PARSER"
@@ -106,17 +122,38 @@ reset; set -- --dhcpv6 --host 'a=duid:000300016c92bf2faa28=10' --host 'b=6C:92:B
 printf '%s' "$DIED" | grep -q 'same client' || fail "DUID-LL line and MAC line for one client accepted: $DIED"
 reset; set -- --dhcpv6 --host 'a=duid:0004ecbcbfb80ef2996849bca6b0d0a6ffce=10' --host 'b=6c:92:bf:2f:aa:28=11'; eval "$PARSER"
 [ -z "$DIED" ] || fail "a DUID-UUID line was treated as carrying a MAC: $DIED"
-[ "$(mac_in_key duid 00030001000000000000%2b67)" = '00:00:00:00:00:00' ] || fail "mac_in_key ignores the IAID suffix"
+[ "$(mac_in_key duid 000300016c92bf2faa28%2b67)" = '6c:92:bf:2f:aa:28' ] || fail "mac_in_key does not ignore the IAID suffix"
+[ -z "$(mac_in_key duid 00030001000000000000%2b67)" ] || fail "mac_in_key treated an all-zero MAC as an identity"
 [ -z "$(mac_in_key duid 0004ecbcbfb80ef2996849bca6b0d0a6ffce)" ] || fail "mac_in_key invented a MAC for a UUID DUID"
+# a BMC with one all-zero DUID on two ports: distinct IAIDs are distinct clients
+reset; set -- --dhcpv6 --host 'bmc1=duid:00030001000000000000%2b67=20' --host 'bmc2=duid:00030001000000000000%56ce=21'; eval "$PARSER"
+[ -z "$DIED" ] || fail "two IAIDs of a zero-MAC DUID rejected as one client: $DIED"
+# odhcpd parses the IAID and the hostid numerically
+reset; set -- --dhcpv6 --host 'a=duid:0004abcd%000a=20' --host 'b=duid:0004abcd%a=21'; eval "$PARSER"
+printf '%s' "$DIED" | grep -q 'given twice' || fail "IAID %000a and %a accepted as different clients"
+[ "$(norm_hostid 0x20)" = 20 ] || fail "norm_hostid does not strip a 0x prefix"
+for case_ in 'leading-dash:-nas=6c:92:bf:2f:aa:28=10' 'trailing-dash:nas-=6c:92:bf:2f:aa:28=10' \
+             "too-long:$(printf 'a%.0s' $(seq 64))=6c:92:bf:2f:aa:28=10"; do
+    name="${case_%%:*}"
+    reset; set -- --dhcpv6 --host "${case_#*:}"; eval "$PARSER"
+    [ -n "$DIED" ] || fail "--host case '$name' was accepted"
+done
+reset; set -- --dhcpv6 --host "$(printf 'a%.0s' $(seq 63))=6c:92:bf:2f:aa:28=10"; eval "$PARSER"
+[ -z "$DIED" ] || fail "a 63-character hostname rejected: $DIED"
 echo 'PASS: --host rejects malformed and duplicate reservations'
 
 # 3. --host needs managed mode and the LAN stage
-reset; set -- --host 'a=6c:92:bf:2f:aa:28=10'; eval "$PARSER"; eval "$POSTCHECK"
-printf '%s' "$DIED" | grep -q 'needs --dhcpv6' || fail "--host without --dhcpv6 accepted"
+reset; set -- --slaac --host 'a=6c:92:bf:2f:aa:28=10'; eval "$PARSER"; eval "$POSTCHECK"
+printf '%s' "$DIED" | grep -q 'needs --dhcpv6' || fail "--host with --slaac accepted"
 reset; set -- --dhcpv6 --no-lan --host 'a=6c:92:bf:2f:aa:28=10'; eval "$PARSER"; eval "$POSTCHECK"
 printf '%s' "$DIED" | grep -q 'no-lan' || fail "--host with --no-lan accepted"
 reset; set -- --dhcpv6 --host 'a=6c:92:bf:2f:aa:28=10'; eval "$PARSER"; eval "$POSTCHECK"
 [ -z "$DIED" ] || fail "--dhcpv6 --host rejected: $DIED"
+reset; set -- --host 'a=6c:92:bf:2f:aa:28=10'; eval "$PARSER"; eval "$POSTCHECK"
+[ -z "$DIED" ] || fail "--host without a mode switch must wait for preflight to settle the mode: $DIED"
+# the same name as --dns-host and --host would leave two answers
+reset; set -- --dhcpv6 --dns-host 'nas=300:1::5' --host 'NAS=6c:92:bf:2f:aa:28=10'; eval "$PARSER"; eval "$POSTCHECK"
+printf '%s' "$DIED" | grep -q 'also given as --dns-host' || fail "--dns-host and --host for one name accepted"
 echo 'PASS: --host is refused outside managed mode'
 
 # 4. address arithmetic
@@ -162,19 +199,23 @@ dhcp.cfg04=host
 dhcp.cfg04.name='tagged'
 dhcp.cfg04.mac='aa:bb:cc:dd:ee:03'
 dhcp.cfg04.tag='iot'
+dhcp.cfg06=host
+dhcp.cfg06.name='byduid'
+dhcp.cfg06.duid='00030001aabbccddee40'
+dhcp.cfg06.hostid='40'
 dhcp.lan=dhcp
 dhcp.lan.dhcpv6='disabled'"
 uci() {
     case "$1 $2" in
         'show dhcp') printf '%s\n' "$FIXTURE" ;;
-        '-q get') return 1 ;;
+        '-q get') case "$3" in dhcp.ygg_host_printer) echo host ;; dhcp.ygg_host_alias) echo domain ;; *) return 1 ;; esac ;;
         *) return 0 ;;
     esac
 }
 YGG_PREFIX='303:170f:3ab2:166e::/64'
 
 lines="$(existing_hosts)"
-[ "$(printf '%s\n' "$lines" | wc -l | tr -d ' ')" = 5 ] || fail "existing_hosts did not list five sections: $lines"
+[ "$(printf '%s\n' "$lines" | wc -l | tr -d ' ')" = 6 ] || fail "existing_hosts did not list six sections: $lines"
 printf '%s\n' "$lines" | grep -qxF 'dhcp.cfg02|10|192.168.1.235|6c:92:bf:2f:aa:28||' || fail "cfg02 line wrong: $lines"
 printf '%s\n' "$lines" | grep -qF 'dhcp.cfg03||' | grep -q 'aa:bb:cc:dd:ee:01,aa:bb:cc:dd:ee:02' \
     || printf '%s\n' "$lines" | grep -qF '|aa:bb:cc:dd:ee:01,aa:bb:cc:dd:ee:02|' || fail "multi-MAC list not joined: $lines"
@@ -201,12 +242,27 @@ reset; UCI_LOG=''; HOSTS='x mac aa:bb:cc:dd:ee:03 70'; apply_hosts
 printf '%s' "$DIED" | grep -q 'extra options (tag)' || fail "section with extra options was edited: $DIED"
 # the derived section id is already taken by a different client
 reset; UCI_LOG=''; HOSTS='printer mac aa:bb:cc:dd:ee:99 80'; apply_hosts
-printf '%s' "$DIED" | grep -q 'ygg_host_printer already exists for another client' || fail "occupied section id was reused: $DIED"
+printf '%s' "$DIED" | grep -q 'ygg_host_printer already exists (host)' || fail "occupied section id was reused: $DIED"
 printf '%s' "$UCI_LOG" | grep -q 'ygg_host_printer' && fail "occupied section was written to anyway: $UCI_LOG"
 # the same client re-supplied under its own id updates in place, no collision
 reset; UCI_LOG=''; HOSTS='printer mac aa:bb:cc:dd:ee:20 77'; apply_hosts
 [ -z "$DIED" ] || fail "re-supplying the printer reservation died: $DIED"
 printf '%s' "$UCI_LOG" | grep -qxF 'set dhcp.ygg_host_printer.hostid=77' || fail "printer not updated in place: $UCI_LOG"
+# the derived id exists as a section of another type
+reset; UCI_LOG=''; HOSTS='alias mac aa:bb:cc:dd:ee:98 81'; apply_hosts
+printf '%s' "$DIED" | grep -q 'ygg_host_alias already exists (domain)' || fail "a non-host section with the derived id was converted: $DIED"
+printf '%s' "$UCI_LOG" | grep -q 'ygg_host_alias' && fail "non-host section was written to: $UCI_LOG"
+# a section reserved by a DUID-LL is the same client as a --host line by that MAC
+reset; UCI_LOG=''; HOSTS='byduid mac aa:bb:cc:dd:ee:40 41'; apply_hosts
+[ -z "$DIED" ] || fail "MAC line against an existing DUID-LL section died: $DIED"
+printf '%s' "$UCI_LOG" | grep -qxF 'set dhcp.cfg06.hostid=41' || fail "existing DUID-LL section not updated by the MAC line: $UCI_LOG"
+printf '%s' "$UCI_LOG" | grep -q 'ygg_host_byduid' && fail "a second section was created beside the DUID-LL one"
+reset; UCI_LOG=''; HOSTS='other mac aa:bb:cc:dd:ee:40 40'; apply_hosts
+[ -z "$DIED" ] || fail "re-supplying the DUID-LL client its own suffix by MAC died: $DIED"
+# and the reverse: a DUID-LLT line against a section that holds only the MAC
+reset; UCI_LOG=''; HOSTS='desk duid 00010001cafebabe3ce1a14152d0 51'; apply_hosts
+[ -z "$DIED" ] || fail "DUID-LLT line against an existing MAC section died: $DIED"
+printf '%s' "$UCI_LOG" | grep -qxF 'set dhcp.cfg01.hostid=51' || fail "existing MAC section not updated by the DUID-LLT line: $UCI_LOG"
 # two lines resolving to one existing section (MAC form and DUID-LLT form)
 uci() { case "$1 $2" in 'show dhcp') printf '%s\n' "$FIXTURE
 dhcp.cfg05=host

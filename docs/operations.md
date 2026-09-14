@@ -254,8 +254,9 @@ Do not assume every future package keeps the exact same UCI options.
 
 ### Switching the LAN to router-managed addressing
 
-Managed mode (`--dhcpv6`) is opt-in; a plain rerun of the deployer never
-changes the mode. Migrating a router that was deployed with SLAAC:
+Managed mode (`--dhcpv6`) is opt-in; a rerun without `--dhcpv6`/`--slaac`
+keeps whatever mode the router runs. Migrating a router that was deployed
+with SLAAC:
 
 1. Keep a second management path open (Yggdrasil to the router plus LAN, or
    a serial console). The LAN stage restarts odhcpd; the router's own
@@ -264,7 +265,10 @@ changes the mode. Migrating a router that was deployed with SLAAC:
    deployment plus `--dhcpv6` and the `--host` reservations you want. The
    deployer rewrites trusted rules, jumper and multicast sections from its
    arguments on every run, so an omitted `--trusted` closes the zone. A
-   settings file (`--config`) is the way to keep that set complete.
+   settings file (`--config`) is the way to keep that set complete. Drop a
+   `--dns-host` line for a name you now reserve with `--host`: the deployer
+   refuses the pair, because the old hand-written answer would otherwise
+   survive beside the reserved one.
 3. Read the preflight report: it lists every existing `config host` whose
    IPv4 `ip` implies an IPv6 IID (`.235 -> ::235`) and refuses a `--host`
    that would collide with one.
@@ -281,12 +285,14 @@ changes the mode. Migrating a router that was deployed with SLAAC:
    above) would leave odhcpd with nothing to serve.
 
 Back to SLAAC: the same rerun with `--slaac`. It restores the `dhcp.<lan>`
-values, removes the deployer-owned `ygg_rsv_*` DNS records (they are rebuilt
-from the `--host` lines on every run, and `--slaac` accepts none, so no name
-is left pointing at an address nobody holds) and leaves `hostid` options in
-place - inert without DHCPv6, live again on the next `--dhcpv6` run. The same
-applies to a `--dhcpv6` rerun that omits a previously given `--host`: its
-name goes, its `hostid` stays.
+values and, with the DNS module on (`--no-dns` skips the DNS stage entirely),
+removes the deployer-owned `ygg_rsv_*` DNS records - they are rebuilt from
+the `--host` lines on every run, `--slaac` accepts none, so no name is left
+pointing at an address nobody holds. `hostid` options stay in place: inert
+without DHCPv6, live again on the next `--dhcpv6` run. The deployer never
+removes a `hostid`; omitting a `--host` line on a `--dhcpv6` rerun drops its
+name and keeps its `hostid`. To retire a reservation for good:
+`uci delete dhcp.<section>.hostid; uci commit dhcp; /etc/init.d/odhcpd reload`.
 
 ### Post-update verification
 

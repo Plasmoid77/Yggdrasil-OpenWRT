@@ -398,6 +398,9 @@ collect_dhcpv6_leases() {
 
 	DHCPV6_LEASES="$(while IFS= read -r cdl_lease; do
 		[ -n "$cdl_lease" ] || continue
+		# odhcpd lists offers it made beside leases clients took; only a
+		# bound one is an address the client actually holds
+		printf '%s' "$cdl_lease" | jsonfilter -e '@.flags[*]' 2>/dev/null | grep -qx 'bound' || continue
 		cdl_duid="$(printf '%s' "$cdl_lease" | jsonfilter -e '@.duid' 2>/dev/null | tr 'A-F' 'a-f')"
 		case "${#cdl_duid}:$cdl_duid" in
 			28:0001*|20:0003*) cdl_mac="${cdl_duid#"${cdl_duid%????????????}"}" ;;
@@ -1284,6 +1287,13 @@ dhcp_has_pending_changes() {
 }
 
 
+# Does any interface serve stateful DHCPv6? Then a config host is an IPv6
+# reservation too (hostid, or the IID odhcpd derives from an IPv4 ip), and a
+# change to it must reach odhcpd, not only dnsmasq.
+dhcpv6_is_served() {
+	uci -q show dhcp 2>/dev/null | grep -q "\.dhcpv6='server'\$"
+}
+
 commit_and_reload_dhcp() {
 	if ! uci commit dhcp; then
 		restore_dhcp_config
@@ -1292,6 +1302,12 @@ commit_and_reload_dhcp() {
 
 	if ! /etc/init.d/dnsmasq reload >/dev/null 2>&1; then
 		restore_dhcp_config
+		return 1
+	fi
+
+	if dhcpv6_is_served && ! /etc/init.d/odhcpd reload >/dev/null 2>&1; then
+		restore_dhcp_config
+		/etc/init.d/dnsmasq reload >/dev/null 2>&1
 		return 1
 	fi
 
@@ -1443,7 +1459,7 @@ rpc_unpin() {
 	fi
 
 	if [ -n "$FOUND_HOST_HOSTID" ]; then
-		json_reply 0 'reserved_ipv6' 'This device has a DHCPv6 address reservation (hostid). Remove it where it was made - the deployer (--host) or Network -> DHCP and DNS - before unpinning.'
+		json_reply 0 'reserved_ipv6' 'This device has a DHCPv6 address reservation (hostid). Remove the hostid option in Network -> DHCP and DNS first; the status page does not delete reservations.'
 		return 0
 	fi
 
@@ -1453,7 +1469,7 @@ rpc_unpin() {
 		case "$ru_confirm" in
 			1|true) ;;
 			*)
-				json_reply_device 0 'static_confirmation_required' 'This device has a static DHCP reservation. Removing this persistent entry will also remove the reserved IPv4 address.' "$ru_mac" "$FOUND_HOST_NAME" "$ru_static"
+				json_reply_device 0 'static_confirmation_required' 'This device has a static DHCP reservation. Removing this persistent entry will also remove the reserved IPv4 address and, where DHCPv6 is served, the IPv6 suffix odhcpd derives from it.' "$ru_mac" "$FOUND_HOST_NAME" "$ru_static"
 				return 0
 				;;
 		esac
