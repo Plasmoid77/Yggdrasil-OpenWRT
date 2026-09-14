@@ -179,7 +179,8 @@ host_section_has_extra_options() {
 			"dhcp.${hse_selector}=host"|\
 			"dhcp.${hse_selector}.name="*|\
 			"dhcp.${hse_selector}.mac="*|\
-			"dhcp.${hse_selector}.ip="*)
+			"dhcp.${hse_selector}.ip="*|\
+			"dhcp.${hse_selector}.hostid="*)
 				;;
 			*)
 				return 0
@@ -232,6 +233,7 @@ match_host_section_by_mac() {
 	FOUND_HOST_MAC_COUNT="$mh_count"
 	config_get FOUND_HOST_NAME "$mh_section" name
 	config_get FOUND_HOST_IP "$mh_section" ip
+	config_get FOUND_HOST_HOSTID "$mh_section" hostid
 }
 
 
@@ -244,6 +246,7 @@ find_host_by_mac() {
 	FOUND_HOST_MATCH_COUNT=0
 	FOUND_HOST_MANAGED=0
 	FOUND_HOST_STATIC_IPV4=''
+	FOUND_HOST_HOSTID=''
 	FOUND_HOST_COMPLEX=0
 	FOUND_HOST_AMBIGUOUS=0
 
@@ -379,6 +382,54 @@ find_lan_ygg_prefix() {
 		'
 }
 
+
+# Bound DHCPv6 leases from odhcpd, one "<mac> <address>" line each, limited to
+# the routed prefix. The MAC comes out of the client's DUID the same way odhcpd
+# matches a config host by MAC: a 14-byte DUID-LLT (type 1) carries it in the
+# last six bytes, a 10-byte DUID-LL (type 3) in the last six as well. Any other
+# DUID type (UUID, enterprise, a broken all-zero one) has no MAC to attribute a
+# row by, so its lease is not attributed to anything here. odhcpd is the router's
+# own record of what it handed out, so a lease outranks every observed address.
+collect_dhcpv6_leases() {
+	local cdl_lease cdl_duid cdl_mac cdl_addr
+
+	DHCPV6_LEASES=''
+	[ -n "$LAN_YGG_PREFIX" ] || return 0
+
+	DHCPV6_LEASES="$(while IFS= read -r cdl_lease; do
+		[ -n "$cdl_lease" ] || continue
+		# odhcpd lists offers it made beside leases clients took; only a
+		# bound one is an address the client actually holds
+		printf '%s' "$cdl_lease" | jsonfilter -e '@.flags[*]' 2>/dev/null | grep -qx 'bound' || continue
+		cdl_duid="$(printf '%s' "$cdl_lease" | jsonfilter -e '@.duid' 2>/dev/null | tr 'A-F' 'a-f')"
+		case "${#cdl_duid}:$cdl_duid" in
+			28:0001*|20:0003*) cdl_mac="${cdl_duid#"${cdl_duid%????????????}"}" ;;
+			*) continue ;;
+		esac
+		# an all-zero link-layer address is a firmware bug, not an identity
+		[ "$cdl_mac" != '000000000000' ] || continue
+		cdl_mac="$(printf '%s' "$cdl_mac" | sed 's/\(..\)/\1:/g; s/:$//')"
+		printf '%s' "$cdl_lease" | jsonfilter -e '@["ipv6-addr"][*].address' 2>/dev/null |
+			while IFS= read -r cdl_addr || [ -n "$cdl_addr" ]; do
+				[ -n "$cdl_addr" ] || continue
+				cdl_addr="$(lower "$cdl_addr")"
+				case "$cdl_addr" in
+					"$LAN_YGG_PREFIX"*) printf '%s %s\n' "$cdl_mac" "$cdl_addr" ;;
+				esac
+			done
+	done <<EOF
+$(ubus call dhcp ipv6leases 2>/dev/null | jsonfilter -e '@.device[*].leases[*]' 2>/dev/null)
+EOF
+)"
+}
+
+# The lease addresses attributed to one MAC, in lease order.
+dhcpv6_lease_for_mac() {
+	local dlm_wanted
+	dlm_wanted="$(normalize_mac "$1")"
+	[ -n "${DHCPV6_LEASES:-}" ] || return 0
+	printf '%s\n' "${DHCPV6_LEASES:-}" | awk -v wanted="$dlm_wanted" '$1 == wanted { print $2 }'
+}
 
 # A REACHABLE neighbor entry is a recent kernel-confirmed success, so avoid
 # spawning another probe for it. STALE/DELAY/PROBE/FAILED are not treated as
@@ -873,8 +924,10 @@ build_known_ipv6() {
 	local bki_addr bki_eui64 bki_observed
 
 	KNOWN_IPV6=''
+	KNOWN_IPV6_SOURCE=''
 	if [ -n "$CANONICAL_IPV6" ]; then
 		append_unique_ipv6 "$CANONICAL_IPV6"
+		KNOWN_IPV6_SOURCE='canonical'
 		return 0
 	fi
 
@@ -888,6 +941,7 @@ build_known_ipv6() {
 	for bki_addr in $bki_observed; do
 		if [ -n "$bki_eui64" ] && [ "$(lower "$bki_addr")" = "$bki_eui64" ]; then
 			append_unique_ipv6 "$bki_addr"
+			KNOWN_IPV6_SOURCE='eui64'
 			return 0
 		fi
 	done
@@ -895,6 +949,7 @@ build_known_ipv6() {
 	for bki_addr in $bki_observed; do
 		append_unique_ipv6 "$bki_addr"
 	done
+	[ -n "$KNOWN_IPV6" ] && KNOWN_IPV6_SOURCE='observed'
 }
 
 
@@ -939,9 +994,11 @@ emit_client() {
 	local ec_shared_host="$8"
 	local ec_complex_host="$9"
 	local ec_ambiguous_host="${10}"
+	local ec_reserved_ipv6="${11:-0}"
 	local ec_online=0
 	local ec_primary_ipv6=''
 	local ec_ipv6_live=1
+	local ec_lease ec_rest
 	local ec_node_addresses ec_node_primary ec_node_live=0
 	local ec_addr ec_protected_host=0
 
@@ -957,14 +1014,30 @@ emit_client() {
 		DNS_ALIAS=''
 	fi
 
+	KNOWN_IPV6_SOURCE=''
 	build_known_ipv6 "$ec_mac"
+
+	# What odhcpd handed out is the router's own record and outranks anything
+	# merely observed: the lease comes first, observed addresses follow (a SLAAC
+	# address may still be valid on the client for a while after a switch to
+	# DHCPv6). A canonical record still wins; it is the operator's word.
+	if [ -z "$CANONICAL_IPV6" ]; then
+		ec_lease="$(dhcpv6_lease_for_mac "$ec_mac")"
+		if [ -n "$ec_lease" ]; then
+			ec_rest="$KNOWN_IPV6"
+			KNOWN_IPV6=''
+			for ec_addr in $ec_lease; do append_unique_ipv6 "$ec_addr"; done
+			for ec_addr in $ec_rest; do append_unique_ipv6 "$ec_addr"; done
+			KNOWN_IPV6_SOURCE='dhcpv6'
+		fi
+	fi
 
 	# A canonical address is persistent metadata of its own and needs no
 	# memory. Anything else came from NDP, which forgets a device that stops
 	# talking long before its row expires, so fall back to what was seen last.
 	if [ -z "$CANONICAL_IPV6" ] && [ -z "$KNOWN_IPV6" ]; then
 		KNOWN_IPV6="$(recall_lan_addresses "$ec_mac")"
-		[ -n "$KNOWN_IPV6" ] && ec_ipv6_live=0
+		[ -n "$KNOWN_IPV6" ] && { ec_ipv6_live=0; KNOWN_IPV6_SOURCE='remembered'; }
 	fi
 
 	ec_primary_ipv6="$CANONICAL_IPV6"
@@ -1003,6 +1076,8 @@ emit_client() {
 	done
 	json_close_array
 	json_add_int ipv6_live "$ec_ipv6_live"
+	json_add_string ipv6_source "${KNOWN_IPV6_SOURCE:-}"
+	json_add_int reserved_ipv6 "$ec_reserved_ipv6"
 	json_add_string ygg_node_ipv6 "$ec_node_primary"
 	json_add_array ygg_node_addresses
 	for ec_addr in $ec_node_addresses; do
@@ -1019,6 +1094,10 @@ emit_client() {
 	[ "$ec_shared_host" -eq 1 ] && ec_protected_host=1
 	[ "$ec_complex_host" -eq 1 ] && ec_protected_host=1
 	[ "$ec_ambiguous_host" -eq 1 ] && ec_protected_host=1
+	# A DHCPv6 reservation is removed where it was made (the deployer or the
+	# DHCP page), not as a side effect of Unpin; odhcpd would also keep serving
+	# it until restarted, which Unpin's dnsmasq reload does not do.
+	[ "$ec_reserved_ipv6" -eq 1 ] && ec_protected_host=1
 
 	json_add_int managed_pin "$ec_managed_pin"
 	json_add_int shared_host "$ec_shared_host"
@@ -1041,7 +1120,7 @@ emit_client() {
 # lifetime. No extra history is kept.
 emit_dynamic_leases() {
 	local ed_expiry ed_mac ed_ipv4 ed_hostname ed_clientid ed_rest
-	local ed_name ed_persistent ed_static_ipv4 ed_managed ed_shared ed_complex ed_ambiguous
+	local ed_name ed_persistent ed_static_ipv4 ed_managed ed_shared ed_complex ed_ambiguous ed_reserved6
 
 	[ -r "$LEASE_FILE" ] || return 0
 
@@ -1062,6 +1141,8 @@ emit_dynamic_leases() {
 		ed_complex=0
 		ed_ambiguous=0
 
+		ed_reserved6=0
+
 		if find_host_by_mac "$ed_mac"; then
 			ed_persistent=1
 			[ -n "$FOUND_HOST_NAME" ] && ed_name="$FOUND_HOST_NAME"
@@ -1071,9 +1152,10 @@ emit_dynamic_leases() {
 			ed_complex="$FOUND_HOST_COMPLEX"
 			ed_ambiguous="$FOUND_HOST_AMBIGUOUS"
 			[ -n "$ed_static_ipv4" ] && ed_ipv4="$ed_static_ipv4"
+			[ -n "${FOUND_HOST_HOSTID:-}" ] && ed_reserved6=1
 		fi
 
-		emit_client "$ed_name" "$ed_mac" "$ed_ipv4" "$ed_persistent" "$ed_expiry" "$ed_static_ipv4" "$ed_managed" "$ed_shared" "$ed_complex" "$ed_ambiguous"
+		emit_client "$ed_name" "$ed_mac" "$ed_ipv4" "$ed_persistent" "$ed_expiry" "$ed_static_ipv4" "$ed_managed" "$ed_shared" "$ed_complex" "$ed_ambiguous" "$ed_reserved6"
 	done < "$LEASE_FILE"
 }
 
@@ -1081,7 +1163,7 @@ emit_dynamic_leases() {
 # Persistent rows without an active DHCP lease. They stay visible as Offline.
 emit_persistent_host() {
 	local eph_section="$1"
-	local eph_macs eph_mac eph_name eph_ipv4 eph_managed eph_shared eph_complex eph_ambiguous
+	local eph_macs eph_mac eph_name eph_ipv4 eph_managed eph_shared eph_complex eph_ambiguous eph_reserved6
 
 	config_get eph_macs "$eph_section" mac
 	[ -n "$eph_macs" ] || return 0
@@ -1101,8 +1183,10 @@ emit_persistent_host() {
 		[ "$FOUND_HOST_MAC_COUNT" -gt 1 ] && eph_shared=1
 		eph_complex="$FOUND_HOST_COMPLEX"
 		eph_ambiguous="$FOUND_HOST_AMBIGUOUS"
+		eph_reserved6=0
+		[ -n "${FOUND_HOST_HOSTID:-}" ] && eph_reserved6=1
 
-		emit_client "$eph_name" "$eph_mac" "$eph_ipv4" 1 "" "$eph_ipv4" "$eph_managed" "$eph_shared" "$eph_complex" "$eph_ambiguous"
+		emit_client "$eph_name" "$eph_mac" "$eph_ipv4" 1 "" "$eph_ipv4" "$eph_managed" "$eph_shared" "$eph_complex" "$eph_ambiguous" "$eph_reserved6"
 	done
 }
 
@@ -1116,6 +1200,7 @@ rpc_clients() {
 	config_load network
 	config_foreach select_ygg_network interface
 	LAN_YGG_PREFIX="$(find_lan_ygg_prefix)"
+	collect_dhcpv6_leases
 	collect_ygg_nodes
 	merge_node_cache
 	EMITTED_MACS=''
@@ -1202,6 +1287,13 @@ dhcp_has_pending_changes() {
 }
 
 
+# Does any interface serve stateful DHCPv6? Then a config host is an IPv6
+# reservation too (hostid, or the IID odhcpd derives from an IPv4 ip), and a
+# change to it must reach odhcpd, not only dnsmasq.
+dhcpv6_is_served() {
+	uci -q show dhcp 2>/dev/null | grep -q "\.dhcpv6='server'\$"
+}
+
 commit_and_reload_dhcp() {
 	if ! uci commit dhcp; then
 		restore_dhcp_config
@@ -1210,6 +1302,12 @@ commit_and_reload_dhcp() {
 
 	if ! /etc/init.d/dnsmasq reload >/dev/null 2>&1; then
 		restore_dhcp_config
+		return 1
+	fi
+
+	if dhcpv6_is_served && ! /etc/init.d/odhcpd reload >/dev/null 2>&1; then
+		restore_dhcp_config
+		/etc/init.d/dnsmasq reload >/dev/null 2>&1
 		return 1
 	fi
 
@@ -1360,13 +1458,18 @@ rpc_unpin() {
 		return 0
 	fi
 
+	if [ -n "$FOUND_HOST_HOSTID" ]; then
+		json_reply 0 'reserved_ipv6' 'This device has a DHCPv6 address reservation (hostid). Remove the hostid option in Network -> DHCP and DNS first; the status page does not delete reservations.'
+		return 0
+	fi
+
 	ru_static="$FOUND_HOST_STATIC_IPV4"
 
 	if [ -n "$ru_static" ]; then
 		case "$ru_confirm" in
 			1|true) ;;
 			*)
-				json_reply_device 0 'static_confirmation_required' 'This device has a static DHCP reservation. Removing this persistent entry will also remove the reserved IPv4 address.' "$ru_mac" "$FOUND_HOST_NAME" "$ru_static"
+				json_reply_device 0 'static_confirmation_required' 'This device has a static DHCP reservation. Removing this persistent entry will also remove the reserved IPv4 address and, where DHCPv6 is served, the IPv6 suffix odhcpd derives from it.' "$ru_mac" "$FOUND_HOST_NAME" "$ru_static"
 				return 0
 				;;
 		esac

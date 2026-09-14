@@ -591,8 +591,8 @@ A status-only release must not alter:
 ```text
 network config
 Ygg interface identity/private key
-RA/SLAAC configuration
-DHCPv6 setting
+LAN addressing mode exactly as configured (SLAAC or managed DHCPv6: ra_slaac,
+  ra_flags, dhcpv6, and every config host hostid)
 firewall rules
 Ygg peers
 LAN multicast peering with any full-node clients
@@ -607,6 +607,14 @@ enrichment must continue selecting the prefix delegated by the netifd
 Yggdrasil interface, whatever class netifd derived from that interface's name.
 Cover an interface NOT named `ygg` (for example `ygg0`): a backend that
 hardcodes `class="ygg"` silently reports no client IPv6 addresses at all.
+
+For a deployer change touching the LAN stage, validate both modes and both
+transitions on hardware (SLAAC -> managed -> SLAAC), each time reading the
+mode's UCI values, `ubus call dhcp ipv6leases`, a reserved client's actual
+address, `<name>.home.arpa` from a trusted node, and a control reboot. The
+host-side fixtures in `tests/deploy-lan-mode.sh` cover parsing, address
+arithmetic, collision detection and the UCI values written; they do not
+emulate odhcpd, RA lifetimes or client behaviour.
 
 ## BusyBox and UCI pitfalls
 

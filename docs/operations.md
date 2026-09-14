@@ -129,6 +129,32 @@ merge.
 For a DHCP-only client, the device row itself still disappears when the DHCP
 lease expires.
 
+In managed mode (`--dhcpv6`) the accumulation problem does not arise for
+DHCPv6 clients: the router itself handed out the address, the table shows the
+bound lease first (bold, `ipv6_source: dhcpv6`) and any lingering SLAAC
+address after it. Right after a switch from SLAAC both are expected until the
+SLAAC address's own lifetime ends on the client.
+
+### A client shows no routed address in managed mode
+
+Three causes, in order of likelihood:
+
+1. It has no DHCPv6 client. Android has none by policy; some IoT and smart-TV
+   stacks neither. Such a device keeps IPv4 and link-local IPv6 only. If it
+   must be reachable over Yggdrasil, it runs its own Yggdrasil node.
+2. It has not asked yet. A lease is obtained on connect, renew or reboot; the
+   RA change alone does not trigger one. `ubus call dhcp ipv6leases` lists
+   what is bound; `logread -e odhcpd` shows the exchange.
+3. Its reservation does not match. A MAC in `config host` only matches a
+   DUID-LLT or DUID-LL client, and the DUID type is the client stack's
+   choice: on the test LAN dhcpcd sent DUID-LLT, a laptop sent DUID-UUID
+   (type 4, `0004...`) and took a dynamic lease despite its MAC being known.
+   Read the DUID from `ubus call dhcp ipv6leases` and reserve by
+   `--host NAME=duid:<HEX>[%<IAID>]=<HOSTID>` instead. A DUID of
+   `00030001000000000000` (type 3, all-zero MAC) is a firmware defect seen on
+   a BMC; it can only be matched by DUID, and two ports sharing it need
+   `%IAID` to tell them apart.
+
 ### BusyBox lowercase bug found during final backend testing
 
 An earlier backend used:
@@ -226,6 +252,48 @@ apk upgrade yggdrasil luci-proto-yggdrasil yggdrasil-jumper
 
 Do not assume every future package keeps the exact same UCI options.
 
+### Switching the LAN to router-managed addressing
+
+Managed mode (`--dhcpv6`) is opt-in; a rerun without `--dhcpv6`/`--slaac`
+keeps whatever mode the router runs. Migrating a router that was deployed
+with SLAAC:
+
+1. Keep a second management path open (Yggdrasil to the router plus LAN, or
+   a serial console). The LAN stage restarts odhcpd; the router's own
+   addresses and the `ygg` zone do not change.
+2. Rerun the deployer with the **complete** argument set of the original
+   deployment plus `--dhcpv6` and the `--host` reservations you want. The
+   deployer rewrites trusted rules, jumper and multicast sections from its
+   arguments on every run, so an omitted `--trusted` closes the zone. A
+   settings file (`--config`) is the way to keep that set complete. Drop a
+   `--dns-host` line for a name you now reserve with `--host`: the deployer
+   refuses the pair, because the old hand-written answer would otherwise
+   survive beside the reserved one.
+3. Read the preflight report: it lists every existing `config host` whose
+   IPv4 `ip` implies an IPv6 IID (`.235 -> ::235`) and refuses a `--host`
+   that would collide with one.
+4. Verify: the run's Stage 8 checks the mode's UCI values, each
+   reservation's `hostid` and lists bound leases. Then make one client ask
+   (reconnect it) and confirm its address in `ubus call dhcp ipv6leases`,
+   in the status table and by reaching it from a trusted node.
+5. Expect a transition: SLAAC addresses already formed stay valid on the
+   clients until their lifetime ends (odhcpd's default cap is 90 min; the
+   client decides); nothing forces them off. Devices without a DHCPv6 client
+   lose their routed address when theirs expires.
+6. Reboot the router once and re-check `ubus call dhcp ipv6leases` and the
+   prefix on `br-lan`: the known `ygg0` pending race (startup precautions
+   above) would leave odhcpd with nothing to serve.
+
+Back to SLAAC: the same rerun with `--slaac`. It restores the `dhcp.<lan>`
+values and, with the DNS module on (`--no-dns` skips the DNS stage entirely),
+removes the deployer-owned `ygg_rsv_*` DNS records - they are rebuilt from
+the `--host` lines on every run, `--slaac` accepts none, so no name is left
+pointing at an address nobody holds. `hostid` options stay in place: inert
+without DHCPv6, live again on the next `--dhcpv6` run. The deployer never
+removes a `hostid`; omitting a `--host` line on a `--dhcpv6` rerun drops its
+name and keeps its `hostid`. To retire a reservation for good:
+`uci delete dhcp.<section>.hostid; uci commit dhcp; /etc/init.d/odhcpd reload`.
+
 ### Post-update verification
 
 Re-run the relevant layer checks:
@@ -234,6 +302,7 @@ Re-run the relevant layer checks:
 ifstatus ygg0
 yggdrasilctl getPeers
 ubus call dhcp ipv6ra
+ubus call dhcp ipv6leases      # managed mode: the addresses the router handed out
 fw4 print
 ```
 

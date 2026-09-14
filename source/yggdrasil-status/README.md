@@ -18,10 +18,13 @@ firewall, Yggdrasil or odhcpd. Preserve an alternate management path.
 ## Behavior
 
 Active DHCPv4 leases create dynamic rows until expiry; native `config host`
-provides persistent identity. Sources merge by MAC. NDP provides runtime IPv6
-only: canonical `config domain` wins, otherwise an observed modified EUI-64
-wins, otherwise all observed privacy addresses remain eligible. No client
-addresses are assigned or removed. A device the neighbour table has forgotten
+provides persistent identity. Sources merge by MAC. Runtime IPv6 comes from
+odhcpd's DHCPv6 leases and from NDP: canonical `config domain` wins, otherwise
+a bound DHCPv6 lease (attributed through the MAC in a DUID-LLT/LL) comes
+first, otherwise an observed modified EUI-64 wins, otherwise all observed
+privacy addresses remain eligible. The page never assigns or removes client
+addresses itself; a `config host` with a DHCPv6 `hostid` is shown as reserved
+and is not unpinned from here. A device the neighbour table has forgotten
 keeps its last known addresses, dimmed, for exactly as long as its row exists;
 addresses formed from a retired routed prefix are discarded rather than shown.
 When a device is present but its address is not visible, the backend sends

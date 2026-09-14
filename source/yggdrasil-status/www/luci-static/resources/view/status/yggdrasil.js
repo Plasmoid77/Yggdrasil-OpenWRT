@@ -138,12 +138,24 @@ function ipv6Cell(client) {
 		'title': live
 			? null
 			: _('Last known routed-prefix addresses; the router does not see this device on the LAN right now')
-	}, addresses.map(function(addr) {
+	}, addresses.map(function(addr, index) {
 		var attrs = {};
 
 		if (client.canonical_ipv6 && addr === client.canonical_ipv6) {
 			attrs.style = 'font-weight: 600';
 			attrs.title = _('Canonical address');
+		}
+		/*
+		 * With a DHCPv6 lease the backend puts the leased address first and
+		 * any still-observed SLAAC address after it. The lease is the
+		 * router's own record of what it handed out, so it is the one to
+		 * rely on; a reserved one will not change between leases.
+		 */
+		else if (client.ipv6_source === 'dhcpv6' && index === 0) {
+			attrs.style = 'font-weight: 600';
+			attrs.title = client.reserved_ipv6
+				? _('Assigned by the router (DHCPv6), reserved for this device')
+				: _('Assigned by the router (DHCPv6)');
 		}
 		else if (!live) {
 			attrs.style = 'opacity: .55';
@@ -359,7 +371,7 @@ function showUnpinDialog(client) {
 
 	if (confirmStatic) {
 		paragraphs.push(E('p', { 'style': 'color:#dc2626; font-weight:600' },
-			_('This device has a static DHCP reservation. Removing this persistent entry will also remove the reserved IPv4 address %s.').format(client.reserved_ipv4 || client.ipv4 || '—')
+			_('This device has a static DHCP reservation. Removing this persistent entry will also remove the reserved IPv4 address %s and, where DHCPv6 is served, the IPv6 suffix derived from it.').format(client.reserved_ipv4 || client.ipv4 || '—')
 		));
 		actionLabel = _('Unpin and remove reservation');
 	}
@@ -407,6 +419,9 @@ function showProtectedHostDialog(client) {
 
 	if (client.complex_host)
 		reasons.push(_('the config host contains additional DHCP options'));
+
+	if (client.reserved_ipv6)
+		reasons.push(_('the device has a DHCPv6 address reservation (hostid); remove that option in Network -> DHCP and DNS first'));
 
 	ui.showModal(_('Manage persistent device'), [
 		E('p', {}, _('This device is persistent, but the Yggdrasil status page will not delete its OpenWrt config host automatically.')),

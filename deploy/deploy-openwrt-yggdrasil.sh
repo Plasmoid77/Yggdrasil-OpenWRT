@@ -16,7 +16,7 @@
 set -u
 umask 077
 
-VERSION='1.8.0'
+VERSION='1.9.0'
 SELF="${0##*/}"
 # Piped straight from a URL — wget -qO- ... | sh -s -- ... — $0 is the shell, so
 # the banner and the usage text would announce themselves as "sh".
@@ -30,6 +30,14 @@ IFACE='ygg0'
 LAN='lan'
 PEERS=''
 TRUSTED=''
+# How LAN clients get an address from the routed /64. 'slaac': RA with the A
+# flag, clients form their own addresses, DHCPv6 off (the profile every 1.x
+# deployment has). 'dhcpv6': RA with M/O and no A flag, odhcpd assigns every
+# address from the prefix, reservations by --host. 'keep' (the default) reads
+# the mode the router is in and leaves it alone - a fresh router is SLAAC - so
+# a rerun for any other reason never changes LAN policy.
+LAN_MODE='keep'
+HOSTS=''
 DO_JUMPER=1
 DO_LAN=1
 DO_FIREWALL=1
@@ -137,12 +145,30 @@ DNS module (Part III, on by default — see also --no-dns):
   --dns-host NAME=ADDR  Extra record. Repeatable; repeat a NAME to give it
                         several addresses.
 
+LAN addressing (default: keep the router's current mode; a fresh router is
+SLAAC, as in every 1.x deployment):
+  --dhcpv6              Router-managed addresses: RA keeps the default route
+                        and sets M/O, the A flag is off, odhcpd assigns every
+                        LAN address from the routed /64. Clients without a
+                        DHCPv6 client (Android) get no address from it.
+  --slaac               Back to SLAAC-only (RA with A flag, DHCPv6 off).
+                        --dhcpv6 and --slaac: the last one given wins.
+  --host NAME=MAC=HOSTID
+  --host NAME=duid:HEX[%IAID]=HOSTID
+                        Reserve <prefix>::HOSTID for one client (needs
+                        --dhcpv6). HOSTID: 1-16 hex digits, not 0 or 1.
+                        Match by MAC works for DUID-LLT/DUID-LL clients only;
+                        give the DUID (and the IAID in hex, when one DUID
+                        serves several interfaces) for anything else.
+                        Repeatable. With the DNS module on, NAME.$DNS_DOMAIN
+                        resolves to the reserved address.
+
 Scope:
   --iface NAME          Yggdrasil interface / UCI section name (default: $IFACE)
   --lan NAME            LAN UCI interface name (default: $LAN)
   --no-jumper           Do not install/enable yggdrasil-jumper
   --no-multicast        Do not enable LAN multicast peering
-  --no-lan              Do not touch LAN ip6assign/ip6class/RA/SLAAC
+  --no-lan              Do not touch LAN ip6assign/ip6class/RA/DHCPv6
   --no-firewall         Do not create the ygg zone or trusted rules
   --no-status           Do not install the LuCI status module
   --no-dns              Do not serve <name>.$DNS_DOMAIN over Yggdrasil
@@ -164,9 +190,11 @@ comment, blank lines are ignored. Unknown sections are an error. Sections:
   [iface] [lan]     one name each              (as --iface, --lan)
   [dns-domain] [dns-router]                    (as --dns-domain, --dns-router)
   [dns-hosts]       NAME=ADDR lines            (as --dns-host)
+  [hosts]           NAME=MAC=HOSTID lines      (as --host)
   [status-pkg] [status-version]                (as --status-pkg, --status-version)
   [flags]           one per line: no-jumper no-multicast no-lan no-firewall
-                    no-status dns no-dns       (as the switches of the same name)
+                    no-status dns no-dns dhcpv6 slaac
+                                               (as the switches of the same name)
 Keep the file mode 600 when it holds the key. --dry-run, --yes and --wait
 describe the run, not the node, and stay on the command line.
 USAGE
@@ -221,6 +249,108 @@ add_dns_host() {
 }$_n=$_a"
 }
 
+# Lower-case, leading zeros dropped: the form odhcpd compares reservations in
+# (it parses hostid with strtoull(.., 16)), so 010 and 10 are the same suffix.
+lower_str() {
+    printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+# The MAC a --host key stands for: the MAC itself, or the one at the end of a
+# DUID-LLT (type 1, 14 bytes) / DUID-LL (type 3, 10 bytes); empty otherwise.
+mac_in_key() {
+    case "$1" in
+        mac) printf '%s' "$2" ;;
+        duid)
+            _mik="${2%%%*}"
+            case "${#_mik}:$_mik" in
+                # an all-zero link-layer address is a firmware defect, not an identity
+                28:0001*000000000000|20:0003*000000000000) : ;;
+                28:0001*|20:0003*) printf '%s' "${_mik#"${_mik%????????????}"}" | sed 's/\(..\)/\1:/g; s/:$//' ;;
+            esac ;;
+    esac
+}
+
+norm_hostid() {
+    # strtoull(.., 16) also takes a 0x prefix, so 0x20 and 20 are one suffix
+    _nh="$(printf '%s' "$1" | tr 'A-F' 'a-f' | sed 's/^0x//; s/^0*//')"
+    printf '%s' "${_nh:-0}"
+}
+
+add_host() {
+    # NAME=MAC=HOSTID or NAME=duid:HEX[%IAID]=HOSTID -> "NAME mac|duid KEY HOSTID"
+    case "$1" in
+        *=*=*) : ;;
+        *) die "--host expects NAME=MAC=HOSTID or NAME=duid:HEX[%IAID]=HOSTID: $1" ;;
+    esac
+    _hn="${1%%=*}"
+    _hrest="${1#*=}"
+    _hk="${_hrest%%=*}"
+    _hid="${_hrest#*=}"
+    [ -n "$_hn" ] || die "--host: empty hostname in '$1'"
+    case "$_hn" in
+        *.*) die "--host: give a bare hostname, the domain is appended: $_hn" ;;
+        *[!A-Za-z0-9-]*) die "--host: hostname may only contain letters, digits and '-': $_hn" ;;
+        -*|*-) die "--host: hostname may not start or end with '-': $_hn" ;;
+    esac
+    # odhcpd drops the whole host section over an invalid name (63 is the label limit)
+    [ "${#_hn}" -le 63 ] || die "--host: hostname longer than 63 characters: $_hn"
+    case "$_hid" in
+        '') die "--host: empty HOSTID in '$1'" ;;
+        *[!0-9A-Fa-f]*) die "--host: HOSTID must be hex digits: $_hid" ;;
+    esac
+    [ "${#_hid}" -le 16 ] || die "--host: HOSTID longer than 16 hex digits: $_hid"
+    _hidn="$(norm_hostid "$_hid")"
+    case "$_hidn" in
+        0) die "--host: HOSTID 0 means 'assign dynamically' to odhcpd, not a reservation: $1" ;;
+        1) die "--host: HOSTID 1 is the router's own LAN address: $1" ;;
+    esac
+    case "$_hk" in
+        duid:*)
+            _hkt='duid'
+            _hk="${_hk#duid:}"
+            _hkd="${_hk%%%*}"
+            _hki="${_hk#"$_hkd"}"
+            case "$_hkd" in
+                '') die "--host: empty DUID in '$1'" ;;
+                *[!0-9A-Fa-f]*) die "--host: DUID must be hex digits: $_hkd" ;;
+            esac
+            [ $(( ${#_hkd} % 2 )) -eq 0 ] || die "--host: DUID has an odd number of hex digits: $_hkd"
+            # odhcpd reads the IAID as hex (strtoul base 16), 1-8 digits
+            case "$_hki" in
+                '') : ;;
+                %*[!0-9A-Fa-f]*|%) die "--host: IAID after % must be 1-8 hex digits: $_hk" ;;
+            esac
+            [ "${#_hki}" -le 9 ] || die "--host: IAID longer than 8 hex digits: $_hk"
+            # odhcpd parses the IAID numerically: %000a and %a are the same
+            if [ -n "$_hki" ]; then
+                _hki="%$(printf '%s' "${_hki#%}" | sed 's/^0*//')"
+                [ "$_hki" != '%' ] || _hki='%0'
+            fi
+            _hk="$(printf '%s' "$_hkd$_hki" | tr 'A-F' 'a-f')" ;;
+        [0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f])
+            _hkt='mac'
+            _hk="$(printf '%s' "$_hk" | tr 'A-F' 'a-f')" ;;
+        *) die "--host: '$_hk' is neither a MAC (aa:bb:cc:dd:ee:ff) nor duid:HEX[%IAID]" ;;
+    esac
+    # A DUID-LLT (type 1, 14 bytes) or DUID-LL (type 3, 10 bytes) ends in the
+    # MAC, and odhcpd matches such a client by that MAC too - so a duid: line
+    # and a MAC line can name the same machine. Compare them on the MAC.
+    _hkmac="$(mac_in_key "$_hkt" "$_hk")"
+    # one client, one suffix, one name: repeats are typos, not lists
+    while IFS=' ' read -r _on _ot _ok _oh; do
+        [ -n "$_on" ] || continue
+        [ "$(lower_str "$_on")" = "$(lower_str "$_hn")" ] && die "--host: hostname given twice: $_hn"
+        [ "$_ot $_ok" = "$_hkt $_hk" ] && die "--host: client given twice: $_hk"
+        _omac="$(mac_in_key "$_ot" "$_ok")"
+        [ -n "$_omac" ] && [ "$_omac" = "$_hkmac" ] && die "--host: $_hn and $_on name the same client (MAC $_hkmac)"
+        [ "$(norm_hostid "$_oh")" = "$_hidn" ] && die "--host: HOSTID $_hid given twice ($_on, $_hn)"
+    done <<HOSTS_EOF
+$HOSTS
+HOSTS_EOF
+    HOSTS="${HOSTS}${HOSTS:+
+}$_hn $_hkt $_hk $_hidn"
+}
+
 # One settings file instead of a long command line. Every line goes through the
 # same add_*/validation path as the option it stands for, so nothing can enter
 # through the file that the command line would refuse.
@@ -240,7 +370,7 @@ read_config() {
                 _cf_section="${_cf_section%\]}"
                 _cf_section="$(printf '%s' "$_cf_section" | tr -d ' \t')"
                 case "$_cf_section" in
-                    peers|trusted|private-key|iface|lan|dns-domain|dns-router|dns-hosts|status-pkg|status-version|flags) : ;;
+                    peers|trusted|private-key|iface|lan|dns-domain|dns-router|dns-hosts|hosts|status-pkg|status-version|flags) : ;;
                     *) die "unknown section [$_cf_section] in $_cf" ;;
                 esac
                 continue ;;
@@ -249,6 +379,7 @@ read_config() {
             peers)          add_peer "$_cf_line" ;;
             trusted)        add_trusted "$_cf_line" ;;
             dns-hosts)      add_dns_host "$_cf_line" ;;
+            hosts)          add_host "$_cf_line" ;;
             iface)          IFACE="$_cf_line" ;;
             lan)            LAN="$_cf_line" ;;
             dns-domain)     DNS_DOMAIN="$_cf_line" ;;
@@ -266,6 +397,8 @@ read_config() {
                     no-status)    DO_STATUS=0 ;;
                     dns)          DO_DNS=1 ;;
                     no-dns)       DO_DNS=0 ;;
+                    dhcpv6)       LAN_MODE='dhcpv6' ;;
+                    slaac)        LAN_MODE='slaac' ;;
                     *) die "unknown flag '$_cf_line' in [flags] of $_cf" ;;
                 esac ;;
             private-key)
@@ -309,6 +442,9 @@ while [ $# -gt 0 ]; do
         --dns-domain)  [ $# -ge 2 ] || die "--dns-domain needs a value";  DNS_DOMAIN="$2";  shift 2 ;;
         --dns-router)  [ $# -ge 2 ] || die "--dns-router needs a value";  DNS_ROUTER="$2";  shift 2 ;;
         --dns-host)    [ $# -ge 2 ] || die "--dns-host needs a value";    add_dns_host "$2"; shift 2 ;;
+        --dhcpv6)      LAN_MODE='dhcpv6';  shift ;;
+        --slaac)       LAN_MODE='slaac';   shift ;;
+        --host)        [ $# -ge 2 ] || die "--host needs a value";        add_host "$2";     shift 2 ;;
         --status-pkg)  [ $# -ge 2 ] || die "--status-pkg needs a value";  STATUS_PKG="$2";  shift 2 ;;
         --status-version)
             [ $# -ge 2 ] || die "--status-version needs a value"
@@ -321,6 +457,31 @@ while [ $# -gt 0 ]; do
         *)             usage; die "unknown argument: $1" ;;
     esac
 done
+
+# A reservation only means something where odhcpd hands out the addresses. Refuse
+# instead of silently writing config host sections nothing would act on. The
+# 'keep' case is settled in preflight, once the router's configuration is readable.
+if [ -n "$HOSTS" ]; then
+    [ "$LAN_MODE" != 'slaac' ] || die "--host needs --dhcpv6: in SLAAC mode the router does not assign addresses"
+    [ "$DO_LAN" -eq 1 ] || die "--host cannot be combined with --no-lan"
+fi
+
+# A --dns-host and a --host for the same name would leave two answers, the old
+# hand-written one surviving every rerun beside the reserved one.
+if [ -n "$HOSTS" ] && [ -n "$DNS_HOSTS" ]; then
+    while IFS=' ' read -r _hn _hkt _hk _hid; do
+        [ -n "$_hn" ] || continue
+        while IFS= read -r _dh; do
+            [ -n "$_dh" ] || continue
+            [ "$(lower_str "${_dh%%=*}")" = "$(lower_str "$_hn")" ] \
+                && die "--host $_hn: the same name is also given as --dns-host; a reservation names itself, drop the --dns-host line"
+        done <<DNS_EOF
+$DNS_HOSTS
+DNS_EOF
+    done <<HOSTS_EOF
+$HOSTS
+HOSTS_EOF
+fi
 
 # Ask for the Yggdrasil /128 addresses allowed through the firewall, unless they
 # were given on the command line or the run is explicitly non-interactive.
@@ -491,11 +652,30 @@ rollback() {
     done
     /etc/init.d/network reload  >/dev/null 2>&1 || true
     /etc/init.d/odhcpd restart  >/dev/null 2>&1 || true
+    [ "$CHANGED_DHCP" -eq 1 ] && { /etc/init.d/dnsmasq restart >/dev/null 2>&1 || true; }
     /etc/init.d/firewall reload >/dev/null 2>&1 || true
     warn "rollback done — verify the router state manually"
 }
 
 # =========================================================== stage 0: preflight
+
+# Settle the LAN addressing mode: an explicit switch wins, otherwise the router
+# keeps whatever it runs now, and a router that runs nothing yet gets SLAAC. A
+# rerun for peers, trusted addresses or DNS must never flip it.
+resolve_lan_mode() {
+    if [ "$LAN_MODE" = 'keep' ]; then
+        if [ "$(uci -q get "dhcp.$LAN.dhcpv6" 2>/dev/null)" = 'server' ]; then
+            LAN_MODE='dhcpv6'
+            info "LAN addressing: managed DHCPv6 (current, kept; --slaac to change)"
+        else
+            LAN_MODE='slaac'
+            [ -z "$HOSTS" ] || die "--host needs --dhcpv6: this router serves SLAAC and would not assign the reserved address"
+            info "LAN addressing: SLAAC (current, kept; --dhcpv6 to change)"
+        fi
+    else
+        info "LAN addressing: $LAN_MODE (requested)"
+    fi
+}
 
 stage_preflight() {
     FAILED_STAGE='preflight'
@@ -520,6 +700,8 @@ stage_preflight() {
     info "package manager: apk"
 
     uci -q get "network.$LAN" >/dev/null 2>&1 || die "no UCI interface 'network.$LAN' — pass --lan"
+
+    resolve_lan_mode
 
     # free space check: the status module + packages need a little room
     _free=$(df -k /overlay 2>/dev/null | awk 'NR==2{print $4}')
@@ -907,10 +1089,194 @@ stage_wait() {
 
 # ================================================= stage 4: LAN routed /64 + RA
 
+# <prefix>::HOSTID as one canonical (RFC 5952) address. $1 = prefix like
+# 303:170f:3ab2:166e::/64, $2 = hostid hex digits. A hextet holds four digits, so
+# a wide hostid is split, not concatenated onto the prefix as a string.
+reserved_addr() {
+    _ra_pfx="${1%%/*}"
+    _ra_pfx="${_ra_pfx%%::*}"
+    _ra_id="$(printf '%016s' "$2" | tr ' ' '0')"
+    printf '%s %s\n' "$_ra_pfx" "$_ra_id" | awk '{
+        n = split($1, h, ":")
+        for (i = n + 1; i <= 4; i++) h[i] = "0"
+        for (i = 1; i <= 4; i++) h[4 + i] = substr($2, 4 * i - 3, 4)
+        for (i = 1; i <= 8; i++) { sub(/^0+/, "", h[i]); if (h[i] == "") h[i] = "0" }
+        best = 0; bs = 0
+        for (i = 1; i <= 8; i++) {
+            if (h[i] != "0") continue
+            j = i; while (j <= 8 && h[j] == "0") j++
+            if (j - i > best) { best = j - i; bs = i }
+            i = j
+        }
+        out = ""
+        if (best >= 2) {
+            for (i = 1; i < bs; i++) out = out h[i] ":"
+            out = out ":"
+            for (i = bs + best; i <= 8; i++) out = out (i == bs + best ? "" : ":") h[i]
+            if (bs == 1) out = ":" out
+        } else {
+            for (i = 1; i <= 8; i++) out = out (i > 1 ? ":" : "") h[i]
+        }
+        print out
+    }'
+}
+
+# The suffix odhcpd derives for a config host that has an IPv4 address but no
+# hostid: the last octet's decimal digits read as hex nibbles (.235 -> ::235).
+implicit_hostid() {
+    norm_hostid "${1##*.}"
+}
+
+# One line per existing config host: "<section> <hostid-or-empty> <macs> <duid>".
+# Read once, so the collision check and the update path see the same picture.
+existing_hosts() {
+    uci show dhcp 2>/dev/null | awk -F= '
+        $1 ~ /^dhcp\.[^.]+$/ && $2 == "host" { sec[$1] = 1; order[++n] = $1; next }
+        {
+            split($1, k, ".")
+            if (k[3] == "") next
+            id = k[1] "." k[2]
+            v = $2; gsub(/^'\''|'\''$/, "", v); gsub(/'\'' '\''/, ",", v)
+            if (k[3] == "hostid") hid[id] = v
+            else if (k[3] == "ip") ip[id] = v
+            else if (k[3] == "mac") mac[id] = tolower(v)
+            else if (k[3] == "duid") duid[id] = tolower(v)
+            else if (k[3] != "name" && k[3] != "dns" && k[3] != "leasetime") extra[id] = extra[id] " " k[3]
+        }
+        END {
+            for (i = 1; i <= n; i++) {
+                id = order[i]; if (!(id in sec)) continue
+                printf "%s|%s|%s|%s|%s|%s\n", id, hid[id], ip[id], mac[id], duid[id], extra[id]
+            }
+        }'
+}
+
+# Does an existing config host (MAC list $1, DUID list $2, comma-joined) stand
+# for the client a --host line names ($3 = mac|duid, $4 = key)? odhcpd matches a
+# lease against config host by explicit DUID first, then by the MAC it finds in
+# a DUID-LLT/LL - so a section reserved by such a DUID and a --host line by MAC
+# (or the reverse) are the same client and must not become two sections.
+section_is_client() {
+    _sic_mac="$(mac_in_key "$3" "$4")"
+    _sic_oifs="$IFS"; IFS=','
+    for _sic_d in $2; do
+        [ -n "$_sic_d" ] || continue
+        [ "$3" = 'duid' ] && [ "$_sic_d" = "$4" ] && { IFS="$_sic_oifs"; return 0; }
+        _sic_dm="$(mac_in_key duid "$_sic_d")"
+        [ -n "$_sic_dm" ] && [ "$_sic_dm" = "$_sic_mac" ] && { IFS="$_sic_oifs"; return 0; }
+    done
+    for _sic_m in $1; do
+        [ -n "$_sic_m" ] && [ -n "$_sic_mac" ] && [ "$_sic_m" = "$_sic_mac" ] && { IFS="$_sic_oifs"; return 0; }
+    done
+    IFS="$_sic_oifs"
+    return 1
+}
+
+# Not written by this script, but they become live IPv6 reservations the moment
+# odhcpd serves DHCPv6 - the operator should know which suffixes those are.
+report_implicit_hosts() {
+    while IFS='|' read -r _es _ehid _eip _emac _eduid _eextra; do
+        [ -n "$_es" ] && [ -z "$_ehid" ] && [ -n "$_eip" ] || continue
+        info "existing ${_es#dhcp.} (${_emac:-no mac}, ip $_eip) implies suffix ::$(implicit_hostid "$_eip")"
+    done <<EH_EOF
+$(existing_hosts)
+EH_EOF
+    return 0
+}
+
+apply_hosts() {
+    [ -n "$HOSTS" ] || return 0
+    _eh="$(existing_hosts)"
+
+    # Every suffix odhcpd will hand out from this prefix, ours and the ones the
+    # existing sections already imply, must be distinct.
+    while IFS=' ' read -r _hn _hkt _hk _hid; do
+        [ -n "$_hn" ] || continue
+        while IFS='|' read -r _es _ehid _eip _emac _eduid _eextra; do
+            [ -n "$_es" ] || continue
+            # the section this reservation will update may hold its own suffix
+            section_is_client "$_emac" "$_eduid" "$_hkt" "$_hk" && continue
+            if [ -n "$_ehid" ]; then
+                [ "$_ehid" = 'ignore' ] && continue
+                _eid="$(norm_hostid "$_ehid")"; _why="hostid $_ehid"
+            elif [ -n "$_eip" ]; then
+                _eid="$(implicit_hostid "$_eip")"; _why="implicit, from ip $_eip"
+            else
+                continue
+            fi
+            [ "$_eid" = "$_hid" ] && die "--host $_hn: suffix ::$_hid is already taken by ${_es#dhcp.} ($_why)"
+        done <<EH_EOF
+$_eh
+EH_EOF
+    done <<HOSTS_EOF
+$HOSTS
+HOSTS_EOF
+
+    _touched=' '
+    while IFS=' ' read -r _hn _hkt _hk _hid; do
+        [ -n "$_hn" ] || continue
+        _match=''; _nmatch=0
+        while IFS='|' read -r _es _ehid _eip _emac _eduid _eextra; do
+            [ -n "$_es" ] || continue
+            if section_is_client "$_emac" "$_eduid" "$_hkt" "$_hk"; then
+                _match="$_es|$_emac|$_eduid|$_eextra"; _nmatch=$((_nmatch + 1))
+            fi
+        done <<EH_EOF
+$_eh
+EH_EOF
+        [ "$_nmatch" -le 1 ] || die "--host $_hn: $_hk appears in $_nmatch config host sections — resolve that in Network -> DHCP and DNS first"
+        _addr="$(reserved_addr "$YGG_PREFIX" "$_hid")"
+        if [ -n "$_match" ]; then
+            _es="${_match%%|*}"; _mrest="${_match#*|}"; _emac="${_mrest%%|*}"; _mrest="${_mrest#*|}"; _eduid="${_mrest%%|*}"; _eextra="${_mrest#*|}"
+            case "$_emac" in *,*) die "--host $_hn: ${_es#dhcp.} lists several MACs — not touching a shared section" ;; esac
+            case "$_eduid" in *,*) die "--host $_hn: ${_es#dhcp.} lists several DUIDs — not touching a shared section" ;; esac
+            [ -z "${_eextra# }" ] || die "--host $_hn: ${_es#dhcp.} carries extra options (${_eextra# }) — edit it by hand instead"
+            case "$_touched" in *" $_es "*) die "--host $_hn: ${_es#dhcp.} was already updated for another --host line — one section, one reservation" ;; esac
+            uci_set "$_es.name" "$_hn"
+            uci_set "$_es.hostid" "$_hid"
+            info "reservation $_hn -> $_addr (updated ${_es#dhcp.})"
+        else
+            _es="dhcp.ygg_host_$(printf '%s' "$_hn" | tr -c 'A-Za-z0-9' '_')"
+            # The section id is derived from the name. If it already exists it
+            # belongs to a different client (this one matched nothing above),
+            # and 'uci set' would quietly turn it into this reservation.
+            if uci -q get "$_es" >/dev/null 2>&1; then
+                die "--host $_hn: section ${_es#dhcp.} already exists ($(uci -q get "$_es")) — rename the reservation or remove that section"
+            else
+                uci_set "$_es" 'host'
+                uci_set "$_es.name" "$_hn"
+                uci_set "$_es.$_hkt" "$_hk"
+                uci_set "$_es.hostid" "$_hid"
+                info "reservation $_hn -> $_addr (new ${_es#dhcp.})"
+            fi
+        fi
+        _touched="$_touched$_es "
+    done <<HOSTS_EOF
+$HOSTS
+HOSTS_EOF
+
+    return 0
+}
+
 stage_lan() {
     [ "$DO_LAN" -eq 1 ] || { info "skipping LAN stage (--no-lan)"; return 0; }
     FAILED_STAGE='LAN routed /64 and RA'
-    step "Stage 4 — LAN routed /64 and SLAAC-only RA"
+    if [ "$LAN_MODE" = 'dhcpv6' ]; then
+        step "Stage 4 — LAN routed /64, RA and stateful DHCPv6"
+    else
+        step "Stage 4 — LAN routed /64 and SLAAC-only RA"
+    fi
+
+    # dhcp is also the status module's file (Pin/Unpin edit config host under
+    # this lock). Take it before staging anything, so a busy lock means
+    # "nothing changed yet" rather than a rollback over someone else's edit.
+    if have flock && [ "$DRY_RUN" -eq 0 ]; then
+        exec 9>>/var/lock/yggdrasil-status-dhcp.lock
+        flock -n 9 || die "another process is editing DHCP configuration (lock busy) — retry in a moment"
+        if uci -q changes dhcp 2>/dev/null | grep -q .; then
+            die "uncommitted UCI changes appeared in 'dhcp' since preflight — commit or revert them first"
+        fi
+    fi
 
     CHANGED_NETWORK=1
     CHANGED_DHCP=1
@@ -926,20 +1292,42 @@ stage_lan() {
     info "LAN: ip6assign=64, ip6class=$_class, extra ULA removed"
 
     uci -q get "dhcp.$LAN" >/dev/null 2>&1 || die "no UCI section 'dhcp.$LAN'"
-    uci_set "dhcp.$LAN.dhcpv6" 'disabled'
     uci_set "dhcp.$LAN.ra" 'server'
-    uci_set "dhcp.$LAN.ra_slaac" '1'
-    uci_del "dhcp.$LAN.ra_flags"
-    uci_add_list "dhcp.$LAN.ra_flags" 'none'
     uci_set "dhcp.$LAN.ra_default" '2'
     uci_set "dhcp.$LAN.ra_preference" 'medium'
-    info "DHCPv6 disabled, RA=server, SLAAC-only"
+    uci_del "dhcp.$LAN.ra_flags"
+    if [ "$LAN_MODE" = 'dhcpv6' ]; then
+        # Settings this script never writes but which would silently defeat
+        # the mode: refuse rather than override an operator's choice.
+        [ "$(uci -q get "dhcp.$LAN.dhcpv6_na")" != '0' ] \
+            || die "dhcp.$LAN.dhcpv6_na=0 disables address assignment — remove it or stay on --slaac"
+        [ "$(uci -q get "dhcp.$LAN.ra_offlink")" != '1' ] \
+            || die "dhcp.$LAN.ra_offlink=1 clears the on-link flag — remove it first"
+        uci_set "dhcp.$LAN.dhcpv6" 'server'
+        uci_set "dhcp.$LAN.ra_slaac" '0'
+        uci_add_list "dhcp.$LAN.ra_flags" 'managed-config'
+        uci_add_list "dhcp.$LAN.ra_flags" 'other-config'
+        info "DHCPv6 server, RA=server with M/O flags, A flag off"
+        report_implicit_hosts
+        apply_hosts
+    else
+        uci_set "dhcp.$LAN.dhcpv6" 'disabled'
+        uci_set "dhcp.$LAN.ra_slaac" '1'
+        uci_add_list "dhcp.$LAN.ra_flags" 'none'
+        info "DHCPv6 disabled, RA=server, SLAAC-only"
+    fi
 
     if [ "$DRY_RUN" -eq 0 ]; then
         uci commit network || die "uci commit network failed"
         uci commit dhcp    || die "uci commit dhcp failed"
+        have flock && exec 9>&-
         /etc/init.d/network reload >/dev/null 2>&1 || die "network reload failed"
         /etc/init.d/odhcpd restart >/dev/null 2>&1 || die "odhcpd restart failed"
+        # config host also feeds dnsmasq's DHCPv4 side; the DNS stage restarts
+        # it too, but --no-dns must not leave a stale generated config behind.
+        if [ -n "$HOSTS" ] && [ "$DO_DNS" -eq 0 ]; then
+            /etc/init.d/dnsmasq restart >/dev/null 2>&1 || die "dnsmasq restart failed"
+        fi
         ok "LAN configuration applied"
     fi
 }
@@ -1040,12 +1428,40 @@ dns_purge() {
 }
 
 dns_record() {
-    # $1 = fully qualified name, $2 = address
-    _sec="$(dns_section "$1" "$2")"
+    # $1 = fully qualified name, $2 = address, $3 = section (default: derived)
+    _sec="${3:-$(dns_section "$1" "$2")}"
     uci_set "dhcp.$_sec" 'domain'
     uci_set "dhcp.$_sec.name" "$1"
     uci_set "dhcp.$_sec.ip" "$2"
     info "record $1 -> $2"
+}
+
+# Records derived from --host reservations live under their own prefix and are
+# rebuilt from scratch on every run: a reservation that is no longer supplied
+# must not leave a name pointing at a suffix nobody holds any more.
+rsv_purge_all() {
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf '    would run: drop existing ygg_rsv_* records\n' >&2
+        return 0
+    fi
+    uci show dhcp 2>/dev/null \
+        | sed -n 's/^dhcp\.\(ygg_rsv_[A-Za-z0-9_]*\)=domain$/\1/p' \
+        | while IFS= read -r _s; do
+              [ -n "$_s" ] && uci -q delete "dhcp.$_s"
+          done
+    return 0
+}
+
+dns_reservations() {
+    rsv_purge_all
+    [ -n "$HOSTS" ] || return 0
+    while IFS=' ' read -r _hn _hkt _hk _hid; do
+        [ -n "$_hn" ] || continue
+        dns_record "${_hn}.${DNS_DOMAIN}" "$(reserved_addr "$YGG_PREFIX" "$_hid")" \
+            "ygg_rsv_$(printf '%s' "$_hn" | tr -c 'A-Za-z0-9' '_')"
+    done <<HOSTS_EOF
+$HOSTS
+HOSTS_EOF
 }
 
 stage_dns() {
@@ -1075,6 +1491,7 @@ ${_h%%=*}.${DNS_DOMAIN} ${_h#*=}"
         dns_record "${_r%% *}" "${_r##* }"
     done
     IFS="$_oifs"
+    dns_reservations
 
     # Answer this namespace locally instead of forwarding it to the WAN resolver.
     # NB: the documented equivalent, 'local=/domain/', must NOT be turned into a
@@ -1328,10 +1745,55 @@ stage_verify() {
     if [ "$DO_LAN" -eq 1 ]; then
         check 'LAN ip6assign'  '64'       "$(uci -q get "network.$LAN.ip6assign")"
         check 'LAN ip6class'   "${YGG_CLASS:-$IFACE}" "$(uci -q get "network.$LAN.ip6class")"
-        check 'DHCPv6'         'disabled' "$(uci -q get "dhcp.$LAN.dhcpv6")"
         check 'RA'             'server'   "$(uci -q get "dhcp.$LAN.ra")"
-        check 'RA SLAAC'       '1'        "$(uci -q get "dhcp.$LAN.ra_slaac")"
+        check 'RA default'     '2'        "$(uci -q get "dhcp.$LAN.ra_default")"
+        check 'RA preference'  'medium'   "$(uci -q get "dhcp.$LAN.ra_preference")"
+        # a UCI list comes back space-joined; compare as a set, not as one string
+        _raf="$(uci -q get "dhcp.$LAN.ra_flags" | tr ' ' '\n' | sort | tr '\n' ' ')"
+        if [ "$LAN_MODE" = 'dhcpv6' ]; then
+            check 'DHCPv6'         'server'   "$(uci -q get "dhcp.$LAN.dhcpv6")"
+            check 'RA SLAAC'       '0'        "$(uci -q get "dhcp.$LAN.ra_slaac")"
+            check 'RA flags'       'managed-config other-config ' "$_raf"
+            check 'odhcpd running' 'yes' "$(pidof odhcpd >/dev/null 2>&1 && echo yes || echo no)"
+            check 'odhcpd enabled' 'yes' "$(/etc/init.d/odhcpd enabled >/dev/null 2>&1 && echo yes || echo no)"
+        else
+            check 'DHCPv6'         'disabled' "$(uci -q get "dhcp.$LAN.dhcpv6")"
+            check 'RA SLAAC'       '1'        "$(uci -q get "dhcp.$LAN.ra_slaac")"
+            check 'RA flags'       'none '    "$_raf"
+        fi
         check 'ula_prefix removed' ''     "$(uci -q get network.globals.ula_prefix)"
+        if [ -n "$HOSTS" ]; then
+            _eh="$(existing_hosts)"
+            while IFS=' ' read -r _hn _hkt _hk _hid; do
+                [ -n "$_hn" ] || continue
+                _got=''
+                while IFS='|' read -r _es _ehid _eip _emac _eduid _eextra; do
+                    [ -n "$_es" ] || continue
+                    if [ "$_hkt" = 'mac' ]; then
+                        case ",$_emac," in *",$_hk,"*) _got="$_ehid" ;; esac
+                    else
+                        [ "$_eduid" = "$_hk" ] && _got="$_ehid"
+                    fi
+                done <<EH_EOF
+$_eh
+EH_EOF
+                [ -n "$_got" ] && _got="$(norm_hostid "$_got")"
+                check "reservation $_hn" "$_hid" "$_got"
+            done <<HOSTS_EOF
+$HOSTS
+HOSTS_EOF
+        fi
+        if [ "$LAN_MODE" = 'dhcpv6' ]; then
+            # A lease proves the path end to end, but odhcpd forgets leases on
+            # restart and a client asks again only on renew/reconnect, so an
+            # empty list right after a run is information, not a failed invariant.
+            _leases="$(ubus call dhcp ipv6leases 2>/dev/null | jsonfilter -e '@.device[*].leases[*]["ipv6-addr"][*].address' 2>/dev/null | tr '\n' ' ')"
+            if [ -n "$_leases" ]; then
+                ok "bound DHCPv6 leases: $_leases"
+            else
+                warn "no DHCPv6 lease bound yet — a client obtains one when it next asks (reconnect, renew, reboot)"
+            fi
+        fi
     fi
 
     if [ "$DO_FIREWALL" -eq 1 ]; then
@@ -1397,7 +1859,21 @@ stage_verify() {
     printf '      %s%s%s%s\n\n' "$C_OK" "$C_BLD" "$NODE_ADDR" "$C_RST" >&2
 
     printf '  Routed prefix advertised to the LAN\n' >&2
-    printf '      %s\n\n' "$YGG_PREFIX" >&2
+    if [ "$DO_LAN" -eq 1 ] && [ "$LAN_MODE" = 'dhcpv6' ]; then
+        printf '      %s  (addresses assigned by DHCPv6; no SLAAC)\n\n' "$YGG_PREFIX" >&2
+    else
+        printf '      %s\n\n' "$YGG_PREFIX" >&2
+    fi
+    if [ -n "$HOSTS" ]; then
+        printf '  Reserved LAN addresses\n' >&2
+        while IFS=' ' read -r _hn _hkt _hk _hid; do
+            [ -n "$_hn" ] || continue
+            printf '      %-20s %s\n' "$_hn" "$(reserved_addr "$YGG_PREFIX" "$_hid")" >&2
+        done <<HOSTS_EOF
+$HOSTS
+HOSTS_EOF
+        printf '\n' >&2
+    fi
 
     if [ -n "$TRUSTED" ]; then
         printf '  Reachable over Yggdrasil from\n' >&2
