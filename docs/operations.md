@@ -281,10 +281,12 @@ changes the mode. Migrating a router that was deployed with SLAAC:
    above) would leave odhcpd with nothing to serve.
 
 Back to SLAAC: the same rerun with `--slaac`. It restores the `dhcp.<lan>`
-values and leaves `hostid` options and `ygg_rsv_*` DNS records in place; they
-are inert without DHCPv6, and the DNS names then point at addresses no client
-holds - remove them by hand if that matters, or rerun with `--dhcpv6` later
-and they are live again.
+values, removes the deployer-owned `ygg_rsv_*` DNS records (they are rebuilt
+from the `--host` lines on every run, and `--slaac` accepts none, so no name
+is left pointing at an address nobody holds) and leaves `hostid` options in
+place - inert without DHCPv6, live again on the next `--dhcpv6` run. The same
+applies to a `--dhcpv6` rerun that omits a previously given `--host`: its
+name goes, its `hostid` stays.
 
 ### Post-update verification
 

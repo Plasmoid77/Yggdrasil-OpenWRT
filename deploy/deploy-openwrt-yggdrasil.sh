@@ -248,6 +248,23 @@ add_dns_host() {
 
 # Lower-case, leading zeros dropped: the form odhcpd compares reservations in
 # (it parses hostid with strtoull(.., 16)), so 010 and 10 are the same suffix.
+lower_str() {
+    printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+# The MAC a --host key stands for: the MAC itself, or the one at the end of a
+# DUID-LLT (type 1, 14 bytes) / DUID-LL (type 3, 10 bytes); empty otherwise.
+mac_in_key() {
+    case "$1" in
+        mac) printf '%s' "$2" ;;
+        duid)
+            _mik="${2%%%*}"
+            case "${#_mik}:$_mik" in
+                28:0001*|20:0003*) printf '%s' "${_mik#"${_mik%????????????}"}" | sed 's/\(..\)/\1:/g; s/:$//' ;;
+            esac ;;
+    esac
+}
+
 norm_hostid() {
     _nh="$(printf '%s' "$1" | tr 'A-F' 'a-f' | sed 's/^0*//')"
     printf '%s' "${_nh:-0}"
@@ -301,11 +318,17 @@ add_host() {
             _hk="$(printf '%s' "$_hk" | tr 'A-F' 'a-f')" ;;
         *) die "--host: '$_hk' is neither a MAC (aa:bb:cc:dd:ee:ff) nor duid:HEX[%IAID]" ;;
     esac
+    # A DUID-LLT (type 1, 14 bytes) or DUID-LL (type 3, 10 bytes) ends in the
+    # MAC, and odhcpd matches such a client by that MAC too - so a duid: line
+    # and a MAC line can name the same machine. Compare them on the MAC.
+    _hkmac="$(mac_in_key "$_hkt" "$_hk")"
     # one client, one suffix, one name: repeats are typos, not lists
     while IFS=' ' read -r _on _ot _ok _oh; do
         [ -n "$_on" ] || continue
-        [ "$_on" = "$_hn" ] && die "--host: hostname given twice: $_hn"
+        [ "$(lower_str "$_on")" = "$(lower_str "$_hn")" ] && die "--host: hostname given twice: $_hn"
         [ "$_ot $_ok" = "$_hkt $_hk" ] && die "--host: client given twice: $_hk"
+        _omac="$(mac_in_key "$_ot" "$_ok")"
+        [ -n "$_omac" ] && [ "$_omac" = "$_hkmac" ] && die "--host: $_hn and $_on name the same client (MAC $_hkmac)"
         [ "$(norm_hostid "$_oh")" = "$_hidn" ] && die "--host: HOSTID $_hid given twice ($_on, $_hn)"
     done <<HOSTS_EOF
 $HOSTS
@@ -1076,6 +1099,18 @@ existing_hosts() {
         }'
 }
 
+# Not written by this script, but they become live IPv6 reservations the moment
+# odhcpd serves DHCPv6 - the operator should know which suffixes those are.
+report_implicit_hosts() {
+    while IFS='|' read -r _es _ehid _eip _emac _eduid _eextra; do
+        [ -n "$_es" ] && [ -z "$_ehid" ] && [ -n "$_eip" ] || continue
+        info "existing ${_es#dhcp.} (${_emac:-no mac}, ip $_eip) implies suffix ::$(implicit_hostid "$_eip")"
+    done <<EH_EOF
+$(existing_hosts)
+EH_EOF
+    return 0
+}
+
 apply_hosts() {
     [ -n "$HOSTS" ] || return 0
     _eh="$(existing_hosts)"
@@ -1105,6 +1140,7 @@ EH_EOF
 $HOSTS
 HOSTS_EOF
 
+    _touched=' '
     while IFS=' ' read -r _hn _hkt _hk _hid; do
         [ -n "$_hn" ] || continue
         _match=''; _nmatch=0
@@ -1124,29 +1160,33 @@ EH_EOF
             _es="${_match%%|*}"; _mrest="${_match#*|}"; _emac="${_mrest%%|*}"; _eextra="${_mrest#*|}"
             case "$_emac" in *,*) die "--host $_hn: ${_es#dhcp.} lists several MACs — not touching a shared section" ;; esac
             [ -z "${_eextra# }" ] || die "--host $_hn: ${_es#dhcp.} carries extra options (${_eextra# }) — edit it by hand instead"
+            case "$_touched" in *" $_es "*) die "--host $_hn: ${_es#dhcp.} was already updated for another --host line — one section, one reservation" ;; esac
             uci_set "$_es.name" "$_hn"
             uci_set "$_es.hostid" "$_hid"
             info "reservation $_hn -> $_addr (updated ${_es#dhcp.})"
         else
             _es="dhcp.ygg_host_$(printf '%s' "$_hn" | tr -c 'A-Za-z0-9' '_')"
-            uci_set "$_es" 'host'
-            uci_set "$_es.name" "$_hn"
-            uci_set "$_es.$_hkt" "$_hk"
-            uci_set "$_es.hostid" "$_hid"
-            info "reservation $_hn -> $_addr (new ${_es#dhcp.})"
+            # The section id is derived from the name. If it already exists it
+            # belongs to a different client (this one matched nothing above),
+            # and 'uci set' would quietly turn it into this reservation.
+            case "
+$_eh" in
+                *"
+$_es|"*)
+                    die "--host $_hn: section ${_es#dhcp.} already exists for another client — rename the reservation or remove that section" ;;
+                *)
+                    uci_set "$_es" 'host'
+                    uci_set "$_es.name" "$_hn"
+                    uci_set "$_es.$_hkt" "$_hk"
+                    uci_set "$_es.hostid" "$_hid"
+                    info "reservation $_hn -> $_addr (new ${_es#dhcp.})" ;;
+            esac
         fi
+        _touched="$_touched$_es "
     done <<HOSTS_EOF
 $HOSTS
 HOSTS_EOF
 
-    # Not ours, but they become live IPv6 reservations the moment odhcpd serves
-    # DHCPv6 — the operator should know which suffixes those are.
-    while IFS='|' read -r _es _ehid _eip _emac _eduid _eextra; do
-        [ -n "$_es" ] && [ -z "$_ehid" ] && [ -n "$_eip" ] || continue
-        info "existing ${_es#dhcp.} (${_emac:-no mac}, ip $_eip) implies suffix ::$(implicit_hostid "$_eip")"
-    done <<EH_EOF
-$_eh
-EH_EOF
     return 0
 }
 
@@ -1189,6 +1229,7 @@ stage_lan() {
         uci_add_list "dhcp.$LAN.ra_flags" 'managed-config'
         uci_add_list "dhcp.$LAN.ra_flags" 'other-config'
         info "DHCPv6 server, RA=server with M/O flags, A flag off"
+        report_implicit_hosts
         if [ -n "$HOSTS" ]; then
             # Same lock the status module takes around its config host edits.
             if have flock && [ "$DRY_RUN" -eq 0 ]; then

@@ -25,8 +25,8 @@ extract_function() {
 
 eval "$(sed -n '/^set -u$/,/^VERSION=/p' "$SCRIPT" | sed '/^set -u$/d')"
 eval "$(sed -n '/^# -* defaults -*$/,/^usage() {$/p' "$SCRIPT" | sed '$d')"
-for f in add_peer add_trusted add_dns_host norm_hostid add_host status_valid_version read_config \
-         reserved_addr implicit_hostid existing_hosts apply_hosts stage_lan; do
+for f in add_peer add_trusted add_dns_host lower_str mac_in_key norm_hostid add_host status_valid_version read_config \
+         reserved_addr implicit_hostid existing_hosts report_implicit_hosts apply_hosts stage_lan; do
     body="$(extract_function "$f")"
     [ -n "$body" ] || { echo "FAIL: function $f not found in deployer" >&2; exit 1; }
     eval "$body"
@@ -97,6 +97,17 @@ reset; set -- --dhcpv6 --host 'a=6c:92:bf:2f:aa:28=10' --host 'b=6C:92:BF:2F:AA:
 printf '%s' "$DIED" | grep -q 'given twice' || fail "duplicate client accepted"
 reset; set -- --dhcpv6 --host 'a=6c:92:bf:2f:aa:28=10' --host 'b=6c:92:bf:2f:aa:29=010'; eval "$PARSER"
 printf '%s' "$DIED" | grep -q 'given twice' || fail "duplicate HOSTID (10 vs 010) accepted"
+reset; set -- --dhcpv6 --host 'Nas=6c:92:bf:2f:aa:28=10' --host 'nas=6c:92:bf:2f:aa:29=11'; eval "$PARSER"
+printf '%s' "$DIED" | grep -q 'given twice' || fail "hostnames differing only in case accepted (DNS is case-insensitive)"
+# a DUID-LLT/LL carries the MAC: the same machine under two keys
+reset; set -- --dhcpv6 --host 'a=6c:92:bf:2f:aa:28=10' --host 'b=duid:00010001323a02a76c92bf2faa28=11'; eval "$PARSER"
+printf '%s' "$DIED" | grep -q 'same client (MAC 6c:92:bf:2f:aa:28)' || fail "MAC line and DUID-LLT line for one client accepted: $DIED"
+reset; set -- --dhcpv6 --host 'a=duid:000300016c92bf2faa28=10' --host 'b=6C:92:BF:2F:AA:28=11'; eval "$PARSER"
+printf '%s' "$DIED" | grep -q 'same client' || fail "DUID-LL line and MAC line for one client accepted: $DIED"
+reset; set -- --dhcpv6 --host 'a=duid:0004ecbcbfb80ef2996849bca6b0d0a6ffce=10' --host 'b=6c:92:bf:2f:aa:28=11'; eval "$PARSER"
+[ -z "$DIED" ] || fail "a DUID-UUID line was treated as carrying a MAC: $DIED"
+[ "$(mac_in_key duid 00030001000000000000%2b67)" = '00:00:00:00:00:00' ] || fail "mac_in_key ignores the IAID suffix"
+[ -z "$(mac_in_key duid 0004ecbcbfb80ef2996849bca6b0d0a6ffce)" ] || fail "mac_in_key invented a MAC for a UUID DUID"
 echo 'PASS: --host rejects malformed and duplicate reservations'
 
 # 3. --host needs managed mode and the LAN stage
@@ -135,6 +146,10 @@ FIXTURE="dhcp.cfg01=host
 dhcp.cfg01.name='desk'
 dhcp.cfg01.mac='3c:e1:a1:41:52:d0'
 dhcp.cfg01.ip='192.168.1.50'
+dhcp.ygg_host_printer=host
+dhcp.ygg_host_printer.name='printer'
+dhcp.ygg_host_printer.mac='aa:bb:cc:dd:ee:20'
+dhcp.ygg_host_printer.hostid='77'
 dhcp.cfg02=host
 dhcp.cfg02.name='zeonux'
 dhcp.cfg02.mac='6c:92:bf:2f:aa:28'
@@ -159,7 +174,7 @@ uci() {
 YGG_PREFIX='303:170f:3ab2:166e::/64'
 
 lines="$(existing_hosts)"
-[ "$(printf '%s\n' "$lines" | wc -l | tr -d ' ')" = 4 ] || fail "existing_hosts did not list four sections: $lines"
+[ "$(printf '%s\n' "$lines" | wc -l | tr -d ' ')" = 5 ] || fail "existing_hosts did not list five sections: $lines"
 printf '%s\n' "$lines" | grep -qxF 'dhcp.cfg02|10|192.168.1.235|6c:92:bf:2f:aa:28||' || fail "cfg02 line wrong: $lines"
 printf '%s\n' "$lines" | grep -qF 'dhcp.cfg03||' | grep -q 'aa:bb:cc:dd:ee:01,aa:bb:cc:dd:ee:02' \
     || printf '%s\n' "$lines" | grep -qF '|aa:bb:cc:dd:ee:01,aa:bb:cc:dd:ee:02|' || fail "multi-MAC list not joined: $lines"
@@ -174,8 +189,6 @@ reset; UCI_LOG=''; HOSTS='zeonux mac 6c:92:bf:2f:aa:28 10'; apply_hosts
 [ -z "$DIED" ] || fail "re-supplying an existing reservation died: $DIED"
 printf '%s' "$UCI_LOG" | grep -qxF 'set dhcp.cfg02.hostid=10' || fail "existing section not updated in place: $UCI_LOG"
 printf '%s' "$UCI_LOG" | grep -q 'ygg_host_' && fail "a second section was created for an existing MAC"
-printf '%s' "$INFOD" | grep -q 'cfg01 (3c:e1:a1:41:52:d0, ip 192.168.1.50) implies suffix ::50' \
-    || fail "implicit reservation of cfg01 not reported: $INFOD"
 reset; UCI_LOG=''; HOSTS='cam mac aa:bb:cc:dd:ee:10 60'; apply_hosts
 [ -z "$DIED" ] || fail "new reservation died: $DIED"
 printf '%s' "$UCI_LOG" | grep -qxF 'set dhcp.ygg_host_cam=host' || fail "new section not created: $UCI_LOG"
@@ -186,6 +199,28 @@ reset; UCI_LOG=''; HOSTS='x mac aa:bb:cc:dd:ee:01 70'; apply_hosts
 printf '%s' "$DIED" | grep -q 'several MACs' || fail "shared multi-MAC section was edited: $DIED"
 reset; UCI_LOG=''; HOSTS='x mac aa:bb:cc:dd:ee:03 70'; apply_hosts
 printf '%s' "$DIED" | grep -q 'extra options (tag)' || fail "section with extra options was edited: $DIED"
+# the derived section id is already taken by a different client
+reset; UCI_LOG=''; HOSTS='printer mac aa:bb:cc:dd:ee:99 80'; apply_hosts
+printf '%s' "$DIED" | grep -q 'ygg_host_printer already exists for another client' || fail "occupied section id was reused: $DIED"
+printf '%s' "$UCI_LOG" | grep -q 'ygg_host_printer' && fail "occupied section was written to anyway: $UCI_LOG"
+# the same client re-supplied under its own id updates in place, no collision
+reset; UCI_LOG=''; HOSTS='printer mac aa:bb:cc:dd:ee:20 77'; apply_hosts
+[ -z "$DIED" ] || fail "re-supplying the printer reservation died: $DIED"
+printf '%s' "$UCI_LOG" | grep -qxF 'set dhcp.ygg_host_printer.hostid=77' || fail "printer not updated in place: $UCI_LOG"
+# two lines resolving to one existing section (MAC form and DUID-LLT form)
+uci() { case "$1 $2" in 'show dhcp') printf '%s\n' "$FIXTURE
+dhcp.cfg05=host
+dhcp.cfg05.name='both'
+dhcp.cfg05.mac='aa:bb:cc:dd:ee:30'
+dhcp.cfg05.duid='00010001deadbeefaabbccddee30'" ;; '-q get') return 1 ;; *) return 0 ;; esac; }
+reset; UCI_LOG=''; HOSTS='p mac aa:bb:cc:dd:ee:30 81
+q duid 00010001deadbeefaabbccddee30 82'; apply_hosts
+printf '%s' "$DIED" | grep -q 'already updated for another --host line' || fail "one section updated twice: $DIED"
+uci() { case "$1 $2" in 'show dhcp') printf '%s\n' "$FIXTURE" ;; '-q get') return 1 ;; *) return 0 ;; esac; }
+# implicit reservations are reported even without any --host
+reset; INFOD=''; report_implicit_hosts
+printf '%s' "$INFOD" | grep -q 'cfg01 (3c:e1:a1:41:52:d0, ip 192.168.1.50) implies suffix ::50' || fail "report_implicit_hosts silent: $INFOD"
+printf '%s' "$INFOD" | grep -q 'cfg02' && fail "a section with an explicit hostid was reported as implicit"
 echo 'PASS: reservation collisions, in-place update and protected sections'
 
 # 6. the UCI values each mode writes (dry run: no commit, no services)

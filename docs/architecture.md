@@ -79,7 +79,10 @@ it changes only `dhcp.<lan>`. A SLAAC address already formed stays valid on
 the client until its own lifetime ends (odhcpd's default cap is 90 min; the
 client decides), and a DHCPv6 lease appears only when the client next asks,
 so both can coexist for a while and the status page shows both. `--slaac`
-does not remove `hostid` options or derived DNS records; they are inert.
+leaves `hostid` options in place (inert without DHCPv6) but, like every run,
+rebuilds the deployer-owned `ygg_rsv_*` DNS records from the `--host` lines
+given - none in SLAAC mode - so no name is left pointing at an address nobody
+holds.
 
 Both modes remove OpenWrt's generated ULA; link-local IPv6 and normal DHCPv4
 remain. Keeping an additional ULA is a separate deliberately documented
