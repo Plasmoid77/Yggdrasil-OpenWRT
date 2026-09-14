@@ -564,7 +564,7 @@ return view.extend({
 			var address = (iface['ipv6-address'] || [])[0];
 
 			var subnet = (iface['ipv6-prefix'] || []).find(function(p) {
-				return p.class === 'ygg';
+				return p.class === iface.interface;
 			});
 
 			var publicKey =
