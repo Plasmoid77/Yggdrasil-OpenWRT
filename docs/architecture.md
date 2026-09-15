@@ -74,14 +74,22 @@ lease with a hostname, and honours `config host` reservations: an explicit
 `hostid`, the implicit IID odhcpd derives from the last IPv4 octet read as
 hex digits (`.235 -> ::235`). A MAC in `config host` matches only a client
 whose DUID is DUID-LLT or DUID-LL (the MAC is inside it); any other DUID type
-needs `option duid` (optionally `%IAID` in hex). `hostid` 0 means dynamic.
+needs `option duid` (optionally `%IAID` in hex). `hostid` 0 means dynamic. A section may carry both `mac` and `duid`
+(`--host NAME=MAC+duid:HEX`): odhcpd matches by the DUID, the status page
+merges rows by MAC, so that is what makes a DUID-UUID client (NetworkManager)
+a named persistent row with its reserved address as canonical.
 Clients without a DHCPv6 client - Android by policy, some IoT - get **no**
 address from the routed prefix in this mode. That is the accepted trade: a
 phone that needs Yggdrasil runs its own node. The deployer refuses to enable
 the mode over `dhcpv6_na=0` or `ra_offlink=1` rather than override them.
 
-Switching modes on a live LAN is a rerun of the deployer with the other flag;
-it changes only `dhcp.<lan>`. A SLAAC address already formed stays valid on
+Switching modes on a live LAN is a rerun of the deployer with the other flag.
+The LAN stage rewrites `dhcp.<lan>` and, as on every run, `network.<lan>`
+`ip6assign`/`ip6class` and the global ULA, then applies it with
+`odhcpd reload` (SIGHUP). Reload re-reads the configuration and keeps the
+bound DHCPv6 leases across a managed-mode rerun - a restart would empty the
+router's lease record until every client renews - but a switch to SLAAC
+disables the DHCPv6 server and odhcpd frees its assignments with it. A SLAAC address already formed stays valid on
 the client until its own lifetime ends (odhcpd's default cap is 90 min; the
 client decides), and a DHCPv6 lease appears only when the client next asks,
 so both can coexist for a while and the status page shows both. `--slaac`
