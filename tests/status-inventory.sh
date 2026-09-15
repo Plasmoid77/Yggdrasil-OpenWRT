@@ -28,6 +28,7 @@ for fn in lower normalize_mac valid_mac valid_hostname valid_ipv4 first_ipv4 \
     discover_lan_addresses confirm_discovered_addresses \
     collect_host_duids collect_host_duid host_mac_for_duid collect_dhcpv6_leases dhcpv6_lease_for_mac \
     norm_hostid valid_hostid collect_taken_hostids collect_taken_hostid lease_duid_for_mac emit_dynamic_leases6 \
+    iid_to_addr find_active_lease6_by_mac \
     emit_client rpc_pin rpc_unpin; do load "$fn"; done
 
 # The production constants point at /tmp and /etc. Default every memory into
@@ -38,6 +39,8 @@ LAN_CACHE_FILE="$TMP/default-lan"
 LAN_STORE_FILE="$TMP/default-lan.flash"
 LAN_ADDR_ROWS=''
 LAN_YGG_PREFIX=''
+LAN_NET='lan'
+uci() { return 1; }
 DISCOVERY_WANTED=0
 COUNT=0
 run() {
@@ -368,6 +371,21 @@ nomac|00030001000000000000|'
     eq '3c:e1:a1:41:52:d0' "$(host_mac_for_duid 0004ecbcbfb80ef2996849bca6b0d0a6ffce 206de1ca)"
     eq '00:11:22:33:44:55' "$(host_mac_for_duid 0004ecbcbfb80ef2996849bca6b0d0a6ffce 1)"
     eq '' "$(host_mac_for_duid 00030001000000000000 2b67)"
+    # a generic entry listed before the exact one must not yield two MACs
+    HOST_DUID_MACS="$(printf '%s\n' '0004ecbc00 aa:aa:aa:aa:aa:aa' '0004ecbc00%2 bb:bb:bb:bb:bb:bb')"
+    eq 'bb:bb:bb:bb:bb:bb' "$(host_mac_for_duid 0004ecbc00 2)"
+    eq 'aa:aa:aa:aa:aa:aa' "$(host_mac_for_duid 0004ecbc00 3)"
+    # all-digit DUIDs are strings, not numbers
+    HOST_DUID_MACS='00030001000000000001 cc:cc:cc:cc:cc:cc'
+    eq '' "$(host_mac_for_duid 30001000000000001 1)"
+    eq 'cc:cc:cc:cc:cc:cc' "$(host_mac_for_duid 00030001000000000001 1)"
+    HOST_DUID_MACS=''
+    for sec in eth wlan any nomac; do collect_host_duid "$sec"; done
+    # a reserved suffix renders as a real address, whatever its width
+    eq '300:1111:2222:3333::10' "$(iid_to_addr '300:1111:2222:3333:' 10)"
+    eq '300:1111:2222:3333::1:0' "$(iid_to_addr '300:1111:2222:3333:' 10000)"
+    eq '300:1111:2222:3333:abcd:ef01:2345:6789' "$(iid_to_addr '300:1111:2222:3333:' abcdef0123456789)"
+    eq '300:1111:2222:3333:1000::' "$(iid_to_addr '300:1111:2222:3333:' 1000000000000000)"
     collect_dhcpv6_leases
     eq "$(printf '%s\n' \
         'aa:bb:cc:dd:ee:ff 300:1111:2222:3333::10 zeonux' \
@@ -617,7 +635,7 @@ setup_rpc() {
     json_reply_device() { CODE="$2"; }
     acquire_dhcp_lock() { return 0; }
     config_load() { :; }
-    uci() { fail 'protected RPC reached UCI mutation'; }
+    uci() { case "$1" in -q) return 1 ;; *) fail 'protected RPC reached UCI mutation' ;; esac; }
     backup_dhcp_config() { fail 'protected RPC reached backup/mutation'; }
     PIN_SECTION_PREFIX=ygg_status_
     FOUND_HOST_MATCH_COUNT=1
@@ -625,6 +643,9 @@ setup_rpc() {
     FOUND_HOST_COMPLEX=0
     FOUND_HOST_HOSTID=''
     FOUND_HOST_MANAGED=0
+    config_foreach() { :; }
+    select_ygg_network() { :; }
+    find_lan_ygg_prefix() { echo '300:1111:2222:3333:'; }
     FOUND_HOST_STATIC_IPV4=''
     FOUND_HOST_NAME=Host
     FOUND_HOST_SELECTOR=host_fixture
@@ -650,8 +671,12 @@ unpin_guards() {
     eq reserved_ipv6 "$CODE"
     # a hostid this page's own Pin wrote goes with the pin, after confirmation
     FOUND_HOST_MANAGED=1
+    ADDR6=''
+    json_reply_device() { CODE="$2"; ADDR6="${7:-}"; }
     rpc_unpin
     eq static_confirmation_required "$CODE"
+    eq '300:1111:2222:3333::10' "$ADDR6"
+    json_reply_device() { CODE="$2"; }
     FOUND_HOST_MANAGED=0
     FOUND_HOST_HOSTID=''
     FOUND_HOST_STATIC_IPV4=192.0.2.1
@@ -676,10 +701,10 @@ pin_guards() {
     find_active_lease_by_mac() { LEASE_MATCH_NAME=Host; LEASE_MATCH_IPV4=192.0.2.1; return 0; }
     # IPv6 suffix: only where DHCPv6 is served, valid, and not taken
     json_get_var() { case "$2" in mac) eval "$1='aa:bb:cc:dd:ee:ff'" ;; name) eval "$1='Host'" ;; reserve_ipv6) eval "$1=\"\$WANT6\"" ;; *) eval "$1='false'" ;; esac; }
-    dhcpv6_is_served() { return 1; }
+    lan_dhcpv6_is_served() { return 1; }
     WANT6=10; rpc_pin
     eq dhcpv6_not_served "$CODE"
-    dhcpv6_is_served() { return 0; }
+    lan_dhcpv6_is_served() { return 0; }
     for bad in 0 1 000 zz 12345678901234567 0x0; do
         WANT6="$bad"; rpc_pin
         eq invalid_hostid "$CODE"
@@ -691,6 +716,29 @@ pin_guards() {
     config_get() { case "$3" in hostid) eval "$1=''" ;; ip) eval "$1='192.0.2.235'" ;; esac; }
     WANT6=235; rpc_pin
     eq hostid_taken "$CODE"
+    # hex identifiers are compared as strings: 100 and 1e2 are different suffixes
+    config_get() { case "$3" in hostid) eval "$1='100'" ;; ip) eval "$1=''" ;; esac; }
+    lease_duid_for_mac() { :; }
+    dhcp_has_pending_changes() { return 0; }
+    WANT6=1e2; rpc_pin
+    eq pending_uci_changes "$CODE"
+    dhcp_has_pending_changes() { return 1; }
+    # an IPv6-only client (no DHCPv4 lease) can still be pinned through its bound DHCPv6 lease
+    find_active_lease_by_mac() { return 1; }
+    config_foreach() { :; }
+    collect_host_duids() { :; }
+    collect_dhcpv6_leases() { DHCPV6_LEASES='aa:bb:cc:dd:ee:ff 300:1111:2222:3333::77 v6only'; }
+    find_lan_ygg_prefix() { echo '300:1111:2222:3333:'; }
+    select_ygg_network() { :; }
+    WANT6=''
+    json_get_var() { case "$2" in mac) eval "$1='aa:bb:cc:dd:ee:ff'" ;; name) eval "$1=''" ;; *) eval "$1='false'" ;; esac; }
+    dhcp_has_pending_changes() { return 0; }
+    rpc_pin
+    eq pending_uci_changes "$CODE"
+    eq v6only "$LEASE_MATCH_NAME"
+    eq '' "$LEASE_MATCH_IPV4"
+    find_active_lease_by_mac() { LEASE_MATCH_NAME=Host; LEASE_MATCH_IPV4=192.0.2.1; return 0; }
+    dhcp_has_pending_changes() { return 1; }
     WANT6=''
     json_get_var() { case "$2" in mac) eval "$1='aa:bb:cc:dd:ee:ff'" ;; name) eval "$1='Host'" ;; *) eval "$1='false'" ;; esac; }
     dhcp_has_pending_changes() { return 0; }
