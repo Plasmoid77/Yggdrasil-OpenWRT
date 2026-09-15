@@ -156,6 +156,11 @@ Three causes, in order of likelihood:
    `00030001000000000000` (type 3, all-zero MAC) is a firmware defect seen on
    a BMC; it can only be matched by DUID, and two ports sharing it need
    `%IAID` to tell them apart.
+4. Two of its interfaces are on the LAN. One DUID, two IAIDs, one
+   reservation: the address goes to whichever interface asks first and the
+   other logs `DAD failed` for it at every renewal (seen with a laptop on
+   cable and Wi-Fi at once). Reserve each interface by `%IAID`, as described
+   in the installation guide.
 
 ### BusyBox lowercase bug found during final backend testing
 
