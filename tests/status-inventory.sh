@@ -27,7 +27,7 @@ for fn in lower normalize_mac valid_mac valid_hostname valid_ipv4 first_ipv4 \
     recall_lan_addresses remember_lan_addresses \
     discover_lan_addresses confirm_discovered_addresses \
     collect_host_duids collect_host_duid host_mac_for_duid collect_dhcpv6_leases dhcpv6_lease_for_mac \
-    norm_hostid valid_hostid collect_taken_hostids collect_taken_hostid lease_duid_for_mac \
+    norm_hostid valid_hostid collect_taken_hostids collect_taken_hostid lease_duid_for_mac emit_dynamic_leases6 \
     emit_client rpc_pin rpc_unpin; do load "$fn"; done
 
 # The production constants point at /tmp and /etc. Default every memory into
@@ -327,7 +327,7 @@ dhcpv6_lease_source() {
     LAN_YGG_PREFIX='300:1111:2222:3333:'
     LAN_DEV=br-lan
     MAC='aa:bb:cc:dd:ee:ff'
-    LEASE_LLT='{"duid":"00010001323A02A7AABBCCDDEEFF","flags":["bound"],"ipv6-addr":[{"address":"300:1111:2222:3333::10"}]}'
+    LEASE_LLT='{"duid":"00010001323A02A7AABBCCDDEEFF","hostname":"zeonux","flags":["bound"],"ipv6-addr":[{"address":"300:1111:2222:3333::10"}]}'
     LEASE_LL='{"duid":"00030001112233445566","flags":["bound"],"ipv6-addr":[{"address":"300:1111:2222:3333::20"},{"address":"2001:db8::20"}]}'
     LEASE_ZERO='{"duid":"00030001000000000000","flags":["bound"],"ipv6-addr":[{"address":"300:1111:2222:3333::32d"}]}'
     LEASE_UUID='{"duid":"00040001000000000000000000000000","flags":["bound"],"ipv6-addr":[{"address":"300:1111:2222:3333::40"}]}'
@@ -341,6 +341,7 @@ dhcpv6_lease_source() {
             *'@.device[*].leases[*]'*) printf '%s\n' "$LEASE_LLT" "$LEASE_LL" "$LEASE_ZERO" "$LEASE_UUID" "$LEASE_OFFER" "$LEASE_UUID_ETH" "$LEASE_UUID_WLAN" ;;
             *'@.flags'*) tr ',' '\n' | sed -n 's/.*"flags":\["\([^"]*\)".*/\1/p' ;;
             *'@.iaid'*) sed -n 's/.*"iaid":\(-\{0,1\}[0-9]*\).*/\1/p' ;;
+            *'@.hostname'*) sed -n 's/.*"hostname":"\([^"]*\)".*/\1/p' ;;
             *'@.duid'*) sed -n 's/.*"duid":"\([^"]*\)".*/\1/p' ;;
             *'ipv6-addr'*) tr ',' '\n' | sed -n 's/.*"address":"\([^"]*\)".*/\1/p' ;;
             *) cat ;;
@@ -369,10 +370,20 @@ nomac|00030001000000000000|'
     eq '' "$(host_mac_for_duid 00030001000000000000 2b67)"
     collect_dhcpv6_leases
     eq "$(printf '%s\n' \
-        'aa:bb:cc:dd:ee:ff 300:1111:2222:3333::10' \
-        '11:22:33:44:55:66 300:1111:2222:3333::20' \
-        '3c:e1:a1:41:52:d0 300:1111:2222:3333::20' \
-        '14:4f:8a:8d:19:77 300:1111:2222:3333::21')" "$DHCPV6_LEASES"
+        'aa:bb:cc:dd:ee:ff 300:1111:2222:3333::10 zeonux' \
+        '11:22:33:44:55:66 300:1111:2222:3333::20 -' \
+        '3c:e1:a1:41:52:d0 300:1111:2222:3333::20 -' \
+        '14:4f:8a:8d:19:77 300:1111:2222:3333::21 -')" "$DHCPV6_LEASES"
+    # an IPv6-only client (no DHCPv4 lease) gets a row from its bound lease,
+    # named from the lease, merged by MAC like every other row; one already
+    # emitted from DHCPv4 is not duplicated
+    ROWS=''
+    emit_client() { ROWS="$ROWS|$1/$2/$4"; remember_emitted_mac "$2"; }
+    find_host_by_mac() { return 1; }
+    EMITTED_MACS='|11:22:33:44:55:66|'
+    emit_dynamic_leases6
+    eq '|zeonux/aa:bb:cc:dd:ee:ff/0|/3c:e1:a1:41:52:d0/0|/14:4f:8a:8d:19:77/0' "$ROWS"
+    load emit_client
     eq '300:1111:2222:3333::10' "$(dhcpv6_lease_for_mac AA:BB:CC:DD:EE:FF)"
     eq '' "$(dhcpv6_lease_for_mac 00:00:00:00:00:00)"
     eq '' "$(dhcpv6_lease_for_mac 11:22:33:44:55:77)"
@@ -426,8 +437,8 @@ nomac|00030001000000000000|'
     eq 0 "$GOT_PROTECTED"
     json_add_int() { :; }
     DHCPV6_LEASES="$(printf '%s\n' \
-        'aa:bb:cc:dd:ee:ff 300:1111:2222:3333::10' \
-        '11:22:33:44:55:66 300:1111:2222:3333::20')"
+        'aa:bb:cc:dd:ee:ff 300:1111:2222:3333::10 zeonux' \
+        '11:22:33:44:55:66 300:1111:2222:3333::20 -')"
     # no lease for this MAC: the observed set is untouched
     find_canonical_domain() { CANONICAL_IPV6=''; DNS_ALIAS=''; }
     ip() { printf '%s\n' "$PRIVACY lladdr 22:33:44:55:66:77 REACHABLE"; }

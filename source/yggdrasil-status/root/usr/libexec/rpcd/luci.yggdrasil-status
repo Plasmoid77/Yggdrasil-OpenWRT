@@ -180,7 +180,8 @@ host_section_has_extra_options() {
 			"dhcp.${hse_selector}.name="*|\
 			"dhcp.${hse_selector}.mac="*|\
 			"dhcp.${hse_selector}.ip="*|\
-			"dhcp.${hse_selector}.hostid="*)
+			"dhcp.${hse_selector}.hostid="*|\
+			"dhcp.${hse_selector}.duid="*)
 				;;
 			*)
 				return 0
@@ -425,8 +426,8 @@ host_mac_for_duid() {
 	'
 }
 
-# Bound DHCPv6 leases from odhcpd, one "<mac> <address>" line each, limited to
-# the routed prefix. The MAC is the one a config host ties to the lease's DUID
+# Bound DHCPv6 leases from odhcpd, one "<mac> <address> <hostname|->" line each,
+# limited to the routed prefix. The MAC is the one a config host ties to the lease's DUID
 # (the operator's word: a DUID-UUID or DUID-EN client has no MAC of its own in
 # the DUID), otherwise the one inside the DUID the way odhcpd itself matches a
 # config host by MAC: a 14-byte DUID-LLT (type 1) carries it in the last six
@@ -435,7 +436,7 @@ host_mac_for_duid() {
 # router's own record of what it handed out, so a lease outranks every
 # observed address.
 collect_dhcpv6_leases() {
-	local cdl_lease cdl_duid cdl_iaid cdl_mac cdl_addr
+	local cdl_lease cdl_duid cdl_iaid cdl_mac cdl_addr cdl_name
 
 	DHCPV6_LEASES=''
 	[ -n "$LAN_YGG_PREFIX" ] || return 0
@@ -452,6 +453,8 @@ collect_dhcpv6_leases() {
 			''|*[!0-9-]*) cdl_iaid='' ;;
 			*) cdl_iaid="$(printf '%x' $(( cdl_iaid & 0xffffffff )))" ;;
 		esac
+		cdl_name="$(printf '%s' "$cdl_lease" | jsonfilter -e '@.hostname' 2>/dev/null | tr -d ' ')"
+		valid_hostname "$cdl_name" || cdl_name='-'
 		cdl_mac="$(host_mac_for_duid "$cdl_duid" "$cdl_iaid")"
 		if [ -z "$cdl_mac" ]; then
 			case "${#cdl_duid}:$cdl_duid" in
@@ -467,7 +470,7 @@ collect_dhcpv6_leases() {
 				[ -n "$cdl_addr" ] || continue
 				cdl_addr="$(lower "$cdl_addr")"
 				case "$cdl_addr" in
-					"$LAN_YGG_PREFIX"*) printf '%s %s\n' "$cdl_mac" "$cdl_addr" ;;
+					"$LAN_YGG_PREFIX"*) printf '%s %s %s\n' "$cdl_mac" "$cdl_addr" "$cdl_name" ;;
 				esac
 			done
 	done <<EOF
@@ -1225,6 +1228,50 @@ emit_dynamic_leases() {
 }
 
 
+# Dynamic rows for clients that hold a bound DHCPv6 lease but no DHCPv4 lease
+# (an IPv6-only host). Same identity rule as the DHCPv4 rows - the row is the
+# MAC - so only a lease whose MAC is known (DUID-LLT/LL, or a config host that
+# ties the DUID to a MAC) makes a row; a DUID-UUID client with neither stays
+# invisible until it takes a DHCPv4 lease or is reserved. The row lives as long
+# as odhcpd lists the lease as bound.
+emit_dynamic_leases6() {
+	local el_mac el_addr el_name el_persistent el_static_ipv4 el_managed el_shared el_complex el_ambiguous el_reserved6
+
+	[ -n "${DHCPV6_LEASES:-}" ] || return 0
+
+	# el_addr is unused here: the address reaches the row through
+	# dhcpv6_lease_for_mac inside emit_client, like every other lease.
+	# shellcheck disable=SC2034
+	while IFS=' ' read -r el_mac el_addr el_name; do
+		[ -n "$el_mac" ] || continue
+		mac_was_emitted "$el_mac" && continue
+
+		[ "$el_name" != '-' ] || el_name=''
+		el_persistent=0
+		el_static_ipv4=''
+		el_managed=0
+		el_shared=0
+		el_complex=0
+		el_ambiguous=0
+		el_reserved6=0
+
+		if find_host_by_mac "$el_mac"; then
+			el_persistent=1
+			[ -n "$FOUND_HOST_NAME" ] && el_name="$FOUND_HOST_NAME"
+			el_static_ipv4="$FOUND_HOST_STATIC_IPV4"
+			el_managed="$FOUND_HOST_MANAGED"
+			[ "$FOUND_HOST_MAC_COUNT" -gt 1 ] && el_shared=1
+			el_complex="$FOUND_HOST_COMPLEX"
+			el_ambiguous="$FOUND_HOST_AMBIGUOUS"
+			[ -n "${FOUND_HOST_HOSTID:-}" ] && el_reserved6=1
+		fi
+
+		emit_client "$el_name" "$el_mac" "$el_static_ipv4" "$el_persistent" "" "$el_static_ipv4" "$el_managed" "$el_shared" "$el_complex" "$el_ambiguous" "$el_reserved6"
+	done <<EOF
+$DHCPV6_LEASES
+EOF
+}
+
 # Persistent rows without an active DHCP lease. They stay visible as Offline.
 emit_persistent_host() {
 	local eph_section="$1"
@@ -1282,6 +1329,7 @@ rpc_clients() {
 	json_init
 	json_add_array clients
 	emit_dynamic_leases
+	emit_dynamic_leases6
 	config_foreach emit_persistent_host host
 	json_close_array
 	save_address_memory
@@ -1618,7 +1666,7 @@ rpc_pin() {
 
 
 rpc_unpin() {
-	local ru_mac ru_confirm ru_static ru_section
+	local ru_mac ru_confirm ru_static ru_section ru_addr6 ru_msg
 
 	read_request || {
 		json_reply 0 'invalid_request' 'Invalid JSON request.'
@@ -1675,7 +1723,24 @@ rpc_unpin() {
 		case "$ru_confirm" in
 			1|true) ;;
 			*)
-				json_reply_device 0 'static_confirmation_required' 'This device has a static DHCP reservation. Removing this persistent entry will also remove the reserved IPv4 address and, where DHCPv6 is served, the reserved IPv6 suffix.' "$ru_mac" "$FOUND_HOST_NAME" "$ru_static" "${FOUND_HOST_HOSTID:+::$FOUND_HOST_HOSTID}"
+				ru_addr6=''
+				if [ -n "$FOUND_HOST_HOSTID" ]; then
+					YGG_NET=''
+					config_load network
+					config_foreach select_ygg_network interface
+					LAN_YGG_PREFIX="$(find_lan_ygg_prefix)"
+					config_load dhcp
+					ru_addr6="${LAN_YGG_PREFIX:+${LAN_YGG_PREFIX}:}$(norm_hostid "$FOUND_HOST_HOSTID")"
+					[ -n "$LAN_YGG_PREFIX" ] || ru_addr6="::$ru_addr6"
+				fi
+				if [ -n "$ru_static" ] && [ -n "$FOUND_HOST_HOSTID" ]; then
+					ru_msg='This device has DHCP reservations. Removing this persistent entry will also remove the reserved IPv4 address and the reserved IPv6 suffix.'
+				elif [ -n "$FOUND_HOST_HOSTID" ]; then
+					ru_msg='This device has a DHCPv6 reservation made from this page. Removing this persistent entry will also remove the reserved IPv6 suffix.'
+				else
+					ru_msg='This device has a static DHCP reservation. Removing this persistent entry will also remove the reserved IPv4 address and, where DHCPv6 is served, the IPv6 suffix odhcpd derives from it.'
+				fi
+				json_reply_device 0 'static_confirmation_required' "$ru_msg" "$ru_mac" "$FOUND_HOST_NAME" "$ru_static" "$ru_addr6"
 				return 0
 				;;
 		esac

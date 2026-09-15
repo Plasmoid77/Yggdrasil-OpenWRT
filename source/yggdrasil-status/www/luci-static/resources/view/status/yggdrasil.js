@@ -31,7 +31,7 @@ var callClients = rpc.declare({
 var callPin = rpc.declare({
 	object: 'luci.yggdrasil-status',
 	method: 'pin',
-	params: [ 'mac', 'name', 'reserve_ipv4' ]
+	params: [ 'mac', 'name', 'reserve_ipv4', 'reserve_ipv6' ]
 });
 
 
@@ -237,6 +237,24 @@ function showPinDialog(client) {
 
 	var reserveInput = E('input', reserveAttrs);
 
+	/*
+	 * Only where the router hands out the addresses (managed DHCPv6) can a
+	 * suffix be reserved; in SLAAC mode the field would promise nothing.
+	 */
+	var managed = !!client.dhcpv6_served;
+	var suffixAttrs = {
+		'class': 'cbi-input-text',
+		'type': 'text',
+		'placeholder': managed ? _('hex, e.g. 10') : _('not available: the LAN runs SLAAC'),
+		'maxlength': 16,
+		'style': 'width: 100%'
+	};
+
+	if (!managed)
+		suffixAttrs.disabled = '';
+
+	var suffixInput = E('input', suffixAttrs);
+
 	var errorBox = E('div', {
 		'style': 'display:none; color:#dc2626; margin-top:.5em'
 	});
@@ -255,16 +273,22 @@ function showPinDialog(client) {
 
 			var name = String(nameInput.value || '').trim();
 			var reserve = !!reserveInput.checked;
+			var suffix = managed ? String(suffixInput.value || '').trim() : '';
 
 			if (!validHostname(name)) {
 				showError(_('Hostname must be 1-63 characters using letters, digits or hyphens, and cannot start or end with a hyphen.'));
 				return;
 			}
 
+			if (suffix && !/^(0x)?[0-9a-fA-F]{1,16}$/.test(suffix)) {
+				showError(_('IPv6 suffix must be 1-16 hex digits.'));
+				return;
+			}
+
 			errorBox.style.display = 'none';
 			saveButton.disabled = true;
 
-			callPin(client.mac, name, reserve)
+			callPin(client.mac, name, reserve, suffix)
 				.then(function(result) {
 					if (!result || !result.ok) {
 						showError(backendError(result));
@@ -273,6 +297,8 @@ function showPinDialog(client) {
 					}
 
 					ui.hideModal();
+					if (result.reserved_ipv6)
+						ui.addNotification(null, E('p', {}, result.message || _('Pinned.')), 'info');
 					return refreshClients();
 				})
 				.catch(function(err) {
@@ -301,6 +327,13 @@ function showPinDialog(client) {
 			])
 		]),
 		E('p', {}, _('The IPv4 reservation is optional and is disabled by default.')),
+		E('div', { 'class': 'cbi-value' }, [
+			E('label', { 'class': 'cbi-value-title' }, _('IPv6 suffix')),
+			E('div', { 'class': 'cbi-value-field' }, suffixInput)
+		]),
+		E('p', {}, managed
+			? _('Optional. Reserves <routed prefix>::suffix for this device through its DHCPv6 lease; the router assigns it when the device next renews or reconnects. Not 0 (dynamic) and not 1 (the router).')
+			: _('An IPv6 suffix can only be reserved where the router assigns addresses (managed DHCPv6); this LAN runs SLAAC.')),
 		errorBox,
 		E('div', { 'class': 'right' }, [
 			E('button', {
@@ -328,6 +361,8 @@ function performUnpin(client, confirmStatic, errorBox, button) {
 				ui.hideModal();
 				client.static_ipv4 = 1;
 				client.reserved_ipv4 = result.reserved_ipv4 || client.reserved_ipv4 || client.ipv4 || '';
+				client.reserved_ipv6_addr = result.reserved_ipv6 || '';
+				client.confirm_message = result.message || '';
 				showUnpinDialog(client);
 				return;
 			}
@@ -370,9 +405,16 @@ function showUnpinDialog(client) {
 	}
 
 	if (confirmStatic) {
+		/* the backend names exactly which reservations go: IPv4, IPv6 or both */
 		paragraphs.push(E('p', { 'style': 'color:#dc2626; font-weight:600' },
-			_('This device has a static DHCP reservation. Removing this persistent entry will also remove the reserved IPv4 address %s and, where DHCPv6 is served, the IPv6 suffix derived from it.').format(client.reserved_ipv4 || client.ipv4 || '—')
+			client.confirm_message
+				|| _('This device has a static DHCP reservation. Removing this persistent entry will also remove the reserved IPv4 address %s and, where DHCPv6 is served, the IPv6 suffix derived from it.').format(client.reserved_ipv4 || client.ipv4 || '—')
 		));
+		var reserved = [];
+		if (client.reserved_ipv4) reserved.push(client.reserved_ipv4);
+		if (client.reserved_ipv6_addr) reserved.push(client.reserved_ipv6_addr);
+		if (reserved.length)
+			paragraphs.push(E('p', {}, _('Reserved: %s').format(reserved.join(', '))));
 		actionLabel = _('Unpin and remove reservation');
 	}
 
