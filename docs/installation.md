@@ -324,11 +324,18 @@ reserved host:
 uci add dhcp host
 uci set dhcp.@host[-1].name='nas'
 uci set dhcp.@host[-1].mac='<MAC>'
+uci set dhcp.@host[-1].duid='<HEX>'         # only needed when the DUID carries no MAC
 uci set dhcp.@host[-1].hostid='10'          # -> <prefix>::10
 uci commit dhcp
-/etc/init.d/odhcpd restart
+/etc/init.d/odhcpd reload                    # keeps the bound leases
 /etc/init.d/dnsmasq restart                  # config host also feeds DHCPv4
 ```
+
+A DUID is 10 to 130 bytes (20-260 hex digits); odhcpd ignores clients outside
+that range, so a shorter value can never match. And odhcpd keys its host
+sections on the DUID bytes and the MACs, not on the IAID: two sections with
+the same DUID, no MAC and different `%IAID` are one section to it, and the
+second reservation silently disappears - give each interface its MAC as well.
 
 Mind two odhcpd facts before adding reservations by hand. A `config host`
 that has an IPv4 `ip` but no `hostid` already reserves an IPv6 IID - the last
@@ -348,7 +355,10 @@ on the same address every renewal. Reserve each interface by `%IAID`:
 `ubus call dhcp ipv6leases` prints the `iaid` as a signed decimal, so
 `printf '%x' $((IAID & 0xffffffff))` gives the hex the option wants, e.g.
 `thinkpad=<MAC-eth>+duid:<HEX>%206de1ca=20` and
-`thinkpad-wifi=<MAC-wlan>+duid:<HEX>%d259864f=21`.
+`thinkpad-wifi=<MAC-wlan>+duid:<HEX>%d259864f=21`. The MACs are what keep
+the two sections distinct for odhcpd (see above); the deployer refuses two
+`duid:`-only lines that differ by IAID alone. Verified on the test LAN with a
+laptop on cable and Wi-Fi: each interface holds its own reserved address.
 
 ```sh
 ip -6 addr show dev br-lan

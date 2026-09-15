@@ -36,14 +36,17 @@ Pin/Unpin in progress stops it with nothing touched. Verification checks the
 mode's exact UCI values (`ra_flags` as a set of two list entries), that
 odhcpd runs and is enabled, each reservation's `hostid`, and lists the leases
 bound so far. The LAN stage applies its changes with `odhcpd reload`, which
-keeps the bound leases; a restart emptied the router's lease record until
-every client renewed.
+keeps the bound leases across a managed-mode rerun (a restart emptied the
+router's lease record until every client renewed); a switch to SLAAC still
+discards them, since it disables the DHCPv6 server.
 
 The accepted cost is written down rather than hidden: a client without a
 DHCPv6 client - Android by policy, some IoT - gets no address from the routed
 prefix in managed mode. A phone that needs Yggdrasil runs its own node. A MAC
 in `config host` matches only a DUID-LLT or DUID-LL client; a BMC with an
-all-zero DUID needs `duid:` with `%IAID` per port.
+all-zero DUID needs `MAC+duid:` with `%IAID` per port - the MAC because
+odhcpd keys host sections on DUID bytes and MACs, not on the IAID, and would
+fold two DUID-only sections into one; a DUID must be 10-130 bytes.
 
 Status v5.5 reads `ubus call dhcp ipv6leases` as an address source. A bound
 lease is attributed to a row through the MAC inside a DUID-LLT/LL - the rule

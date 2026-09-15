@@ -155,7 +155,9 @@ Three causes, in order of likelihood:
    `--host NAME=duid:<HEX>[%<IAID>]=<HOSTID>` instead. A DUID of
    `00030001000000000000` (type 3, all-zero MAC) is a firmware defect seen on
    a BMC; it can only be matched by DUID, and two ports sharing it need
-   `%IAID` to tell them apart.
+   `MAC+duid:<HEX>%IAID` each - the MAC, because odhcpd keys host sections
+   on DUID bytes and MACs and would fold two DUID-only sections into one;
+   the IAID, to tell the ports apart.
 4. Two of its interfaces are on the LAN. One DUID, two IAIDs, one
    reservation: the address goes to whichever interface asks first and the
    other logs `DAD failed` for it at every renewal (seen with a laptop on
@@ -266,8 +268,9 @@ keeps whatever mode the router runs. Migrating a router that was deployed
 with SLAAC:
 
 1. Keep a second management path open (Yggdrasil to the router plus LAN, or
-   a serial console). The LAN stage reloads odhcpd (bound leases survive);
-   the router's own addresses and the `ygg` zone do not change.
+   a serial console). The LAN stage reloads odhcpd (bound leases survive a
+   managed-mode rerun; a switch to SLAAC discards them with the DHCPv6
+   server); the router's own addresses and the `ygg` zone do not change.
 2. Rerun the deployer with the **complete** argument set of the original
    deployment plus `--dhcpv6` and the `--host` reservations you want. The
    deployer rewrites trusted rules, jumper and multicast sections from its

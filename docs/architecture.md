@@ -83,10 +83,13 @@ address from the routed prefix in this mode. That is the accepted trade: a
 phone that needs Yggdrasil runs its own node. The deployer refuses to enable
 the mode over `dhcpv6_na=0` or `ra_offlink=1` rather than override them.
 
-Switching modes on a live LAN is a rerun of the deployer with the other flag;
-it changes only `dhcp.<lan>` and applies it with `odhcpd reload` (SIGHUP),
-which re-reads the configuration but keeps the bound leases - a restart would
-empty the router's lease record until every client renews. A SLAAC address already formed stays valid on
+Switching modes on a live LAN is a rerun of the deployer with the other flag.
+The LAN stage rewrites `dhcp.<lan>` and, as on every run, `network.<lan>`
+`ip6assign`/`ip6class` and the global ULA, then applies it with
+`odhcpd reload` (SIGHUP). Reload re-reads the configuration and keeps the
+bound DHCPv6 leases across a managed-mode rerun - a restart would empty the
+router's lease record until every client renews - but a switch to SLAAC
+disables the DHCPv6 server and odhcpd frees its assignments with it. A SLAAC address already formed stays valid on
 the client until its own lifetime ends (odhcpd's default cap is 90 min; the
 client decides), and a DHCPv6 lease appears only when the client next asks,
 so both can coexist for a while and the status page shows both. `--slaac`

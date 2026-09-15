@@ -269,6 +269,9 @@ norm_duid() {
         *[!0-9A-Fa-f]*) die "--host: DUID must be hex digits: $_ndd" ;;
     esac
     [ $(( ${#_ndd} % 2 )) -eq 0 ] || die "--host: DUID has an odd number of hex digits: $_ndd"
+    # odhcpd ignores a client whose DUID is under 10 or over 130 bytes
+    [ "${#_ndd}" -ge 20 ] || die "--host: DUID shorter than 10 bytes (20 hex digits): $_ndd"
+    [ "${#_ndd}" -le 260 ] || die "--host: DUID longer than 130 bytes (260 hex digits): $_ndd"
     case "$_ndi" in
         '') : ;;
         %*[!0-9A-Fa-f]*|%) die "--host: IAID after % must be 1-8 hex digits: $_nd" ;;
@@ -285,6 +288,16 @@ is_mac() {
     case "$1" in
         [0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]) return 0 ;;
         *) return 1 ;;
+    esac
+}
+
+# A DUID option as odhcpd would read it: lower-case, IAID without leading
+# zeros - so a UCI value spelled '%000a' equals a --host line spelled '%a'.
+norm_duid_opt() {
+    _ndo="$(printf '%s' "$1" | tr 'A-F' 'a-f')"
+    case "$_ndo" in
+        *%*) _ndoi="$(printf '%s' "${_ndo#*%}" | sed 's/^0*//')"; printf '%s%%%s' "${_ndo%%%*}" "${_ndoi:-0}" ;;
+        *) printf '%s' "$_ndo" ;;
     esac
 }
 
@@ -378,6 +391,13 @@ add_host() {
         [ -n "$_omac" ] && [ "$_omac" = "$_hkmac" ] && die "--host: $_hn and $_on name the same client (MAC $_hkmac)"
         _oduid="$(duid_in_key "$_ot" "$_ok")"
         [ -n "$_oduid" ] && [ "$_oduid" = "$(duid_in_key "$_hkt" "$_hk")" ] && die "--host: $_hn and $_on name the same client (DUID $_oduid)"
+        # odhcpd keys its host sections on DUID bytes and MACs, not on the IAID:
+        # two duid: lines with the same DUID and no MAC collapse into one
+        # section, and the second reservation silently disappears. Give each
+        # interface its MAC (MAC+duid:HEX%IAID) to keep them apart.
+        if [ "$_ot" = 'duid' ] && [ "$_hkt" = 'duid' ] && [ "${_oduid%%%*}" = "${_hk%%%*}" ]; then
+            die "--host: $_hn and $_on share DUID ${_hk%%%*} and differ only by IAID; odhcpd keeps one of them — add the MAC of each (NAME=MAC+duid:HEX%IAID=HOSTID)"
+        fi
         [ "$(norm_hostid "$_oh")" = "$_hidn" ] && die "--host: HOSTID $_hid given twice ($_on, $_hn)"
     done <<HOSTS_EOF
 $HOSTS
@@ -1197,7 +1217,7 @@ section_is_client() {
     _sic_oifs="$IFS"; IFS=','
     for _sic_d in $2; do
         [ -n "$_sic_d" ] || continue
-        [ -n "$_sic_duid" ] && [ "$_sic_d" = "$_sic_duid" ] && { IFS="$_sic_oifs"; return 0; }
+        [ -n "$_sic_duid" ] && [ "$(norm_duid_opt "$_sic_d")" = "$_sic_duid" ] && { IFS="$_sic_oifs"; return 0; }
         _sic_dm="$(mac_in_key duid "$_sic_d")"
         [ -n "$_sic_dm" ] && [ "$_sic_dm" = "$_sic_mac" ] && { IFS="$_sic_oifs"; return 0; }
     done
@@ -1277,7 +1297,7 @@ EH_EOF
             _hkm="$(mac_in_key "$_hkt" "$_hk")"; _hkd="$(duid_in_key "$_hkt" "$_hk")"
             [ "$_hkt" = 'duid' ] && _hkm=''
             [ -n "$_hkm" ] && [ "$_hkm" != "$_emac" ]  && uci_set "$_es.mac"  "$_hkm"
-            [ -n "$_hkd" ] && [ "$_hkd" != "$_eduid" ] && uci_set "$_es.duid" "$_hkd"
+            [ -n "$_hkd" ] && [ "$_hkd" != "$(norm_duid_opt "$_eduid")" ] && uci_set "$_es.duid" "$_hkd"
             uci_set "$_es.hostid" "$_hid"
             info "reservation $_hn -> $_addr (updated ${_es#dhcp.})"
         else
