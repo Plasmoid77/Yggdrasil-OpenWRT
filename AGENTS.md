@@ -27,8 +27,8 @@ pointers for older links/comments, not competing sources of truth.
    a rerun must never flip it) and trusted `/128` access. No NAT66 or blanket
    forwarding. Keep native-node and routed-LAN addresses distinct. Do not
    rename a working remote management interface.
-2. Active DHCPv4 leases create dynamic rows; native `config host` creates
-   persistence; merge by MAC. NDP only enriches addresses and must not extend
+2. Active DHCPv4 leases and bound DHCPv6 leases with a known MAC create
+   dynamic rows; native `config host` creates persistence; merge by MAC. NDP only enriches addresses and must not extend
    row lifetime. A remembered address — routed or Yggdrasil node — is bounded by
    the same rule: pruned to existing rows and never extending a row's lifetime.
    Its storage class matches the row's — tmpfs for a lease-backed row, flash

@@ -17,14 +17,17 @@ firewall, Yggdrasil or odhcpd. Preserve an alternate management path.
 
 ## Behavior
 
-Active DHCPv4 leases create dynamic rows until expiry; native `config host`
-provides persistent identity. Sources merge by MAC. Runtime IPv6 comes from
-odhcpd's DHCPv6 leases and from NDP: canonical `config domain` wins, otherwise
-a bound DHCPv6 lease (attributed through the MAC in a DUID-LLT/LL) comes
-first, otherwise an observed modified EUI-64 wins, otherwise all observed
-privacy addresses remain eligible. The page never assigns or removes client
-addresses itself; a `config host` with a DHCPv6 `hostid` is shown as reserved
-and is not unpinned from here. A device the neighbour table has forgotten
+Active DHCPv4 leases, and bound DHCPv6 leases whose MAC is known, create
+dynamic rows until they end; native `config host` provides persistent
+identity. Sources merge by MAC. Runtime IPv6 comes from odhcpd's DHCPv6 leases
+and from NDP: canonical `config domain` wins, otherwise a bound DHCPv6 lease
+(attributed through a `config host` tying its DUID to a MAC, or through the
+MAC in a DUID-LLT/LL) comes first, otherwise an observed modified EUI-64 wins,
+otherwise all observed privacy addresses remain eligible. Where the router
+serves DHCPv6, Pin can reserve an IPv6 suffix (`hostid`, with the device's
+DUID when it holds a lease); Unpin removes such a pin under confirmation and
+reloads odhcpd. A reservation made elsewhere is shown as reserved and is not
+unpinned from here. A device the neighbour table has forgotten
 keeps its last known addresses, dimmed, for exactly as long as its row exists;
 addresses formed from a retired routed prefix are discarded rather than shown.
 When a device is present but its address is not visible, the backend sends

@@ -154,14 +154,25 @@ otherwise observed modified EUI-64 -> that address only
 otherwise -> all unique observed addresses for that MAC in the Ygg prefix
 ```
 
-A DHCPv6 lease is attributed to a row through the MAC embedded in a DUID-LLT
-or DUID-LL - the same rule odhcpd applies when it matches `config host` by
-MAC - so a lease with any other DUID type attributes to nothing. An all-zero
-link-layer address inside a DUID is a firmware defect and is ignored. The
-lease is the router's own record of what it handed out, which is why it
-outranks anything merely observed but not the operator's canonical record.
-`ipv6_source` names the branch taken; `reserved_ipv6` is 1 when the row's
-`config host` carries `hostid`.
+A DHCPv6 lease is attributed to a row by MAC: first through a `config host`
+that ties the lease's DUID (with its IAID, normalised the way odhcpd reads
+it - an exact `DUID%IAID` section wins over a DUID-only one) to a `mac`,
+otherwise through the MAC embedded in a DUID-LLT or DUID-LL - the same rule
+odhcpd applies when it matches `config host` by MAC. A lease with any other
+DUID type and no such section attributes to nothing. An all-zero link-layer
+address inside a DUID is a firmware defect and is ignored; only leases whose
+`flags` contain `bound` count. The lease is the router's own record of what
+it handed out, which is why it outranks anything merely observed but not the
+operator's canonical record. `ipv6_source` names the branch taken;
+`reserved_ipv6` is 1 when the row's `config host` carries `hostid`, or when
+it carries an IPv4 `ip` without `hostid` and the bound lease sits on the
+suffix odhcpd derives from it (`.235 -> ::235`).
+
+A bound lease also creates a row of its own for a client that holds no DHCPv4
+lease (an IPv6-only host), named from the lease's hostname, living as long as
+odhcpd lists the lease as bound - but only when its MAC is known by the rules
+above, because the row *is* the MAC. A DUID-UUID client with neither a DHCPv4
+lease nor a `config host` stays invisible until it has one of them.
 
 The computed EUI-64 must actually be observed. Never invent an address merely
 from a MAC. The canonical address is the primary IPv6 and rendered in bold;
@@ -345,7 +356,7 @@ with this module's mutations. A concurrent Pin/Unpin returns `busy`.
 The rpcd object is `luci.yggdrasil-status`:
 
 ```json
-{"clients":{},"pin":{"mac":"","name":"","reserve_ipv4":false},"unpin":{"mac":"","confirm_static":false}}
+{"clients":{},"pin":{"mac":"","name":"","reserve_ipv4":false,"reserve_ipv6":""},"unpin":{"mac":"","confirm_static":false}}
 ```
 
 `clients` returns an object containing `clients`, an array of objects:
@@ -357,7 +368,8 @@ The rpcd object is `luci.yggdrasil-status`:
 | `canonical_ipv6` | String; empty when absent |
 | `ipv6_addresses` | Array of strings; stable-first selected set |
 | `ipv6_source` | String; `canonical`, `dhcpv6`, `eui64`, `observed`, `remembered` or empty |
-| `reserved_ipv6` | Integer 0/1; the row's `config host` carries a DHCPv6 `hostid` |
+| `reserved_ipv6` | Integer 0/1; the row's `config host` carries a DHCPv6 `hostid`, or an IPv4 `ip` whose implicit suffix the bound lease sits on |
+| `dhcpv6_served` | Integer 0/1; some interface has `dhcpv6=server` (the page offers an IPv6 suffix in Pin only then) |
 | `ygg_node_ipv6` | String; primary native node address, empty when the device runs no daemon |
 | `ygg_node_addresses` | Array of strings; all native node addresses seen for that MAC |
 | `ygg_node` | Integer 0/1; the device is a self-contained Yggdrasil node |
@@ -373,22 +385,36 @@ also contain `mac`, `hostname`, `reserved_ipv4`. Do not silently change these
 types to booleans/numbers when refactoring.
 
 Pin outcomes: `pinned`, `already_persistent`, `invalid_request`, `invalid_mac`,
-`busy`, `no_active_lease`, `invalid_hostname`, `no_ipv4`, `pending_uci_changes`,
-`section_collision`, `backup_failed`, `uci_failed`, `reload_failed`.
+`busy`, `no_active_lease`, `invalid_hostname`, `no_ipv4`, `dhcpv6_not_served`,
+`invalid_hostid`, `hostid_taken`, `pending_uci_changes`, `section_collision`,
+`backup_failed`, `uci_failed`, `reload_failed`. `reserve_ipv6` is a hex
+suffix (1-16 digits, not 0 = dynamic, not 1 = the router), accepted only where
+DHCPv6 is served and refused when any `config host` already claims it,
+explicitly (`hostid`) or implicitly (an IPv4 `ip`). Pin writes `hostid` and,
+when the device holds a bound lease whose address the neighbour table
+attributes to its MAC, that lease's `duid` (with IAID) as well - the device
+answering neighbour solicitations for a leased address is the device holding
+that lease - so a DUID-UUID client matches; without a lease the reply says
+the reservation applies only to a DUID-LLT/LL client. Device replies carry
+`reserved_ipv6` (the reserved address).
 
 Unpin outcomes: `unpinned`, `already_dynamic`, `invalid_request`, `invalid_mac`,
 `busy`, `static_confirmation_required`, `ambiguous_host`, `shared_host`,
 `complex_host`, `reserved_ipv6`, `pending_uci_changes`, `backup_failed`,
 `uci_failed`, `reload_failed`. `hostid` is a known option, not a "complex"
-one, but a section carrying it is refused with `reserved_ipv6`: the status
-page does not delete reservations - the `hostid` option is removed in the DHCP
-page (or `uci delete dhcp.<section>.hostid`) first. Omitting a `--host` line
-from a deployer rerun does not remove it either; only its derived DNS record
-goes. A section with an IPv4 `ip` and no `hostid` is an implicit IPv6
-reservation while DHCPv6 is served (`.235 -> ::235`); it is not flagged
-`reserved_ipv6`, Unpin asks the usual static-reservation confirmation and,
-whenever any interface has `dhcpv6=server`, reloads odhcpd after dnsmasq so
-the removal actually reaches the DHCPv6 server.
+one. A section carrying a `hostid` this page's own Pin wrote (a managed pin)
+is unpinned under the same `static_confirmation_required` step as an IPv4
+reservation, and the reply names the address; one written by hand or by the
+deployer is refused with `reserved_ipv6` - the status page does not delete
+reservations it did not make; the `hostid` option is removed in the DHCP page
+(or `uci delete dhcp.<section>.hostid`) first. Omitting a `--host` line from
+a deployer rerun does not remove it either; only its derived DNS record goes.
+A section with an IPv4 `ip` and no `hostid` is an implicit IPv6 reservation
+while DHCPv6 is served (`.235 -> ::235`); it is flagged `reserved_ipv6` only
+while the lease actually sits there, it does not protect the row, Unpin asks
+the usual static-reservation confirmation and, whenever any interface has
+`dhcpv6=server`, reloads odhcpd after dnsmasq so the removal actually reaches
+the DHCPv6 server.
 
 | Source relative to `source/yggdrasil-status/` | Installed path |
 | --- | --- |
