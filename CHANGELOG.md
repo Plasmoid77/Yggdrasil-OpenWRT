@@ -14,8 +14,11 @@ the router's hands.
 RA stays, because it is the only carrier of the default route and the M/O
 flags; the A flag goes off, and odhcpd assigns every address from the routed
 prefix as it would from an ISP delegation. Reservations are native
-`config host` sections with `hostid`, written by `--host NAME=MAC=HOSTID` or
-`--host NAME=duid:HEX[%IAID]=HOSTID` (`[hosts]` in the file); with the DNS
+`config host` sections with `hostid`, written by `--host NAME=MAC=HOSTID`,
+`--host NAME=duid:HEX[%IAID]=HOSTID` or `--host NAME=MAC+duid:HEX=HOSTID`
+(`[hosts]` in the file) - the combined form is for a client whose DUID
+carries no MAC (a NetworkManager laptop sends DUID-UUID): odhcpd matches by
+the DUID, the status page names the row by the MAC; with the DNS
 module on, `NAME.home.arpa` resolves to the reserved address, and odhcpd's
 own hosts file gives `NAME.lan` for free. The deployer refuses `hostid` 0
 (dynamic in odhcpd) and 1 (the router), refuses duplicates, and checks every
@@ -32,7 +35,9 @@ deployer takes the status module's DHCP lock before staging any change, so a
 Pin/Unpin in progress stops it with nothing touched. Verification checks the
 mode's exact UCI values (`ra_flags` as a set of two list entries), that
 odhcpd runs and is enabled, each reservation's `hostid`, and lists the leases
-bound so far.
+bound so far. The LAN stage applies its changes with `odhcpd reload`, which
+keeps the bound leases; a restart emptied the router's lease record until
+every client renewed.
 
 The accepted cost is written down rather than hidden: a client without a
 DHCPv6 client - Android by policy, some IoT - gets no address from the routed

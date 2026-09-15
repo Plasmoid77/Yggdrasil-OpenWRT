@@ -25,7 +25,7 @@ extract_function() {
 
 eval "$(sed -n '/^set -u$/,/^VERSION=/p' "$SCRIPT" | sed '/^set -u$/d')"
 eval "$(sed -n '/^# -* defaults -*$/,/^usage() {$/p' "$SCRIPT" | sed '$d')"
-for f in add_peer add_trusted add_dns_host lower_str mac_in_key norm_hostid add_host status_valid_version read_config \
+for f in add_peer add_trusted add_dns_host lower_str is_mac norm_duid duid_in_key mac_in_key norm_hostid add_host status_valid_version read_config \
          resolve_lan_mode reserved_addr implicit_hostid existing_hosts section_is_client report_implicit_hosts apply_hosts stage_lan; do
     body="$(extract_function "$f")"
     [ -n "$body" ] || { echo "FAIL: function $f not found in deployer" >&2; exit 1; }
@@ -95,6 +95,19 @@ eval "$PARSER"
 printf '%s\n' "$HOSTS" | grep -qxF 'Nas-1 mac 6c:92:bf:2f:aa:28 10' || fail "MAC/hostid not normalised: $HOSTS"
 printf '%s\n' "$HOSTS" | grep -qxF 'bmc duid 00030001000000000000%2b67 20' || fail "duid%IAID form not kept: $HOSTS"
 printf '%s\n' "$HOSTS" | grep -qxF 'cam duid 000100012f3a02a76c92bf2faa29 abcd1234' || fail "duid form not normalised: $HOSTS"
+# MAC and DUID together, for a client whose DUID carries no MAC
+reset; set -- --dhcpv6 --host 'Laptop=3C:E1:A1:41:52:D0+duid:0004ECBCBFB80EF2996849BCA6B0D0A6FFCE%0000A=20'; eval "$PARSER"
+[ -z "$DIED" ] || fail "MAC+duid form rejected: $DIED"
+[ "$HOSTS" = 'Laptop mac+duid 3c:e1:a1:41:52:d0+0004ecbcbfb80ef2996849bca6b0d0a6ffce%a 20' ] || fail "MAC+duid form not normalised: $HOSTS"
+[ "$(mac_in_key mac+duid '3c:e1:a1:41:52:d0+0004ecbc%a')" = '3c:e1:a1:41:52:d0' ] || fail "mac_in_key on the combined form"
+[ "$(duid_in_key mac+duid '3c:e1:a1:41:52:d0+0004ecbc%a')" = '0004ecbc%a' ] || fail "duid_in_key on the combined form"
+[ -z "$(duid_in_key mac '3c:e1:a1:41:52:d0')" ] || fail "duid_in_key invented a DUID for a MAC"
+reset; set -- --dhcpv6 --host 'a=3c:e1:a1:41:52+duid:0004ecbc=20'; eval "$PARSER"
+printf '%s' "$DIED" | grep -q "before '+duid:' is not a MAC" || fail "bad MAC before +duid accepted"
+reset; set -- --dhcpv6 --host 'a=3c:e1:a1:41:52:d0+duid:0004ecbc=20' --host 'b=duid:0004ECBC=21'; eval "$PARSER"
+printf '%s' "$DIED" | grep -q 'same client (DUID 0004ecbc)' || fail "the same DUID under two forms accepted: $DIED"
+reset; set -- --dhcpv6 --host 'a=3c:e1:a1:41:52:d0+duid:0004ecbc=20' --host 'b=3c:e1:a1:41:52:d0=21'; eval "$PARSER"
+printf '%s' "$DIED" | grep -q 'same client (MAC 3c:e1:a1:41:52:d0)' || fail "the same MAC under two forms accepted: $DIED"
 echo 'PASS: --host accepts MAC, DUID and DUID%IAID forms and normalises them'
 
 for case_ in 'no-hostid:a=6c:92:bf:2f:aa:28' 'bad-mac:a=6c:92:bf:2f:aa=10' 'short-mac:a=6c:92:bf=10' \
@@ -263,6 +276,34 @@ reset; UCI_LOG=''; HOSTS='other mac aa:bb:cc:dd:ee:40 40'; apply_hosts
 reset; UCI_LOG=''; HOSTS='desk duid 00010001cafebabe3ce1a14152d0 51'; apply_hosts
 [ -z "$DIED" ] || fail "DUID-LLT line against an existing MAC section died: $DIED"
 printf '%s' "$UCI_LOG" | grep -qxF 'set dhcp.cfg01.hostid=51' || fail "existing MAC section not updated by the DUID-LLT line: $UCI_LOG"
+printf '%s' "$UCI_LOG" | grep -qxF 'set dhcp.cfg01.duid=00010001cafebabe3ce1a14152d0' || fail "the DUID the line carries was not recorded: $UCI_LOG"
+printf '%s' "$UCI_LOG" | grep -q 'set dhcp.cfg01.mac=' && fail "a duid-form line rewrote the MAC"
+# a DUID gaining its %IAID on an existing section
+uci() { case "$1 $2" in 'show dhcp') printf '%s\n' "$FIXTURE
+dhcp.cfg07=host
+dhcp.cfg07.name='lap'
+dhcp.cfg07.mac='aa:bb:cc:dd:ee:60'
+dhcp.cfg07.duid='0004ecbc'
+dhcp.cfg07.hostid='60'" ;; '-q get') return 1 ;; *) return 0 ;; esac; }
+reset; UCI_LOG=''; HOSTS='lap mac+duid aa:bb:cc:dd:ee:60+0004ecbc%206de1ca 60'; apply_hosts
+[ -z "$DIED" ] || fail "adding an IAID to an existing reservation died: $DIED"
+printf '%s' "$UCI_LOG" | grep -qxF 'set dhcp.cfg07.duid=0004ecbc%206de1ca' || fail "the DUID did not gain its IAID: $UCI_LOG"
+printf '%s' "$UCI_LOG" | grep -q 'set dhcp.cfg07.mac=' && fail "an unchanged MAC was rewritten"
+uci() { case "$1 $2" in 'show dhcp') printf '%s\n' "$FIXTURE" ;; '-q get') case "$3" in dhcp.ygg_host_printer) echo host ;; dhcp.ygg_host_alias) echo domain ;; *) return 1 ;; esac ;; *) return 0 ;; esac; }
+# the combined form: a new section gets both identifiers ...
+reset; UCI_LOG=''; HOSTS='laptop mac+duid aa:bb:cc:dd:ee:50+0004ecbc%a 52'; apply_hosts
+[ -z "$DIED" ] || fail "combined form on a new client died: $DIED"
+for want in 'set dhcp.ygg_host_laptop=host' 'set dhcp.ygg_host_laptop.mac=aa:bb:cc:dd:ee:50' 'set dhcp.ygg_host_laptop.duid=0004ecbc%a' 'set dhcp.ygg_host_laptop.hostid=52'; do
+    printf '%s' "$UCI_LOG" | grep -qxF "$want" || fail "combined form did not write '$want': $UCI_LOG"
+done
+# ... and an existing section matched by one identifier gains the other
+reset; UCI_LOG=''; HOSTS='desk mac+duid 3c:e1:a1:41:52:d0+0004ecbc%a 53'; apply_hosts
+[ -z "$DIED" ] || fail "combined form against an existing MAC-only section died: $DIED"
+printf '%s' "$UCI_LOG" | grep -qxF 'set dhcp.cfg01.duid=0004ecbc%a' || fail "existing MAC section did not gain the DUID: $UCI_LOG"
+printf '%s' "$UCI_LOG" | grep -q 'set dhcp.cfg01.mac=' && fail "existing MAC was rewritten"
+reset; UCI_LOG=''; HOSTS='byduid mac+duid aa:bb:cc:dd:ee:40+00030001aabbccddee40 40'; apply_hosts
+[ -z "$DIED" ] || fail "combined form against an existing DUID-only section died: $DIED"
+printf '%s' "$UCI_LOG" | grep -qxF 'set dhcp.cfg06.mac=aa:bb:cc:dd:ee:40' || fail "existing DUID section did not gain the MAC: $UCI_LOG"
 # two lines resolving to one existing section (MAC form and DUID-LLT form)
 uci() { case "$1 $2" in 'show dhcp') printf '%s\n' "$FIXTURE
 dhcp.cfg05=host

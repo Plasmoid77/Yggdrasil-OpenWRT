@@ -147,9 +147,11 @@ Three causes, in order of likelihood:
    what is bound; `logread -e odhcpd` shows the exchange.
 3. Its reservation does not match. A MAC in `config host` only matches a
    DUID-LLT or DUID-LL client, and the DUID type is the client stack's
-   choice: on the test LAN dhcpcd sent DUID-LLT, a laptop sent DUID-UUID
-   (type 4, `0004...`) and took a dynamic lease despite its MAC being known.
-   Read the DUID from `ubus call dhcp ipv6leases` and reserve by
+   choice: on the test LAN dhcpcd sent DUID-LLT, a NetworkManager laptop sent
+   DUID-UUID (type 4, `0004...`) and took a dynamic lease despite its MAC
+   being known. Read the DUID from `ubus call dhcp ipv6leases` and reserve
+   by `--host NAME=MAC+duid:<HEX>=<HOSTID>` (the MAC keeps the status row
+   named), or by
    `--host NAME=duid:<HEX>[%<IAID>]=<HOSTID>` instead. A DUID of
    `00030001000000000000` (type 3, all-zero MAC) is a firmware defect seen on
    a BMC; it can only be matched by DUID, and two ports sharing it need
@@ -259,8 +261,8 @@ keeps whatever mode the router runs. Migrating a router that was deployed
 with SLAAC:
 
 1. Keep a second management path open (Yggdrasil to the router plus LAN, or
-   a serial console). The LAN stage restarts odhcpd; the router's own
-   addresses and the `ygg` zone do not change.
+   a serial console). The LAN stage reloads odhcpd (bound leases survive);
+   the router's own addresses and the `ygg` zone do not change.
 2. Rerun the deployer with the **complete** argument set of the original
    deployment plus `--dhcpv6` and the `--host` reservations you want. The
    deployer rewrites trusted rules, jumper and multicast sections from its

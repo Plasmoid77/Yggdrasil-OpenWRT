@@ -95,7 +95,8 @@ nas=<YGG_IPV6>
 
 [hosts]                 # as --host: DHCPv6 reservations, need the dhcpv6 flag
 nas=<MAC>=10            # <prefix>::10 for the client with this MAC
-bmc=duid:<HEX>%<IAID>=20  # by DUID (and IAID) when the DUID carries no MAC
+laptop=<MAC>+duid:<HEX>=20  # DUID for odhcpd, MAC for the status page
+bmc=duid:<HEX>%<IAID>=21  # by DUID (and IAID) alone
 
 [status-version]        # as --status-version
 v5.4
@@ -310,10 +311,14 @@ A reservation is a native `config host` with `hostid` (the hex IID; never 0,
 which means dynamic, and not 1, the router). Match by MAC works only for
 clients whose DUID embeds it (DUID-LLT, type 1, or DUID-LL, type 3); the
 type is the client stack's choice, not the OS's - on the test LAN a Debian
-host running dhcpcd sent DUID-LLT and a laptop sent DUID-UUID (type 4), which
-carries no MAC. Let such a client take a dynamic lease once, read its DUID
-from `ubus call dhcp ipv6leases`, and reserve by DUID, optionally `%IAID` in
-hex:
+host running dhcpcd sent DUID-LLT and a NetworkManager laptop sent DUID-UUID
+(type 4), which carries no MAC. Let such a client take a dynamic lease once,
+read its DUID from `ubus call dhcp ipv6leases`, and reserve by DUID,
+optionally `%IAID` in hex. Give the MAC as well (`MAC+duid:HEX`): odhcpd
+matches the lease by the DUID, while the status page and its canonical
+`home.arpa` record find the row by the MAC - without it the device shows up
+as a dynamic row with an observed address rather than as the named,
+reserved host:
 
 ```sh
 uci add dhcp host
@@ -335,6 +340,15 @@ holds stays valid until its own lifetime ends. The deployer performs the
 collision check and reports implicit reservations; by hand, check
 `uci show dhcp | grep -E 'hostid|\.ip='` first. Verify with
 `ubus call dhcp ipv6leases`.
+
+One host with two interfaces on the same LAN (a laptop on cable and Wi-Fi at
+once) presents one DUID with two IAIDs. A reservation by DUID alone then
+follows whichever interface asks first, and the other interface's DAD fails
+on the same address every renewal. Reserve each interface by `%IAID`:
+`ubus call dhcp ipv6leases` prints the `iaid` as a signed decimal, so
+`printf '%x' $((IAID & 0xffffffff))` gives the hex the option wants, e.g.
+`thinkpad=<MAC-eth>+duid:<HEX>%206de1ca=20` and
+`thinkpad-wifi=<MAC-wlan>+duid:<HEX>%d259864f=21`.
 
 ```sh
 ip -6 addr show dev br-lan

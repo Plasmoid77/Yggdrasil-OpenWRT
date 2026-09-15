@@ -155,13 +155,15 @@ SLAAC, as in every 1.x deployment):
                         --dhcpv6 and --slaac: the last one given wins.
   --host NAME=MAC=HOSTID
   --host NAME=duid:HEX[%IAID]=HOSTID
+  --host NAME=MAC+duid:HEX[%IAID]=HOSTID
                         Reserve <prefix>::HOSTID for one client (needs
                         --dhcpv6). HOSTID: 1-16 hex digits, not 0 or 1.
                         Match by MAC works for DUID-LLT/DUID-LL clients only;
                         give the DUID (and the IAID in hex, when one DUID
-                        serves several interfaces) for anything else.
-                        Repeatable. With the DNS module on, NAME.$DNS_DOMAIN
-                        resolves to the reserved address.
+                        serves several interfaces) for anything else, and
+                        add the MAC with '+' so the status page can name the
+                        row. Repeatable. With the DNS module on,
+                        NAME.$DNS_DOMAIN resolves to the reserved address.
 
 Scope:
   --iface NAME          Yggdrasil interface / UCI section name (default: $IFACE)
@@ -190,7 +192,7 @@ comment, blank lines are ignored. Unknown sections are an error. Sections:
   [iface] [lan]     one name each              (as --iface, --lan)
   [dns-domain] [dns-router]                    (as --dns-domain, --dns-router)
   [dns-hosts]       NAME=ADDR lines            (as --dns-host)
-  [hosts]           NAME=MAC=HOSTID lines      (as --host)
+  [hosts]           NAME=MAC=HOSTID lines etc. (as --host)
   [status-pkg] [status-version]                (as --status-pkg, --status-version)
   [flags]           one per line: no-jumper no-multicast no-lan no-firewall
                     no-status dns no-dns dhcpv6 slaac
@@ -255,11 +257,51 @@ lower_str() {
     printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
 }
 
+# Validate 'duid:HEX[%IAID]' and leave it normalised in NORM_DUID: lower-case,
+# the IAID without leading zeros (odhcpd reads both numerically, base 16). Not
+# a printing function on purpose: die() inside $(...) would only end the subshell.
+norm_duid() {
+    _nd="${1#duid:}"
+    _ndd="${_nd%%%*}"
+    _ndi="${_nd#"$_ndd"}"
+    case "$_ndd" in
+        '') die "--host: empty DUID in '$1'" ;;
+        *[!0-9A-Fa-f]*) die "--host: DUID must be hex digits: $_ndd" ;;
+    esac
+    [ $(( ${#_ndd} % 2 )) -eq 0 ] || die "--host: DUID has an odd number of hex digits: $_ndd"
+    case "$_ndi" in
+        '') : ;;
+        %*[!0-9A-Fa-f]*|%) die "--host: IAID after % must be 1-8 hex digits: $_nd" ;;
+    esac
+    [ "${#_ndi}" -le 9 ] || die "--host: IAID longer than 8 hex digits: $_nd"
+    if [ -n "$_ndi" ]; then
+        _ndi="%$(printf '%s' "${_ndi#%}" | sed 's/^0*//')"
+        [ "$_ndi" != '%' ] || _ndi='%0'
+    fi
+    NORM_DUID="$(printf '%s' "$_ndd$_ndi" | tr 'A-F' 'a-f')"
+}
+
+is_mac() {
+    case "$1" in
+        [0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# The DUID (with IAID) a --host key carries; empty for a plain MAC.
+duid_in_key() {
+    case "$1" in
+        duid) printf '%s' "$2" ;;
+        mac+duid) printf '%s' "${2#*+}" ;;
+    esac
+}
+
 # The MAC a --host key stands for: the MAC itself, or the one at the end of a
 # DUID-LLT (type 1, 14 bytes) / DUID-LL (type 3, 10 bytes); empty otherwise.
 mac_in_key() {
     case "$1" in
         mac) printf '%s' "$2" ;;
+        mac+duid) printf '%s' "${2%%+*}" ;;
         duid)
             _mik="${2%%%*}"
             case "${#_mik}:$_mik" in
@@ -307,30 +349,21 @@ add_host() {
     case "$_hk" in
         duid:*)
             _hkt='duid'
-            _hk="${_hk#duid:}"
-            _hkd="${_hk%%%*}"
-            _hki="${_hk#"$_hkd"}"
-            case "$_hkd" in
-                '') die "--host: empty DUID in '$1'" ;;
-                *[!0-9A-Fa-f]*) die "--host: DUID must be hex digits: $_hkd" ;;
-            esac
-            [ $(( ${#_hkd} % 2 )) -eq 0 ] || die "--host: DUID has an odd number of hex digits: $_hkd"
-            # odhcpd reads the IAID as hex (strtoul base 16), 1-8 digits
-            case "$_hki" in
-                '') : ;;
-                %*[!0-9A-Fa-f]*|%) die "--host: IAID after % must be 1-8 hex digits: $_hk" ;;
-            esac
-            [ "${#_hki}" -le 9 ] || die "--host: IAID longer than 8 hex digits: $_hk"
-            # odhcpd parses the IAID numerically: %000a and %a are the same
-            if [ -n "$_hki" ]; then
-                _hki="%$(printf '%s' "${_hki#%}" | sed 's/^0*//')"
-                [ "$_hki" != '%' ] || _hki='%0'
-            fi
-            _hk="$(printf '%s' "$_hkd$_hki" | tr 'A-F' 'a-f')" ;;
-        [0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f])
+            norm_duid "$_hk"
+            _hk="$NORM_DUID" ;;
+        *+duid:*)
+            # MAC and DUID together: odhcpd matches the lease by the DUID, the
+            # status page finds the row by the MAC - a client whose DUID carries
+            # no MAC (DUID-UUID, DUID-EN) needs both to be one named device.
+            _hkm="${_hk%%+*}"
+            is_mac "$_hkm" || die "--host: '$_hkm' before '+duid:' is not a MAC (aa:bb:cc:dd:ee:ff)"
+            _hkt='mac+duid'
+            norm_duid "${_hk#*+}"
+            _hk="$(printf '%s' "$_hkm" | tr 'A-F' 'a-f')+$NORM_DUID" ;;
+        *)
+            is_mac "$_hk" || die "--host: '$_hk' is neither a MAC (aa:bb:cc:dd:ee:ff), duid:HEX[%IAID] nor MAC+duid:HEX[%IAID]"
             _hkt='mac'
             _hk="$(printf '%s' "$_hk" | tr 'A-F' 'a-f')" ;;
-        *) die "--host: '$_hk' is neither a MAC (aa:bb:cc:dd:ee:ff) nor duid:HEX[%IAID]" ;;
     esac
     # A DUID-LLT (type 1, 14 bytes) or DUID-LL (type 3, 10 bytes) ends in the
     # MAC, and odhcpd matches such a client by that MAC too - so a duid: line
@@ -343,6 +376,8 @@ add_host() {
         [ "$_ot $_ok" = "$_hkt $_hk" ] && die "--host: client given twice: $_hk"
         _omac="$(mac_in_key "$_ot" "$_ok")"
         [ -n "$_omac" ] && [ "$_omac" = "$_hkmac" ] && die "--host: $_hn and $_on name the same client (MAC $_hkmac)"
+        _oduid="$(duid_in_key "$_ot" "$_ok")"
+        [ -n "$_oduid" ] && [ "$_oduid" = "$(duid_in_key "$_hkt" "$_hk")" ] && die "--host: $_hn and $_on name the same client (DUID $_oduid)"
         [ "$(norm_hostid "$_oh")" = "$_hidn" ] && die "--host: HOSTID $_hid given twice ($_on, $_hn)"
     done <<HOSTS_EOF
 $HOSTS
@@ -1158,10 +1193,11 @@ existing_hosts() {
 # (or the reverse) are the same client and must not become two sections.
 section_is_client() {
     _sic_mac="$(mac_in_key "$3" "$4")"
+    _sic_duid="$(duid_in_key "$3" "$4")"
     _sic_oifs="$IFS"; IFS=','
     for _sic_d in $2; do
         [ -n "$_sic_d" ] || continue
-        [ "$3" = 'duid' ] && [ "$_sic_d" = "$4" ] && { IFS="$_sic_oifs"; return 0; }
+        [ -n "$_sic_duid" ] && [ "$_sic_d" = "$_sic_duid" ] && { IFS="$_sic_oifs"; return 0; }
         _sic_dm="$(mac_in_key duid "$_sic_d")"
         [ -n "$_sic_dm" ] && [ "$_sic_dm" = "$_sic_mac" ] && { IFS="$_sic_oifs"; return 0; }
     done
@@ -1235,6 +1271,13 @@ EH_EOF
             [ -z "${_eextra# }" ] || die "--host $_hn: ${_es#dhcp.} carries extra options (${_eextra# }) — edit it by hand instead"
             case "$_touched" in *" $_es "*) die "--host $_hn: ${_es#dhcp.} was already updated for another --host line — one section, one reservation" ;; esac
             uci_set "$_es.name" "$_hn"
+            # The line names the same client (that is how the section was
+            # matched), so its identifiers are the ones to keep: a DUID gains
+            # or changes its %IAID, a DUID-only section learns the MAC.
+            _hkm="$(mac_in_key "$_hkt" "$_hk")"; _hkd="$(duid_in_key "$_hkt" "$_hk")"
+            [ "$_hkt" = 'duid' ] && _hkm=''
+            [ -n "$_hkm" ] && [ "$_hkm" != "$_emac" ]  && uci_set "$_es.mac"  "$_hkm"
+            [ -n "$_hkd" ] && [ "$_hkd" != "$_eduid" ] && uci_set "$_es.duid" "$_hkd"
             uci_set "$_es.hostid" "$_hid"
             info "reservation $_hn -> $_addr (updated ${_es#dhcp.})"
         else
@@ -1247,7 +1290,12 @@ EH_EOF
             else
                 uci_set "$_es" 'host'
                 uci_set "$_es.name" "$_hn"
-                uci_set "$_es.$_hkt" "$_hk"
+                if [ "$_hkt" = 'mac+duid' ]; then
+                    uci_set "$_es.mac" "${_hk%%+*}"
+                    uci_set "$_es.duid" "${_hk#*+}"
+                else
+                    uci_set "$_es.$_hkt" "$_hk"
+                fi
                 uci_set "$_es.hostid" "$_hid"
                 info "reservation $_hn -> $_addr (new ${_es#dhcp.})"
             fi
@@ -1324,7 +1372,13 @@ stage_lan() {
         uci commit dhcp    || die "uci commit dhcp failed"
         have flock && exec 9>&-
         /etc/init.d/network reload >/dev/null 2>&1 || die "network reload failed"
-        /etc/init.d/odhcpd restart >/dev/null 2>&1 || die "odhcpd restart failed"
+        # reload (SIGHUP) re-reads the configuration but keeps the bound DHCPv6
+        # leases; a restart would drop every lease from the router's record
+        # until the clients renew, which in managed mode empties the status
+        # page for up to T1. Fall back to a restart only if reload is refused.
+        /etc/init.d/odhcpd reload >/dev/null 2>&1 \
+            || /etc/init.d/odhcpd restart >/dev/null 2>&1 \
+            || die "odhcpd reload failed"
         # config host also feeds dnsmasq's DHCPv4 side; the DNS stage restarts
         # it too, but --no-dns must not leave a stale generated config behind.
         if [ -n "$HOSTS" ] && [ "$DO_DNS" -eq 0 ]; then
@@ -1771,11 +1825,7 @@ stage_verify() {
                 _got=''
                 while IFS='|' read -r _es _ehid _eip _emac _eduid _eextra; do
                     [ -n "$_es" ] || continue
-                    if [ "$_hkt" = 'mac' ]; then
-                        case ",$_emac," in *",$_hk,"*) _got="$_ehid" ;; esac
-                    else
-                        [ "$_eduid" = "$_hk" ] && _got="$_ehid"
-                    fi
+                    section_is_client "$_emac" "$_eduid" "$_hkt" "$_hk" && _got="$_ehid"
                 done <<EH_EOF
 $_eh
 EH_EOF
