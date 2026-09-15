@@ -1,5 +1,43 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## Status v6.0 - the page can reserve addresses, and knows every client the router serves
+
+v5.5 read odhcpd's leases but could tie one to a row only through the MAC
+inside a DUID-LLT/LL; a NetworkManager laptop (DUID-UUID) reserved with the
+deployer's `MAC+duid:` form was named only because its canonical DNS record
+existed, and a client with no DHCPv4 lease had no row at all. The row model
+now takes DHCPv6 seriously, which is why this is v6.0:
+
+- A lease is attributed to a row through the `config host` that ties its
+  DUID (with IAID, normalised the way odhcpd reads it; an exact `DUID%IAID`
+  section wins over a DUID-only one) to a MAC, before the DUID-LLT/LL
+  fallback. The BMC with an all-zero DUID, once reserved per port, shows its
+  lease as `dhcpv6`.
+- A bound lease whose MAC is known creates a row for a client without a
+  DHCPv4 lease (an IPv6-only host), named from the lease. A DUID-UUID client
+  with neither a DHCPv4 lease nor a `config host` stays invisible; the row is
+  the MAC, and that client has not shown one.
+- A `config host` with an IPv4 `ip` and no `hostid` is reported reserved
+  (`reserved_ipv6`) while the bound lease sits on the suffix odhcpd derives
+  from it (`.235 -> ::235`). It does not protect the row.
+- Pin can reserve an IPv6 suffix (`reserve_ipv6`, hex, not 0 or 1) where the
+  router serves DHCPv6; it refuses a suffix any `config host` already claims,
+  explicitly or implicitly. When the device holds a bound lease whose address
+  the neighbour table attributes to its MAC, that lease's DUID (with IAID) is
+  written beside the `hostid`, so a DUID-UUID client matches; otherwise the
+  reply says the reservation applies only to a DUID-LLT/LL client. The page
+  shows the field only when the row reports `dhcpv6_served`.
+- Unpin removes a reservation this page's own Pin made, under the same
+  confirmation as an IPv4 reservation, naming the full address; one made by
+  hand or by the deployer is still refused (`reserved_ipv6`). `duid` joins
+  `hostid` as a known option, so a pin that recorded the DUID is not
+  "complex".
+
+Validated on the test router: pinning the BMC's second port (all-zero DUID,
+two IAIDs) with suffix 30 found its lease through the neighbour table, wrote
+`duid 00030001000000000000%56ce` beside the MAC, and the row shows the lease
+as `dhcpv6`, reserved, unpinnable under confirmation.
+
 ## Deployer 1.9.0 and Status v5.5 - the router can own the LAN addresses
 
 Until now the routed `/64` reached LAN clients by SLAAC only. That reaches
