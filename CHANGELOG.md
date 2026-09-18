@@ -23,6 +23,15 @@ serves the table and Pin alike:
   address per prefix; the resolver reads all of them, the table still shows
   the routed-prefix one.
 
+Validated on the test router: a NetworkManager laptop (DUID-UUID) whose
+`config host` carried only the MAC was attributed through the neighbour
+table (`neighbor`), and through the section (`host`) once its `duid` was
+back; a dhcpcd host shows `duid`; a BMC port with an all-zero DUID and no
+neighbour entry stays unattributed, as intended. Noted on the way: odhcpd
+drops a client's lease on reload when its `config host` section changes, and
+`odhcpd restart` (the guard's restore path) empties the lease record until
+clients renew.
+
 ## Deployer 2.0.0 - the routed /64 joins the LAN instead of replacing its IPv6
 
 1.x made the routed `/64` the LAN's only IPv6: `ip6class` kept every other
