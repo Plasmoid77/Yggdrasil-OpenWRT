@@ -103,7 +103,7 @@ stock() { U_IP6ASSIGN=60; U_IP6CLASS=''; U_ULA='fd75:921a:ca44::/48'; U_DHCPV6=s
 stock; reset; inspect_lan
 [ -z "$DIED" ] || fail "stock router died: $DIED"
 [ "$LAN_YGG_CLASS" = ygg0 ] || fail "without a prefix the class must fall back to the interface name: $LAN_YGG_CLASS"
-[ "$CUR_IP6ASSIGN" = 60 ] && [ "$CUR_ULA" = 'fd75:921a:ca44::/48' ] || fail "LAN values not read"
+{ [ "$CUR_IP6ASSIGN" = 60 ] && [ "$CUR_ULA" = 'fd75:921a:ca44::/48' ]; } || fail "LAN values not read"
 printf '%s' "$INFOD" | grep -q 'ULA fd75:921a:ca44::/48 kept' || fail "ULA not reported: $INFOD"
 # ip6class variants are described
 stock; U_IP6CLASS='wan6 local'; YGG_PFX_LINE='303::/64 ygg0'; reset; inspect_lan
