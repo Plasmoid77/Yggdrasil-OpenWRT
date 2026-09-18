@@ -84,9 +84,15 @@ dual-stack LTE uplink: fresh install kept the native prefix and ULA on the
 LAN beside the routed `/64`, a NetworkManager laptop and a dhcpcd host got
 `::20`/`::10` in all three prefixes, LAN-initiated traffic reached Yggdrasil
 nodes with the routed-prefix source, untrusted inbound stayed rejected, and
-everything survived a reboot. Not yet validated: the 1.x migration on
-hardware, uplink loss, native prefix renumbering under load, PMTU transfers,
-non-Linux clients.
+everything survived a reboot. Also on that router: an IPv4-only PDN (Ygg +
+ULA only, default via `ra_default=2`, native destinations fail fast), the
+native prefix renumbering on PDN re-activation (LAN and leases followed), the
+guard (a frozen deployer killed after the deadline, files restored
+byte-identical; a successful run cancels it), and the 1.9.0 `--dhcpv6` ->
+2.0 migration (three prefixes back, the original ULA restored from the oldest
+1.x backup, leases kept through the reload, marker written, the rerun reads
+the marker). Not validated: PMTU with a remote node below 1500 (Yggdrasil's
+own PTB path), non-Linux clients.
 
 ## Status v6.0 - the page can reserve addresses, and knows every client the router serves
 
