@@ -477,13 +477,15 @@ host_mac_for_duid() {
 # kernel has just confirmed the entry (MFL_FRESH_ONLY=1: REACHABLE, not a
 # stale or reused entry). One resolver for the table and for Pin, so both
 # name the same device.
-# A MAC the LAN has actually seen: an active DHCPv4 lease or any neighbour
-# entry (IPv4 or IPv6) on the LAN device.
+# A MAC the LAN has actually seen: an active DHCPv4 lease (expiry 0 means
+# unlimited, as in lease_is_active) or any neighbour entry (IPv4 or IPv6) on
+# the LAN device.
 mac_seen_on_lan() {
 	local msl_mac
 	msl_mac="$(normalize_mac "$1")"
 	[ -n "$msl_mac" ] || return 1
-	if [ -r "$LEASE_FILE" ] && awk -v m="$msl_mac" 'tolower($2) == m { f = 1 } END { exit !f }' "$LEASE_FILE" 2>/dev/null; then
+	if [ -r "$LEASE_FILE" ] && awk -v m="$msl_mac" -v now="${NOW:-0}" \
+		'tolower($2) == m && ($1 == 0 || $1 > now) { f = 1 } END { exit !f }' "$LEASE_FILE" 2>/dev/null; then
 		return 0
 	fi
 	{ ip neigh show dev "$LAN_DEV" 2>/dev/null; ip -6 neigh show dev "$LAN_DEV" 2>/dev/null; } \
@@ -596,6 +598,8 @@ probe_unattributed_leases() {
 	[ -n "$LAN_DEV" ] || return 0
 	command -v ping >/dev/null 2>&1 || return 0
 	(
+		# the shared DHCP lock (fd 9) must not outlive the call in this child
+		exec 9>&- 2>/dev/null
 		printf '%s\n' "$UNATTRIBUTED_LEASE_ADDRS" | while read -r pul_addr; do
 			[ -n "$pul_addr" ] || continue
 			pul_count=$((pul_count + 1))

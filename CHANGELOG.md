@@ -1,5 +1,12 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## Status v6.1.2 - probe fixes
+
+The background probe of v6.1.1 inherited the shared DHCP lock, so Pin/Unpin
+could answer "busy" while it ran; it now closes the lock first. An expired
+DHCPv4 lease no longer counts as "this MAC is on the LAN" when a DUID's
+embedded MAC is checked (consistent with `lease_is_active`).
+
 ## Status v6.1.1 - a lease nobody could be tied to gets probed once
 
 Windows sources its traffic from a temporary address and its DUID-LLT carries

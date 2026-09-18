@@ -391,7 +391,11 @@ nomac|00030001000000000000|'
     LAN_DEV='br-lan'
     ip() { :; }
     LEASE_FILE="$TMP/dhcp.leases"
-    printf '%s\n' '9999999999 aa:bb:cc:dd:ee:ff 192.0.2.10 zeonux *' '9999999999 11:22:33:44:55:66 192.0.2.20 * *' > "$LEASE_FILE"
+    NOW=100
+    printf '%s\n' '9999999999 aa:bb:cc:dd:ee:ff 192.0.2.10 zeonux *' '0 11:22:33:44:55:66 192.0.2.20 * *' '50 de:ad:be:ef:00:01 192.0.2.30 gone *' > "$LEASE_FILE"
+    mac_seen_on_lan aa:bb:cc:dd:ee:ff || fail 'active DHCPv4 lease not counted as LAN evidence'
+    mac_seen_on_lan 11:22:33:44:55:66 || fail 'unlimited DHCPv4 lease not counted as LAN evidence'
+    if mac_seen_on_lan de:ad:be:ef:00:01; then fail 'expired DHCPv4 lease counted as LAN evidence'; fi
     collect_dhcpv6_leases
     eq "$(printf '%s\n' \
         'aa:bb:cc:dd:ee:ff 300:1111:2222:3333::10 zeonux duid' \
