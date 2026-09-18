@@ -366,6 +366,12 @@ Current implementation order in `probe_online()`:
 3. If needed, try `ping -6 -c 1 -W 1` against selected IPv6 addresses.
 4. No success means Offline.
 
+Steps 2-3 share one 20 s budget per `clients` call (ubus allows 30): each
+active probe costs about a second and runs for every row the neighbour table
+does not confirm, so many offline rows would otherwise push the call past the
+limit. A row reached after the budget is spent is reported `probed: 0` and
+shown as "Unknown" - not asked, not guessed; the next refresh asks again.
+
 `STALE`, `DELAY`, `PROBE`, `FAILED` or missing NDP entries are not an Online or
 Offline verdict by themselves. Row existence still depends on DHCP/UCI, not
 presence. A host may block probes while an application remains accessible.
@@ -431,6 +437,7 @@ The rpcd object is `luci.yggdrasil-status`:
 | `ygg_node_live` | Integer 0/1; the address comes from a current peer link rather than memory |
 | `dns` | String; lowercase JSON key, optional canonical DNS alias |
 | `online`, `persistent`, `static_ipv4` | Integer 0/1 flags |
+| `probed` | Integer 0/1; 0 when the call's probe budget was spent before this row could be probed (status 6.1.3) |
 | `reserved_ipv4` | String; configured valid reservation or empty |
 | `managed_pin`, `shared_host`, `complex_host`, `ambiguous_host`, `protected_host` | Integer 0/1 flags |
 | `lease_expiry` | String; lease timestamp, empty for a lease-free persistent row |

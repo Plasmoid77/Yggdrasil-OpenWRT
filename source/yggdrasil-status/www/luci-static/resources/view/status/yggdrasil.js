@@ -563,7 +563,10 @@ function makeClientTable(clients) {
 			client.dns || '—',
 			client.online
 				? E('span', { 'style': 'color: #16a34a; font-weight: 600' }, _('Online'))
-				: E('span', { 'style': 'color: #dc2626; font-weight: 600' }, _('Offline')),
+				: (client.probed === 0
+					/* the call's probe budget ran out before this row: not asked, not guessed */
+					? E('span', { 'style': 'color: #6b7280', 'title': _('Not probed this time; the next refresh will ask') }, _('Unknown'))
+					: E('span', { 'style': 'color: #dc2626; font-weight: 600' }, _('Offline'))),
 			persistenceCell(client)
 		];
 	});

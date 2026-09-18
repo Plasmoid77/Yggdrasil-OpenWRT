@@ -1,5 +1,15 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## Status v6.1.3 - presence probes share one time budget
+
+`clients` once ran past ubus's 30 s limit: every row the neighbour table did
+not confirm cost an ARP probe plus one IPv6 probe per known address, all
+sequential. Active probes now share a 20 s budget per call; a row reached
+after it is spent is reported `probed: 0` and shown as "Unknown", not
+guessed offline. A recent REACHABLE entry still counts without probing.
+(Astra: a per-row cap would not bound the total and could mark a host
+offline whose live address came third - hence the budget.)
+
 ## Status v6.1.2 - probe fixes
 
 The background probe of v6.1.1 inherited the shared DHCP lock, so Pin/Unpin

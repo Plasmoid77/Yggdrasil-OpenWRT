@@ -21,7 +21,7 @@ for fn in lower normalize_mac valid_mac valid_hostname valid_ipv4 first_ipv4 \
     lease_is_active mac_was_emitted remember_emitted_mac remember_persistent_mac \
     find_active_lease_by_mac \
     eui64_ipv6_for_mac append_unique_ipv6 observed_ipv6_for_mac build_known_ipv6 \
-    neighbor_recently_reachable probe_online emit_dynamic_leases emit_persistent_host \
+    neighbor_recently_reachable probe_budget_left probe_online emit_dynamic_leases emit_persistent_host \
     mac_for_neighbor ygg_peer_endpoints ygg_node_rows ygg_node_addresses_for_mac \
     merge_node_cache write_address_memory save_address_memory ygg_node_is_live \
     recall_lan_addresses remember_lan_addresses \
@@ -39,6 +39,7 @@ LAN_CACHE_FILE="$TMP/default-lan"
 LAN_STORE_FILE="$TMP/default-lan.flash"
 LAN_ADDR_ROWS=''
 LAN_YGG_PREFIX=''
+PROBE_DEADLINE=''; PROBED=1
 LAN_NET='lan'
 uci() { return 1; }
 DISCOVERY_WANTED=0
@@ -233,6 +234,7 @@ pinned_node_memory() {
 
 presence() {
     LAN_DEV=br-lan
+    PROBE_DEADLINE=''; PROBED=1
     KNOWN_IPV6='300:1111:2222:3333::5'
     TRACE="$TMP/probes"
     : > "$TRACE"
@@ -256,6 +258,24 @@ presence() {
     eq "$(printf 'arp\nping')" "$(cat "$TRACE")"
     PING_OK=1
     if probe_online 192.0.2.1; then fail 'failed probes marked online'; fi
+    eq 1 "$PROBED"
+    # the shared budget: once spent, no active probe runs and the row is
+    # reported unprobed, not offline; a recent REACHABLE still counts
+    : > "$TRACE"
+    date() { echo 1000; }
+    PROBE_DEADLINE=999
+    if probe_online 192.0.2.1; then fail 'unprobed row marked online'; fi
+    eq 0 "$PROBED"
+    eq '' "$(cat "$TRACE")"
+    STATE=REACHABLE
+    probe_online 192.0.2.1 || fail 'REACHABLE ignored when the budget is spent'
+    eq 1 "$PROBED"
+    STATE=FAILED
+    PROBE_DEADLINE=1001
+    if probe_online 192.0.2.1; then fail 'failed probes marked online'; fi
+    eq "$(printf 'arp\nping')" "$(cat "$TRACE")"
+    PROBE_DEADLINE=''
+    unset -f date
 }
 
 identity_lifetime() {
