@@ -1,5 +1,16 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## Status v6.1.1 - a lease nobody could be tied to gets probed once
+
+Windows sources its traffic from a temporary address and its DUID-LLT carries
+the MAC of whichever adapter came first, so the router had no neighbour entry
+for the leased `::670`-style address and the lease stayed unattributed for
+good. `clients` now sends one echo request, in the background, to every
+routed-prefix address of an unattributed lease (bounded to 16): the answer
+does not matter, the neighbour solicitation it triggers teaches the kernel
+which MAC holds the address, and the next call attributes the lease through
+the neighbour branch. Measured with two Windows 11 laptops on Wi-Fi.
+
 ## Status v6.1 - one lease resolver, and the neighbour table names DUID-UUID clients
 
 v6.0 attributed a DHCPv6 lease through a `config host` or the MAC inside a

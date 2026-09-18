@@ -26,7 +26,7 @@ for fn in lower normalize_mac valid_mac valid_hostname valid_ipv4 first_ipv4 \
     merge_node_cache write_address_memory save_address_memory ygg_node_is_live \
     recall_lan_addresses remember_lan_addresses \
     discover_lan_addresses confirm_discovered_addresses \
-    collect_host_duids collect_host_duid host_mac_for_duid mac_seen_on_lan mac_for_lease collect_dhcpv6_leases dhcpv6_lease_for_mac dhcpv6_lease_match_for_mac \
+    collect_host_duids collect_host_duid host_mac_for_duid mac_seen_on_lan mac_for_lease collect_dhcpv6_leases probe_unattributed_leases dhcpv6_lease_for_mac dhcpv6_lease_match_for_mac \
     norm_hostid valid_hostid collect_taken_hostids collect_taken_hostid lease_duid_for_mac emit_dynamic_leases6 \
     iid_to_addr find_active_lease6_by_mac \
     emit_client rpc_pin rpc_unpin; do load "$fn"; done
@@ -400,6 +400,16 @@ nomac|00030001000000000000|'
         '14:4f:8a:8d:19:77 300:1111:2222:3333::21 - host')" "$DHCPV6_LEASES"
     eq duid "$(dhcpv6_lease_match_for_mac aa:bb:cc:dd:ee:ff)"
     eq host "$(dhcpv6_lease_match_for_mac 3c:e1:a1:41:52:d0)"
+    # the DUID-UUID lease nobody could be tied to is queued for a probe, and
+    # the probe reaches exactly those addresses
+    eq "$(printf '%s\n' 300:1111:2222:3333::32d 300:1111:2222:3333::40)" "$UNATTRIBUTED_LEASE_ADDRS"
+    PINGED="$TMP/pinged"; : > "$PINGED"
+    ping() { printf '%s\n' "$*" >> "$PINGED"; }
+    probe_unattributed_leases; wait
+    grep -q -- '-6 -c 1 -W 1 300:1111:2222:3333::40' "$PINGED" || fail "unattributed lease address not probed: $(cat "$PINGED")"
+    UNATTRIBUTED_LEASE_ADDRS=''; : > "$PINGED"; probe_unattributed_leases; wait
+    [ ! -s "$PINGED" ] || fail "probe ran with nothing to probe"
+    unset -f ping
     # the neighbour table names the DUID-UUID lease when one device answers
     # for its addresses - in any prefix - and nobody when two do
     ip() {

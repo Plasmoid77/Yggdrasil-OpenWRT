@@ -204,7 +204,13 @@ silent host has no entry and stays unattributed until it speaks - never
 stored, never an authorisation, and it cannot keep a row alive: a lease known
 this way alone does not make its client pinnable, and Pin records a DUID on
 such a match only while the kernel has just confirmed the neighbour entry
-(REACHABLE), never on a stale one. Only leases
+(REACHABLE), never on a stale one. A lease no branch can attribute has its
+routed-prefix addresses probed once per `clients` call (one echo request
+each, in the background, at most 16): a client that never sources traffic
+from its leased address - Windows prefers its temporary one - has no
+neighbour entry for it until somebody talks to that address, and the
+neighbour solicitation the probe triggers is what creates the entry, whether
+or not the echo itself is answered. Only leases
 whose `flags` contain `bound` count. The lease is the router's own record of
 what it handed out, which is why it outranks anything merely observed but not
 the operator's canonical record. `ipv6_source` names the branch taken and
