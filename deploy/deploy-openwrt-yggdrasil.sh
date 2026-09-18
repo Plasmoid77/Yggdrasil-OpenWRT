@@ -1859,14 +1859,23 @@ ${_h%%=*}.${DNS_DOMAIN} ${_h#*=}"
 # attached to one. uclient-fetch has no header option and is skipped in that
 # branch rather than silently dropping the header.
 status_fetch() { # $1 = HTTPS URL, $2 = destination, $3 = optional request header
-    if [ -n "${3:-}" ]; then
-        wget -q --header="$3" -O "$2" "$1" 2>/dev/null \
-            || curl -fsSL -H "$3" -o "$2" "$1" 2>/dev/null
-    else
-        wget -q -O "$2" "$1" 2>/dev/null \
-            || uclient-fetch -q -O "$2" "$1" 2>/dev/null \
-            || curl -fsSL -o "$2" "$1" 2>/dev/null
-    fi
+    # Three attempts: on a mobile uplink a single failed TLS handshake to
+    # GitHub is common, and skipping the status module over it is worse than
+    # a few seconds' wait.
+    sf_try=0
+    while :; do
+        if [ -n "${3:-}" ]; then
+            wget -q --header="$3" -O "$2" "$1" 2>/dev/null \
+                || curl -fsSL -H "$3" -o "$2" "$1" 2>/dev/null
+        else
+            wget -q -O "$2" "$1" 2>/dev/null \
+                || uclient-fetch -q -O "$2" "$1" 2>/dev/null \
+                || curl -fsSL -o "$2" "$1" 2>/dev/null
+        fi && return 0
+        sf_try=$((sf_try + 1))
+        [ "$sf_try" -lt 3 ] || return 1
+        sleep 2
+    done
 }
 
 status_valid_version() { # $1 = candidate version label
