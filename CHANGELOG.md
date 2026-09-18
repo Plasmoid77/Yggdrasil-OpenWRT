@@ -1,5 +1,102 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## Status v6.1 - one lease resolver, and the neighbour table names DUID-UUID clients
+
+v6.0 attributed a DHCPv6 lease through a `config host` or the MAC inside a
+DUID-LLT/LL, so a NetworkManager or systemd-networkd client (DUID-UUID) with
+no reservation had no row and no bold lease address, although the router
+could see which device answered for the leased address. One resolver now
+serves the table and Pin alike:
+
+- `mac_for_lease`: `config host` DUID map (the operator's word), then the
+  MAC inside a DUID-LLT/LL - only with hardware type 1 and a non-zero MAC -
+  then the LAN neighbour table over every address of the lease in every
+  prefix the LAN carries. One MAC attributes; two different MACs, or none,
+  attribute nothing. The neighbour branch is an observation of the moment:
+  never stored, never an authorisation, never a reason to keep a row.
+- Rows carry `ipv6_lease_match` (`host`, `duid`, `neighbor`); the page says
+  in the address tooltip when a lease was matched through the neighbour
+  table.
+- Pin uses the same resolver (with the LAN device and the host DUID map set
+  up first), so the `duid` it records is the lease the row shows - but a
+  lease attributed only through the neighbour table is not evidence for a
+  pin, and the `duid` is recorded on such a match only while the kernel has
+  just confirmed the entry (REACHABLE), never on a stale one.
+- The stock hybrid LAN of deployer 2.0 gives a DHCPv6 client one lease
+  address per prefix; the resolver reads all of them, the table still shows
+  the routed-prefix one.
+
+Validated on the test router: a NetworkManager laptop (DUID-UUID) whose
+`config host` carried only the MAC was attributed through the neighbour
+table (`neighbor`), and through the section (`host`) once its `duid` was
+back; a dhcpcd host shows `duid`; a BMC port with an all-zero DUID and no
+neighbour entry stays unattributed, as intended. Noted on the way: odhcpd
+drops a client's lease on reload when its `config host` section changes, and
+`odhcpd restart` (the guard's restore path) empties the lease record until
+clients renew.
+
+## Deployer 2.0.0 - the routed /64 joins the LAN instead of replacing its IPv6
+
+1.x made the routed `/64` the LAN's only IPv6: `ip6class` kept every other
+prefix off the LAN, the stock ULA was deleted and the RA ran in one of two
+deployer-owned modes. On a router whose uplink has IPv6 that broke native
+IPv6 for every LAN client, and the managed mode took Android off the routed
+prefix. Measured on a dual-stack LTE router (2026-09-18): the stock hybrid RA
+gives every DHCPv6 client one stateful address per prefix with the same IID,
+so reservations work on stock as they did in managed mode, while SLAAC stays
+on for everyone. Hence 2.0, breaking:
+
+- The LAN stage writes `ra=server`, `ra_default=2` and - only when unset -
+  `ip6assign=64`. `dhcpv6`, `ra_slaac`, `ra_flags`, `ra_preference` and
+  `ula_prefix` are the operator's and are never written. An `ip6class` list
+  is deleted only when it is exactly the 1.x singleton; a custom list is kept
+  and made to admit the Yggdrasil class. After the reload the stage checks
+  that netifd actually assigned the routed `/64` to the LAN (stock
+  `ip6assign=60` takes it whole) and fails, with rollback, if not.
+- `--dhcpv6`, `--slaac` and the `[flags]` entries are refused with an
+  explanation. A router still carrying the **whole** 1.x signature
+  (`ip6class` singleton, no ULA, a 1.x RA shape) is migrated back to stock
+  once - ULA restored from the oldest `/root/ygg-deploy-backup-*/network`,
+  else generated stock-style - and the migration is recorded in
+  `/etc/yggdrasil-deploy/migrated` so later runs never reinterpret operator
+  changes as legacy. A partial signature stops the run before any change;
+  `--migrate-legacy` forces the migration. A dry run prints the plan.
+- `--host` reservations no longer need a mode; they need the LAN's DHCPv6
+  server, which stock has. A LAN with `dhcpv6` disabled, `dhcpv6_na=0` or
+  `ra_offlink=1` is refused in preflight, before anything is written.
+- Firewall: LAN hosts may initiate connections into Yggdrasil through the
+  router - one explicit stateful rule `LAN-to-Yggdrasil` (`lan -> ygg`,
+  IPv6, `dest_ip 200::/7`), not a zone forwarding. `--no-lan-forward`
+  (`[flags] no-lan-forward`) removes it. Zone policy, trusted rules and the
+  no-NAT66 invariant are unchanged. 1.x had no LAN-to-Yggdrasil path at all.
+- `--guard MINUTES`: a detached watchdog stops the deployer and restores
+  `network`, `dhcp` and `firewall` unless the run verifies successfully - the
+  recovery path for a router reached only over the path being reconfigured.
+- The trusted-to-LAN and LAN-to-Yggdrasil rules name the firewall zone the
+  LAN network belongs to, not the network name (`--lan guests` in zone `lan`).
+- Verification separates what the deployer asserts (prefix on the LAN, `ra`,
+  `ra_default`, an admitting `ip6class`, zone, rule, reservations, odhcpd)
+  from the operator's LAN settings, which it reports.
+- GitHub fetches for the status module are retried three times; on the LTE
+  test router a single failed TLS handshake used to skip the module.
+- Tests: `tests/deploy-lan-mode.sh` became `tests/deploy-lan-overlay.sh`
+  (classification table, per-plan UCI values, the rule, refused switches).
+
+Validated on the SPb test router reset to stock OpenWrt 25.12.5 with a
+dual-stack LTE uplink: fresh install kept the native prefix and ULA on the
+LAN beside the routed `/64`, a NetworkManager laptop and a dhcpcd host got
+`::20`/`::10` in all three prefixes, LAN-initiated traffic reached Yggdrasil
+nodes with the routed-prefix source, untrusted inbound stayed rejected, and
+everything survived a reboot. Also on that router: an IPv4-only PDN (Ygg +
+ULA only, default via `ra_default=2`, native destinations fail fast), the
+native prefix renumbering on PDN re-activation (LAN and leases followed), the
+guard (a frozen deployer killed after the deadline, files restored
+byte-identical; a successful run cancels it), and the 1.9.0 `--dhcpv6` ->
+2.0 migration (three prefixes back, the original ULA restored from the oldest
+1.x backup, leases kept through the reload, marker written, the rerun reads
+the marker). Not validated: PMTU with a remote node below 1500 (Yggdrasil's
+own PTB path), non-Linux clients.
+
 ## Status v6.0 - the page can reserve addresses, and knows every client the router serves
 
 v5.5 read odhcpd's leases but could tie one to a row only through the MAC

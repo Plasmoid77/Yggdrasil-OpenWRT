@@ -608,13 +608,17 @@ Yggdrasil interface, whatever class netifd derived from that interface's name.
 Cover an interface NOT named `ygg` (for example `ygg0`): a backend that
 hardcodes `class="ygg"` silently reports no client IPv6 addresses at all.
 
-For a deployer change touching the LAN stage, validate both modes and both
-transitions on hardware (SLAAC -> managed -> SLAAC), each time reading the
-mode's UCI values, `ubus call dhcp ipv6leases`, a reserved client's actual
-address, `<name>.home.arpa` from a trusted node, and a control reboot. The
-host-side fixtures in `tests/deploy-lan-mode.sh` cover parsing, address
-arithmetic, collision detection and the UCI values written; they do not
-emulate odhcpd, RA lifetimes or client behaviour.
+For a deployer change touching the LAN stage, validate on hardware a fresh
+install on a stock router (IPv4-only and dual-stack uplink), a rerun (no
+change), and the 1.x migration (install 1.9.0, then run 2.0), each time
+reading `ifstatus <lan>` for the assigned prefixes, the LAN's UCI values,
+`ubus call dhcp ipv6leases`, a reserved client's actual addresses in every
+prefix, a LAN-initiated connection into Yggdrasil, `<name>.home.arpa` from a
+trusted node, untrusted inbound still rejected, and a control reboot. The
+host-side fixtures in `tests/deploy-lan-overlay.sh` cover the option surface,
+the classification table, address arithmetic, collision detection, the UCI
+values written per plan and the firewall rule; they do not emulate netifd's
+prefix assignment, odhcpd, RA lifetimes or client behaviour.
 
 ## BusyBox and UCI pitfalls
 

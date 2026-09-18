@@ -16,7 +16,7 @@
 set -u
 umask 077
 
-VERSION='1.9.0'
+VERSION='2.0.0'
 SELF="${0##*/}"
 # Piped straight from a URL — wget -qO- ... | sh -s -- ... — $0 is the shell, so
 # the banner and the usage text would announce themselves as "sh".
@@ -30,13 +30,25 @@ IFACE='ygg0'
 LAN='lan'
 PEERS=''
 TRUSTED=''
-# How LAN clients get an address from the routed /64. 'slaac': RA with the A
-# flag, clients form their own addresses, DHCPv6 off (the profile every 1.x
-# deployment has). 'dhcpv6': RA with M/O and no A flag, odhcpd assigns every
-# address from the prefix, reservations by --host. 'keep' (the default) reads
-# the mode the router is in and leaves it alone - a fresh router is SLAAC - so
-# a rerun for any other reason never changes LAN policy.
-LAN_MODE='keep'
+# The routed /64 is added to the LAN as one more prefix beside whatever
+# OpenWrt already advertises there (native delegated prefix, ULA). The stock
+# hybrid RA - SLAAC plus stateful DHCPv6 with the M/O flags - stays as it is;
+# reservations by --host ride on the DHCPv6 side of it. 1.x replaced the LAN's
+# IPv6 with the routed /64 (ip6class, no ULA, its own RA mode); such a router
+# is recognised by its full 1.x signature and migrated back to stock once, and
+# the migration is recorded so a later run never reinterprets operator changes.
+MIGRATE_LEGACY=0            # --migrate-legacy: migrate on a partial 1.x signature too
+MIGRATED_MARKER='/etc/yggdrasil-deploy/migrated'
+LAN_PLAN=''                 # overlay | migrate, settled in preflight (classify_lan)
+CUR_IP6ASSIGN=''; CUR_IP6CLASS=''; CUR_ULA=''; CUR_DHCPV6=''; CUR_RA_SLAAC=''; CUR_RA_FLAGS=''
+MARKER_WRITTEN=0                # this run wrote the migration marker
+# LAN hosts may initiate connections into Yggdrasil through the router (one
+# explicit stateful rule, IPv6 to 200::/7 only). Inbound stays trusted-only.
+DO_LAN_FORWARD=1
+# Minutes until a detached watchdog restores the pre-run configuration unless
+# the run reaches a successful verification. 0 = off. Meant for routers whose
+# only management path is the one being reconfigured.
+GUARD_MIN=0
 HOSTS=''
 DO_JUMPER=1
 DO_LAN=1
@@ -70,6 +82,7 @@ SUPPLIED_KEY=''
 DRY_RUN=0
 ASSUME_YES=0
 WAIT_SECS=90
+BACKUP_ROOT='/root'         # where every run leaves ygg-deploy-backup-<stamp>/
 BACKUP_DIR=''
 
 # ------------------------------------------------------------------ output ---
@@ -145,32 +158,34 @@ DNS module (Part III, on by default — see also --no-dns):
   --dns-host NAME=ADDR  Extra record. Repeatable; repeat a NAME to give it
                         several addresses.
 
-LAN addressing (default: keep the router's current mode; a fresh router is
-SLAAC, as in every 1.x deployment):
-  --dhcpv6              Router-managed addresses: RA keeps the default route
-                        and sets M/O, the A flag is off, odhcpd assigns every
-                        LAN address from the routed /64. Clients without a
-                        DHCPv6 client (Android) get no address from it.
-  --slaac               Back to SLAAC-only (RA with A flag, DHCPv6 off).
-                        --dhcpv6 and --slaac: the last one given wins.
+LAN (the routed /64 is added beside the LAN's existing IPv6 prefixes; the
+stock RA/DHCPv6 configuration is kept, so reservations work without a mode):
   --host NAME=MAC=HOSTID
   --host NAME=duid:HEX[%IAID]=HOSTID
   --host NAME=MAC+duid:HEX[%IAID]=HOSTID
-                        Reserve <prefix>::HOSTID for one client (needs
-                        --dhcpv6). HOSTID: 1-16 hex digits, not 0 or 1.
+                        Reserve <prefix>::HOSTID for one client (needs the
+                        LAN's DHCPv6 server on, as it is on a stock router).
+                        HOSTID: 1-16 hex digits, not 0 or 1.
                         Match by MAC works for DUID-LLT/DUID-LL clients only;
                         give the DUID (and the IAID in hex, when one DUID
                         serves several interfaces) for anything else, and
                         add the MAC with '+' so the status page can name the
                         row. Repeatable. With the DNS module on,
                         NAME.$DNS_DOMAIN resolves to the reserved address.
+  --migrate-legacy      A 1.x router (ip6class on the LAN, ULA removed, its
+                        own RA mode) is migrated back to the stock LAN
+                        configuration automatically when its whole 1.x
+                        signature is present. Force the migration when only
+                        part of it is left.
+  --no-lan-forward      Do not let LAN hosts initiate connections into
+                        Yggdrasil through the router (removes the rule).
 
 Scope:
   --iface NAME          Yggdrasil interface / UCI section name (default: $IFACE)
   --lan NAME            LAN UCI interface name (default: $LAN)
   --no-jumper           Do not install/enable yggdrasil-jumper
   --no-multicast        Do not enable LAN multicast peering
-  --no-lan              Do not touch LAN ip6assign/ip6class/RA/DHCPv6
+  --no-lan              Do not touch LAN ip6assign/ip6class/RA
   --no-firewall         Do not create the ygg zone or trusted rules
   --no-status           Do not install the LuCI status module
   --no-dns              Do not serve <name>.$DNS_DOMAIN over Yggdrasil
@@ -182,6 +197,10 @@ Behaviour:
   -n, --dry-run         Print what would change; touch nothing
   -y, --yes             Non-interactive; do not prompt before applying
   --wait SECONDS        Seconds to wait for the Ygg prefix (default: $WAIT_SECS)
+  --guard MINUTES       Arm a detached watchdog that restores the network,
+                        dhcp and firewall configuration after MINUTES unless
+                        the run verifies successfully. For a router reached
+                        only through the path being reconfigured.
   -h, --help            This text
 
 Settings file: one value per line under a [section] header, # starts a
@@ -195,10 +214,12 @@ comment, blank lines are ignored. Unknown sections are an error. Sections:
   [hosts]           NAME=MAC=HOSTID lines etc. (as --host)
   [status-pkg] [status-version]                (as --status-pkg, --status-version)
   [flags]           one per line: no-jumper no-multicast no-lan no-firewall
-                    no-status dns no-dns dhcpv6 slaac
+                    no-status dns no-dns no-lan-forward migrate-legacy
                                                (as the switches of the same name)
-Keep the file mode 600 when it holds the key. --dry-run, --yes and --wait
-describe the run, not the node, and stay on the command line.
+Keep the file mode 600 when it holds the key. --dry-run, --yes, --wait and
+--guard describe the run, not the node, and stay on the command line.
+The 1.x switches --dhcpv6 / --slaac (and the flags of the same name) are gone:
+2.0 keeps the LAN's stock RA/DHCPv6 configuration; delete them.
 USAGE
 }
 
@@ -452,8 +473,9 @@ read_config() {
                     no-status)    DO_STATUS=0 ;;
                     dns)          DO_DNS=1 ;;
                     no-dns)       DO_DNS=0 ;;
-                    dhcpv6)       LAN_MODE='dhcpv6' ;;
-                    slaac)        LAN_MODE='slaac' ;;
+                    no-lan-forward) DO_LAN_FORWARD=0 ;;
+                    migrate-legacy) MIGRATE_LEGACY=1 ;;
+                    dhcpv6|slaac) die "flag '$_cf_line' in [flags] of $_cf is from 1.x: 2.0 keeps the LAN's stock RA/DHCPv6 configuration — delete the line" ;;
                     *) die "unknown flag '$_cf_line' in [flags] of $_cf" ;;
                 esac ;;
             private-key)
@@ -497,8 +519,15 @@ while [ $# -gt 0 ]; do
         --dns-domain)  [ $# -ge 2 ] || die "--dns-domain needs a value";  DNS_DOMAIN="$2";  shift 2 ;;
         --dns-router)  [ $# -ge 2 ] || die "--dns-router needs a value";  DNS_ROUTER="$2";  shift 2 ;;
         --dns-host)    [ $# -ge 2 ] || die "--dns-host needs a value";    add_dns_host "$2"; shift 2 ;;
-        --dhcpv6)      LAN_MODE='dhcpv6';  shift ;;
-        --slaac)       LAN_MODE='slaac';   shift ;;
+        --no-lan-forward) DO_LAN_FORWARD=0; shift ;;
+        --migrate-legacy) MIGRATE_LEGACY=1; shift ;;
+        --guard)
+            [ $# -ge 2 ] || die "--guard needs a value"
+            case "$2" in ''|*[!0-9]*) die "--guard takes whole minutes, got '$2'" ;; esac
+            GUARD_MIN="$2"; shift 2 ;;
+        --dhcpv6|--slaac)
+            _old="$1"; shift   # consumed first: the test harness stubs die without exiting
+            die "$_old is from 1.x: 2.0 keeps the LAN's stock RA/DHCPv6 configuration — drop the switch (see --migrate-legacy for a 1.x router)" ;;
         --host)        [ $# -ge 2 ] || die "--host needs a value";        add_host "$2";     shift 2 ;;
         --status-pkg)  [ $# -ge 2 ] || die "--status-pkg needs a value";  STATUS_PKG="$2";  shift 2 ;;
         --status-version)
@@ -513,11 +542,10 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# A reservation only means something where odhcpd hands out the addresses. Refuse
-# instead of silently writing config host sections nothing would act on. The
-# 'keep' case is settled in preflight, once the router's configuration is readable.
+# A reservation only means something where odhcpd hands out the addresses.
+# Whether this LAN's DHCPv6 server is on is settled in preflight, once the
+# router's configuration is readable; the stage that needs it is the LAN stage.
 if [ -n "$HOSTS" ]; then
-    [ "$LAN_MODE" != 'slaac' ] || die "--host needs --dhcpv6: in SLAAC mode the router does not assign addresses"
     [ "$DO_LAN" -eq 1 ] || die "--host cannot be combined with --no-lan"
 fi
 
@@ -689,7 +717,7 @@ rollback() {
     [ "$DRY_RUN" -eq 1 ] && return 0
     [ -n "$BACKUP_DIR" ] || return 0
     [ -d "$BACKUP_DIR" ] || return 0
-    [ "$CHANGED_NETWORK$CHANGED_DHCP$CHANGED_FIREWALL" = "000" ] && return 0
+    [ "$CHANGED_NETWORK$CHANGED_DHCP$CHANGED_FIREWALL" = "000" ] && { cancel_guard; return 0; }
 
     warn "rolling back UCI configuration from $BACKUP_DIR"
     for _c in network dhcp firewall; do
@@ -709,26 +737,179 @@ rollback() {
     /etc/init.d/odhcpd restart  >/dev/null 2>&1 || true
     [ "$CHANGED_DHCP" -eq 1 ] && { /etc/init.d/dnsmasq restart >/dev/null 2>&1 || true; }
     /etc/init.d/firewall reload >/dev/null 2>&1 || true
+    if [ "$MARKER_WRITTEN" -eq 1 ]; then
+        rm -f "$MIGRATED_MARKER" && warn "  removed $MIGRATED_MARKER (the migration did not complete)"
+    fi
+    cancel_guard
     warn "rollback done — verify the router state manually"
 }
 
 # =========================================================== stage 0: preflight
 
-# Settle the LAN addressing mode: an explicit switch wins, otherwise the router
-# keeps whatever it runs now, and a router that runs nothing yet gets SLAAC. A
-# rerun for peers, trusted addresses or DNS must never flip it.
-resolve_lan_mode() {
-    if [ "$LAN_MODE" = 'keep' ]; then
-        if [ "$(uci -q get "dhcp.$LAN.dhcpv6" 2>/dev/null)" = 'server' ]; then
-            LAN_MODE='dhcpv6'
-            info "LAN addressing: managed DHCPv6 (current, kept; --slaac to change)"
+# Read the LAN's IPv6 configuration once and decide what the LAN stage does
+# with it. 1.x replaced the LAN's IPv6 with the routed /64; its signature is the
+# COMBINATION of: ip6class naming only the Ygg class, no ULA, and one of the two
+# 1.x RA modes. Each part alone is a plausible operator choice (ra_slaac=0 is a
+# common managed-LAN setting), so only the whole set - or --migrate-legacy - is
+# read as "our 1.x profile", and only once: the marker records the migration so
+# a later run never reinterprets what the operator changed since.
+classify_lan() {
+    CUR_IP6ASSIGN="$(uci -q get "network.$LAN.ip6assign")"
+    CUR_IP6CLASS="$(uci -q get "network.$LAN.ip6class")"
+    CUR_ULA="$(uci -q get network.globals.ula_prefix)"
+    CUR_DHCPV6="$(uci -q get "dhcp.$LAN.dhcpv6")"
+    CUR_RA_SLAAC="$(uci -q get "dhcp.$LAN.ra_slaac")"
+    # a UCI list comes back space-joined; compare as a set, not as one string
+    CUR_RA_FLAGS="$(uci -q get "dhcp.$LAN.ra_flags" | tr ' ' '\n' | sort | tr '\n' ' ')"
+    # The class netifd publishes for the routed prefix is only known once the
+    # Ygg interface is up (see get_ygg_prefix); on a router without one there
+    # is nothing to migrate and the interface name is the class it will get.
+    _pl="$(get_ygg_prefix)"
+    LAN_YGG_CLASS="${_pl##* }"
+    [ -n "$LAN_YGG_CLASS" ] || LAN_YGG_CLASS="$IFACE"
+
+    LEGACY_CLASS=0; LEGACY_ULA=0; LEGACY_MODE=''
+    [ "$CUR_IP6CLASS" = "$LAN_YGG_CLASS" ] && LEGACY_CLASS=1
+    [ -z "$CUR_ULA" ] && LEGACY_ULA=1
+    if [ "$CUR_DHCPV6" = 'disabled' ] && [ "$CUR_RA_SLAAC" = '1' ] && [ "$CUR_RA_FLAGS" = 'none ' ]; then
+        LEGACY_MODE='slaac'
+    elif [ "$CUR_DHCPV6" = 'server' ] && [ "$CUR_RA_SLAAC" = '0' ] && [ "$CUR_RA_FLAGS" = 'managed-config other-config ' ]; then
+        LEGACY_MODE='dhcpv6'
+    fi
+    _found=$((LEGACY_CLASS + LEGACY_ULA))
+    [ -n "$LEGACY_MODE" ] && _found=$((_found + 1))
+
+    LAN_PLAN='overlay'
+    if [ -f "$MIGRATED_MARKER" ]; then
+        info "LAN: 1.x profile already migrated ($(sed -n 's/^date=//p' "$MIGRATED_MARKER" | head -n 1)); operator settings are kept"
+    elif [ "$_found" -eq 3 ]; then
+        LAN_PLAN='migrate'
+    elif [ "$_found" -gt 0 ]; then
+        if [ "$MIGRATE_LEGACY" -eq 1 ]; then
+            LAN_PLAN='migrate'
+            warn "LAN: partial 1.x signature, migrating anyway (--migrate-legacy)"
         else
-            LAN_MODE='slaac'
-            [ -z "$HOSTS" ] || die "--host needs --dhcpv6: this router serves SLAAC and would not assign the reserved address"
-            info "LAN addressing: SLAAC (current, kept; --dhcpv6 to change)"
+            err "LAN: part of the 1.x signature is present but not all of it:"
+            [ "$LEGACY_CLASS" -eq 1 ] && err "    ip6class restricts the LAN to '$LAN_YGG_CLASS'"
+            [ "$LEGACY_ULA" -eq 1 ]   && err "    no ULA prefix"
+            [ -n "$LEGACY_MODE" ]     && err "    RA/DHCPv6 in the 1.x '$LEGACY_MODE' shape"
+            err "  not guessing whose settings these are: rerun with --migrate-legacy to"
+            err "  restore the stock LAN configuration, put the parts right by hand first,"
+            die "or use --no-lan to leave the LAN untouched"
         fi
+    elif [ "$MIGRATE_LEGACY" -eq 1 ]; then
+        warn "--migrate-legacy: no 1.x signature on the LAN, nothing to migrate"
+    fi
+
+    # Reservations only mean something where odhcpd hands out addresses. Settle
+    # that here, before anything is written, instead of failing mid-stage.
+    if [ -n "$HOSTS" ] && [ "$DO_LAN" -eq 1 ]; then
+        _eff="$CUR_DHCPV6"
+        [ "$LAN_PLAN" = 'migrate' ] && _eff='server'
+        [ "$_eff" = 'server' ] \
+            || die "--host needs the LAN's DHCPv6 server (stock: dhcp.$LAN.dhcpv6='server'), found '${CUR_DHCPV6:-<unset>}' — the deployer does not change that setting"
+        [ "$(uci -q get "dhcp.$LAN.dhcpv6_na")" != '0' ] \
+            || die "dhcp.$LAN.dhcpv6_na=0 disables address assignment — remove it before reserving addresses"
+        [ "$(uci -q get "dhcp.$LAN.ra_offlink")" != '1' ] \
+            || die "dhcp.$LAN.ra_offlink=1 clears the on-link flag — remove it first"
+    fi
+
+    if [ "$LAN_PLAN" = 'migrate' ]; then
+        info "LAN plan: migrate the 1.x profile back to the stock LAN, then overlay"
+        info "    ip6class   : '$CUR_IP6CLASS' -> (none: every prefix reaches the LAN)"
+        info "    ula_prefix : (none) -> restored from the oldest 1.x backup, else generated"
+        info "    dhcpv6     : '${CUR_DHCPV6:-<unset>}' -> server"
+        info "    ra_slaac   : '${CUR_RA_SLAAC:-<unset>}' -> 1"
+        info "    ra_flags   : '${CUR_RA_FLAGS% }' -> managed-config other-config"
     else
-        info "LAN addressing: $LAN_MODE (requested)"
+        info "LAN plan: overlay — add the routed /64 beside the LAN's current prefixes"
+        [ -n "$CUR_ULA" ] && info "    ULA $CUR_ULA kept"
+        case "$CUR_IP6CLASS" in
+            '') ;;
+            "$LAN_YGG_CLASS") info "    ip6class '$CUR_IP6CLASS' removed (a 1.x restriction)" ;;
+            *)  case " $CUR_IP6CLASS " in
+                    *" $LAN_YGG_CLASS "*) info "    ip6class '$CUR_IP6CLASS' kept (already admits '$LAN_YGG_CLASS')" ;;
+                    *) info "    ip6class '$CUR_IP6CLASS' kept, '$LAN_YGG_CLASS' added to it" ;;
+                esac ;;
+        esac
+        info "    RA/DHCPv6: dhcpv6='${CUR_DHCPV6:-<unset>}' ra_slaac='${CUR_RA_SLAAC:-<unset>}' ra_flags='${CUR_RA_FLAGS% }' kept"
+    fi
+    if [ -n "$CUR_IP6ASSIGN" ]; then
+        info "    ip6assign $CUR_IP6ASSIGN kept"
+    else
+        info "    ip6assign unset -> 64"
+    fi
+}
+
+# ------------------------------------------------------------------- guard ---
+
+# A detached watchdog for routers whose only management path is the one being
+# reconfigured: unless the run reaches a successful verification, it puts the
+# pre-run network/dhcp/firewall files back after GUARD_MIN minutes. It is a
+# separate process with its own copy of the files, so it neither depends on
+# this script surviving nor on Yggdrasil coming up. OpenWrt's BusyBox has no
+# nohup: setsid (a separate applet, present on 25.12) or, failing that, a
+# subshell that ignores HUP, with every fd redirected, is what outlives the
+# SSH session; the deployer checks the watchdog is alive before going on.
+#
+# Exactly one of "fired" and "cancelled" happens: both sides claim the same
+# directory with mkdir, which is atomic. A firing guard first kills the
+# deployer outright (no trap, so no second restoration racing with it),
+# reverts pending UCI changes the way rollback does, then restores the files.
+GUARD_PID=''
+arm_guard() {
+    [ "$DRY_RUN" -eq 0 ] && [ "$GUARD_MIN" -gt 0 ] || return 0
+    [ -n "$BACKUP_DIR" ] && [ -d "$BACKUP_DIR" ] || return 0
+    cat > "$BACKUP_DIR/guard.sh" <<GUARD
+#!/bin/sh
+trap '' HUP INT PIPE
+echo \$\$ > "$BACKUP_DIR/guard.pid"
+sleep $((GUARD_MIN * 60))
+mkdir "$BACKUP_DIR/guard.state" 2>/dev/null || exit 0   # cancelled first
+: > "$BACKUP_DIR/guard.state/fired"
+kill -9 $$ 2>/dev/null
+sleep 1
+for c in network dhcp firewall; do
+    [ -f "$BACKUP_DIR/\$c" ] || continue
+    uci -q revert "\$c" 2>/dev/null
+    cp "$BACKUP_DIR/\$c" "/etc/config/\$c"
+done
+[ -f "$BACKUP_DIR/marker.created" ] && rm -f "$MIGRATED_MARKER"
+/etc/init.d/network reload
+/etc/init.d/odhcpd restart
+/etc/init.d/dnsmasq restart
+/etc/init.d/firewall reload
+logger -t ygg-deploy "guard: deployer stopped, configuration restored from $BACKUP_DIR"
+GUARD
+    chmod 700 "$BACKUP_DIR/guard.sh"
+    rm -f "$BACKUP_DIR/guard.pid"
+    if have setsid; then
+        setsid sh "$BACKUP_DIR/guard.sh" >/dev/null 2>&1 </dev/null &
+    else
+        ( trap '' HUP INT PIPE; exec sh "$BACKUP_DIR/guard.sh" ) >/dev/null 2>&1 </dev/null &
+    fi
+    _i=0
+    while [ ! -s "$BACKUP_DIR/guard.pid" ] && [ "$_i" -lt 20 ]; do sleep 1; _i=$((_i + 1)); done
+    GUARD_PID="$(cat "$BACKUP_DIR/guard.pid" 2>/dev/null)"
+    case "$GUARD_PID" in ''|*[!0-9]*) GUARD_PID='' ;; esac
+    if [ -z "$GUARD_PID" ] || ! kill -0 "$GUARD_PID" 2>/dev/null; then
+        die "the guard did not start (no live watchdog process) — refusing to continue unguarded"
+    fi
+    ok "guard armed (pid $GUARD_PID): network/dhcp/firewall restore in ${GUARD_MIN} min unless verification succeeds"
+    info "    cancel by hand: mkdir $BACKUP_DIR/guard.state"
+}
+
+cancel_guard() {
+    [ -n "$GUARD_PID" ] || return 0
+    if mkdir "$BACKUP_DIR/guard.state" 2>/dev/null; then
+        kill "$GUARD_PID" 2>/dev/null || true
+        GUARD_PID=''
+        ok "guard cancelled"
+    else
+        # The guard won the race: it is restoring, or has restored, the
+        # pre-run files. Nothing this process writes from here on is wanted.
+        GUARD_PID=''
+        die "the guard fired before this run finished — the pre-run configuration is being restored"
     fi
 }
 
@@ -755,8 +936,9 @@ stage_preflight() {
     info "package manager: apk"
 
     uci -q get "network.$LAN" >/dev/null 2>&1 || die "no UCI interface 'network.$LAN' — pass --lan"
+    uci -q get "dhcp.$LAN" >/dev/null 2>&1 || die "no UCI section 'dhcp.$LAN'"
 
-    resolve_lan_mode
+    [ "$DO_LAN" -eq 1 ] && classify_lan
 
     # free space check: the status module + packages need a little room
     _free=$(df -k /overlay 2>/dev/null | awk 'NR==2{print $4}')
@@ -799,7 +981,7 @@ stage_preflight() {
     fi
 
     if [ "$DRY_RUN" -eq 0 ]; then
-        BACKUP_DIR="/root/ygg-deploy-backup-$(date +%Y%m%d-%H%M%S)"
+        BACKUP_DIR="$BACKUP_ROOT/ygg-deploy-backup-$(date +%Y%m%d-%H%M%S)"
         mkdir -p "$BACKUP_DIR" || die "cannot create $BACKUP_DIR"
         for _c in network dhcp firewall; do
             [ -f "/etc/config/$_c" ] && cp "/etc/config/$_c" "$BACKUP_DIR/$_c"
@@ -823,6 +1005,7 @@ stage_preflight() {
 
     confirm "Apply this deployment to $(cat /tmp/sysinfo/model 2>/dev/null || echo 'this router')?" \
         || die "aborted by operator"
+    arm_guard
 }
 
 # =========================================================== stage 1: packages
@@ -1328,14 +1511,44 @@ HOSTS_EOF
     return 0
 }
 
+# The ULA a 1.x run deleted. The oldest 1.x backup that still has it is the
+# original; without one, a fresh prefix the way stock 12_network-generate-ula
+# makes it - which renumbers the LAN's ULA side once, and is said so.
+legacy_ula() {
+    _lu=''
+    for _b in "$BACKUP_ROOT"/ygg-deploy-backup-*/network; do
+        [ -f "$_b" ] || continue
+        # uci exports the value single-quoted; a hand-edited file may use
+        # double quotes or none. Take what is between the quotes, then insist
+        # on a ULA-looking prefix before restoring it.
+        _lu="$(sed -n "s/^[[:space:]]*option[[:space:]]\{1,\}['\"]\{0,1\}ula_prefix['\"]\{0,1\}[[:space:]]\{1,\}['\"]\{0,1\}\([^'\"[:space:]]*\)['\"]\{0,1\}[[:space:]]*\$/\1/p" "$_b" | head -n 1)"
+        case "$_lu" in
+            f[cd][0-9a-fA-F][0-9a-fA-F]:*::/4[89]|f[cd][0-9a-fA-F][0-9a-fA-F]:*::/5[0-9]|f[cd][0-9a-fA-F][0-9a-fA-F]:*::/6[0-4])
+                printf '%s restored from %s\n' "$_lu" "$_b"; return 0 ;;
+            '') ;;
+            *) warn "ignoring unparseable ula_prefix '$_lu' in $_b" ;;
+        esac
+    done
+    _r1=$(( $(hexdump -n1 -e '/1 "%u"' /dev/urandom) & 0xff ))
+    _r2=$(( $(hexdump -n2 -e '/2 "%u"' /dev/urandom) & 0xffff ))
+    _r3=$(( $(hexdump -n2 -e '/2 "%u"' /dev/urandom) & 0xffff ))
+    printf 'fd%02x:%04x:%04x::/48 generated (no 1.x backup holds the original: the LAN ULA is renumbered)\n' "$_r1" "$_r2" "$_r3"
+}
+
+# Whether netifd actually handed the routed /64 to the LAN. Checked after the
+# reload because ip6class and ip6assign only express a wish: another interface
+# may take the prefix, or the requested length may not fit.
+lan_has_ygg_prefix() {
+    _want="${YGG_PREFIX%%/*}"
+    ifstatus "$LAN" 2>/dev/null \
+        | jsonfilter -e '@["ipv6-prefix-assignment"][*].address' 2>/dev/null \
+        | grep -qixF "$_want"
+}
+
 stage_lan() {
     [ "$DO_LAN" -eq 1 ] || { info "skipping LAN stage (--no-lan)"; return 0; }
     FAILED_STAGE='LAN routed /64 and RA'
-    if [ "$LAN_MODE" = 'dhcpv6' ]; then
-        step "Stage 4 — LAN routed /64, RA and stateful DHCPv6"
-    else
-        step "Stage 4 — LAN routed /64 and SLAAC-only RA"
-    fi
+    step "Stage 4 — LAN routed /64 beside the existing prefixes"
 
     # dhcp is also the status module's file (Pin/Unpin edit config host under
     # this lock). Take it before staging anything, so a busy lock means
@@ -1352,39 +1565,57 @@ stage_lan() {
     CHANGED_DHCP=1
 
     # ip6class must name the class netifd actually publishes for this prefix
-    # (see get_ygg_prefix); hardcoding 'ygg' silently matches nothing and the
-    # LAN then keeps whatever other prefix it can find.
+    # (see get_ygg_prefix); hardcoding 'ygg' silently matches nothing.
     _class="${YGG_CLASS:-$IFACE}"
-    uci_set "network.$LAN.ip6assign" '64'
-    uci_del "network.$LAN.ip6class"
-    uci_add_list "network.$LAN.ip6class" "$_class"
-    uci_del 'network.globals.ula_prefix'
-    info "LAN: ip6assign=64, ip6class=$_class, extra ULA removed"
 
-    uci -q get "dhcp.$LAN" >/dev/null 2>&1 || die "no UCI section 'dhcp.$LAN'"
-    uci_set "dhcp.$LAN.ra" 'server'
-    uci_set "dhcp.$LAN.ra_default" '2'
-    uci_set "dhcp.$LAN.ra_preference" 'medium'
-    uci_del "dhcp.$LAN.ra_flags"
-    if [ "$LAN_MODE" = 'dhcpv6' ]; then
-        # Settings this script never writes but which would silently defeat
-        # the mode: refuse rather than override an operator's choice.
-        [ "$(uci -q get "dhcp.$LAN.dhcpv6_na")" != '0' ] \
-            || die "dhcp.$LAN.dhcpv6_na=0 disables address assignment — remove it or stay on --slaac"
-        [ "$(uci -q get "dhcp.$LAN.ra_offlink")" != '1' ] \
-            || die "dhcp.$LAN.ra_offlink=1 clears the on-link flag — remove it first"
+    # The assignment length is the operator's (stock 60 carves a delegated
+    # prefix for several LANs); netifd falls back to longer lengths down to /64
+    # when the request does not fit, so the routed /64 needs no particular value.
+    if [ -z "$CUR_IP6ASSIGN" ]; then
+        uci_set "network.$LAN.ip6assign" '64'
+        info "LAN: ip6assign=64 (was unset)"
+    else
+        info "LAN: ip6assign=$CUR_IP6ASSIGN kept"
+    fi
+
+    # An ip6class list is a restriction: absent, every prefix reaches the LAN.
+    # The 1.x singleton is what kept native IPv6 and the ULA off the LAN, so it
+    # goes; an operator's own list is kept and merely made to admit our class.
+    case "$CUR_IP6CLASS" in
+        '') ;;
+        "$_class")
+            uci_del "network.$LAN.ip6class"
+            info "LAN: ip6class '$_class' removed — native prefixes and ULA return to the LAN" ;;
+        *)  case " $CUR_IP6CLASS " in
+                *" $_class "*) info "LAN: ip6class '$CUR_IP6CLASS' kept" ;;
+                *)  uci_add_list "network.$LAN.ip6class" "$_class"
+                    info "LAN: ip6class '$CUR_IP6CLASS' kept, '$_class' added" ;;
+            esac ;;
+    esac
+
+    if [ "$LAN_PLAN" = 'migrate' ]; then
+        if [ -z "$CUR_ULA" ]; then
+            _ula_line="$(legacy_ula)"
+            uci_set 'network.globals.ula_prefix' "${_ula_line%% *}"
+            info "LAN: ula_prefix ${_ula_line}"
+        fi
         uci_set "dhcp.$LAN.dhcpv6" 'server'
-        uci_set "dhcp.$LAN.ra_slaac" '0'
+        uci_set "dhcp.$LAN.ra_slaac" '1'
+        uci_del "dhcp.$LAN.ra_flags"
         uci_add_list "dhcp.$LAN.ra_flags" 'managed-config'
         uci_add_list "dhcp.$LAN.ra_flags" 'other-config'
-        info "DHCPv6 server, RA=server with M/O flags, A flag off"
+        info "LAN: RA/DHCPv6 back to stock (SLAAC + DHCPv6 server, M/O flags)"
+    fi
+
+    # The only RA settings the overlay needs: announce, and announce a default
+    # route even without a native uplink, so replies to Yggdrasil sources have
+    # a route on an IPv4-only site. Everything else is the operator's.
+    uci_set "dhcp.$LAN.ra" 'server'
+    uci_set "dhcp.$LAN.ra_default" '2'
+
+    if [ -n "$HOSTS" ]; then
         report_implicit_hosts
         apply_hosts
-    else
-        uci_set "dhcp.$LAN.dhcpv6" 'disabled'
-        uci_set "dhcp.$LAN.ra_slaac" '1'
-        uci_add_list "dhcp.$LAN.ra_flags" 'none'
-        info "DHCPv6 disabled, RA=server, SLAAC-only"
     fi
 
     if [ "$DRY_RUN" -eq 0 ]; then
@@ -1394,8 +1625,7 @@ stage_lan() {
         /etc/init.d/network reload >/dev/null 2>&1 || die "network reload failed"
         # reload (SIGHUP) re-reads the configuration but keeps the bound DHCPv6
         # leases; a restart would drop every lease from the router's record
-        # until the clients renew, which in managed mode empties the status
-        # page for up to T1. Fall back to a restart only if reload is refused.
+        # until the clients renew. Fall back to a restart only if reload is refused.
         /etc/init.d/odhcpd reload >/dev/null 2>&1 \
             || /etc/init.d/odhcpd restart >/dev/null 2>&1 \
             || die "odhcpd reload failed"
@@ -1404,11 +1634,52 @@ stage_lan() {
         if [ -n "$HOSTS" ] && [ "$DO_DNS" -eq 0 ]; then
             /etc/init.d/dnsmasq restart >/dev/null 2>&1 || die "dnsmasq restart failed"
         fi
-        ok "LAN configuration applied"
+        _i=0
+        until lan_has_ygg_prefix; do
+            _i=$((_i + 2))
+            [ "$_i" -le 20 ] || break
+            sleep 2
+        done
+        if lan_has_ygg_prefix; then
+            ok "LAN configuration applied — $YGG_PREFIX is assigned to '$LAN'"
+            # Recorded only now, after the migrated LAN proved to work; a
+            # rollback or the guard removes it again (MARKER_WRITTEN).
+            if [ "$LAN_PLAN" = 'migrate' ]; then
+                mkdir -p "${MIGRATED_MARKER%/*}" || die "cannot create ${MIGRATED_MARKER%/*}"
+                {
+                    printf 'date=%s\n' "$(date +%Y-%m-%dT%H:%M:%S)"
+                    printf 'deployer=%s\n' "$VERSION"
+                    printf 'backup=%s\n' "$BACKUP_DIR"
+                    printf 'ip6class=%s\n' "$CUR_IP6CLASS"
+                    printf 'dhcpv6=%s\nra_slaac=%s\nra_flags=%s\n' "$CUR_DHCPV6" "$CUR_RA_SLAAC" "${CUR_RA_FLAGS% }"
+                } > "$MIGRATED_MARKER" || die "cannot write $MIGRATED_MARKER"
+                MARKER_WRITTEN=1
+                [ -n "$BACKUP_DIR" ] && : > "$BACKUP_DIR/marker.created"
+                info "migration recorded in $MIGRATED_MARKER"
+            fi
+        else
+            err "netifd did not assign $YGG_PREFIX to '$LAN' (ifstatus $LAN: ipv6-prefix-assignment)"
+            err "  interfaces requesting a prefix: $(uci show network 2>/dev/null | sed -n 's/^network\.\([^.]*\)\.ip6assign=.*/\1/p' | tr '\n' ' ')"
+            die "the routed /64 does not reach the LAN"
+        fi
     fi
 }
 
 # ===================================================== stage 5: firewall policy
+
+# The firewall zone the LAN network belongs to. The network name and the zone
+# name coincide on stock ('lan'), but a zone is a list of networks and may be
+# called anything; a rule on a zone that does not exist matches nothing.
+lan_zone() {
+    _lz="$(uci show firewall 2>/dev/null | sed -n "s/^firewall\.\([^.]*\)\.network=.*['\" ]${LAN}['\" ].*/\1/p" | head -n 1)"
+    [ -n "$_lz" ] && _lz="$(uci -q get "firewall.$_lz.name")"
+    if [ -n "$_lz" ]; then
+        printf '%s\n' "$_lz"
+    else
+        warn "no firewall zone lists network '$LAN'; assuming a zone named '$LAN'"
+        printf '%s\n' "$LAN"
+    fi
+}
 
 fw_rule_trusted() {
     # $1 = section name, $2 = human name, and the caller pre-sets the specifics
@@ -1430,6 +1701,7 @@ stage_firewall() {
     step "Stage 5 — firewall zone and trusted rules"
 
     CHANGED_FIREWALL=1
+    LAN_ZONE="$(lan_zone)"
 
     uci_set 'firewall.ygg' 'zone'
     uci_set 'firewall.ygg.name' 'ygg'
@@ -1442,6 +1714,26 @@ stage_firewall() {
     uci_del 'firewall.ygg.masq6'
     ok "zone 'ygg': input REJECT / output ACCEPT / forward DROP, no NAT66"
 
+    # LAN hosts may open connections into Yggdrasil through the router, the way
+    # they do towards the WAN: one stateful ACCEPT for IPv6 to 200::/7, not a
+    # zone-wide forwarding, so the tunnel carrying anything else some day would
+    # not be forwarded by accident. Nothing inbound changes: the ygg zone still
+    # rejects what the trusted rules do not name.
+    if [ "$DO_LAN_FORWARD" -eq 1 ]; then
+        uci_set 'firewall.ygg_lan_out' 'rule'
+        uci_set 'firewall.ygg_lan_out.name' 'LAN-to-Yggdrasil'
+        uci_set 'firewall.ygg_lan_out.src' "$LAN_ZONE"
+        uci_set 'firewall.ygg_lan_out.dest' 'ygg'
+        uci_set 'firewall.ygg_lan_out.family' 'ipv6'
+        uci_set 'firewall.ygg_lan_out.proto' 'all'
+        uci_set 'firewall.ygg_lan_out.dest_ip' '200::/7'
+        uci_set 'firewall.ygg_lan_out.target' 'ACCEPT'
+        ok "LAN hosts may initiate connections into Yggdrasil (IPv6 to 200::/7)"
+    else
+        uci_del 'firewall.ygg_lan_out'
+        info "LAN-to-Yggdrasil rule removed (--no-lan-forward): LAN hosts only answer trusted nodes"
+    fi
+
     if [ -z "$TRUSTED" ]; then
         warn "no trusted /128 given — removing any previously created allow rules"
         uci_del 'firewall.ygg_trusted_lan'
@@ -1450,7 +1742,7 @@ stage_firewall() {
         uci_set 'firewall.ygg_trusted_lan' 'rule'
         uci_set 'firewall.ygg_trusted_lan.name' 'YGG-Trusted-to-LAN'
         uci_set 'firewall.ygg_trusted_lan.src' 'ygg'
-        uci_set 'firewall.ygg_trusted_lan.dest' "$LAN"
+        uci_set 'firewall.ygg_trusted_lan.dest' "$LAN_ZONE"
         uci_set 'firewall.ygg_trusted_lan.family' 'ipv6'
         uci_set 'firewall.ygg_trusted_lan.proto' 'all'
         uci_set 'firewall.ygg_trusted_lan.target' 'ACCEPT'
@@ -1632,14 +1924,23 @@ ${_h%%=*}.${DNS_DOMAIN} ${_h#*=}"
 # attached to one. uclient-fetch has no header option and is skipped in that
 # branch rather than silently dropping the header.
 status_fetch() { # $1 = HTTPS URL, $2 = destination, $3 = optional request header
-    if [ -n "${3:-}" ]; then
-        wget -q --header="$3" -O "$2" "$1" 2>/dev/null \
-            || curl -fsSL -H "$3" -o "$2" "$1" 2>/dev/null
-    else
-        wget -q -O "$2" "$1" 2>/dev/null \
-            || uclient-fetch -q -O "$2" "$1" 2>/dev/null \
-            || curl -fsSL -o "$2" "$1" 2>/dev/null
-    fi
+    # Three attempts: on a mobile uplink a single failed TLS handshake to
+    # GitHub is common, and skipping the status module over it is worse than
+    # a few seconds' wait.
+    sf_try=0
+    while :; do
+        if [ -n "${3:-}" ]; then
+            wget -q --header="$3" -O "$2" "$1" 2>/dev/null \
+                || curl -fsSL -H "$3" -o "$2" "$1" 2>/dev/null
+        else
+            wget -q -O "$2" "$1" 2>/dev/null \
+                || uclient-fetch -q -O "$2" "$1" 2>/dev/null \
+                || curl -fsSL -o "$2" "$1" 2>/dev/null
+        fi && return 0
+        sf_try=$((sf_try + 1))
+        [ "$sf_try" -lt 3 ] || return 1
+        sleep 2
+    done
 }
 
 status_valid_version() { # $1 = candidate version label
@@ -1819,26 +2120,28 @@ stage_verify() {
     check 'node address'       "$NODE_ADDR" "$(get_node_addr)"
 
     if [ "$DO_LAN" -eq 1 ]; then
-        check 'LAN ip6assign'  '64'       "$(uci -q get "network.$LAN.ip6assign")"
-        check 'LAN ip6class'   "${YGG_CLASS:-$IFACE}" "$(uci -q get "network.$LAN.ip6class")"
+        # What this run wrote or requires: asserted.
+        _ia="$(uci -q get "network.$LAN.ip6assign")"
+        check 'LAN ip6assign set'  'yes'      "$([ -n "$_ia" ] && echo yes || echo no)"
+        check 'LAN carries Ygg /64' 'yes'     "$(lan_has_ygg_prefix && echo yes || echo no)"
+        _cls="$(uci -q get "network.$LAN.ip6class")"
+        case " $_cls " in
+            '  '|*" ${YGG_CLASS:-$IFACE} "*) _cls_ok='admits' ;;
+            *) _cls_ok="excludes ($_cls)" ;;
+        esac
+        check 'LAN ip6class'   'admits'   "$_cls_ok"
         check 'RA'             'server'   "$(uci -q get "dhcp.$LAN.ra")"
         check 'RA default'     '2'        "$(uci -q get "dhcp.$LAN.ra_default")"
-        check 'RA preference'  'medium'   "$(uci -q get "dhcp.$LAN.ra_preference")"
-        # a UCI list comes back space-joined; compare as a set, not as one string
-        _raf="$(uci -q get "dhcp.$LAN.ra_flags" | tr ' ' '\n' | sort | tr '\n' ' ')"
-        if [ "$LAN_MODE" = 'dhcpv6' ]; then
-            check 'DHCPv6'         'server'   "$(uci -q get "dhcp.$LAN.dhcpv6")"
-            check 'RA SLAAC'       '0'        "$(uci -q get "dhcp.$LAN.ra_slaac")"
-            check 'RA flags'       'managed-config other-config ' "$_raf"
-            check 'odhcpd running' 'yes' "$(pidof odhcpd >/dev/null 2>&1 && echo yes || echo no)"
-            check 'odhcpd enabled' 'yes' "$(/etc/init.d/odhcpd enabled >/dev/null 2>&1 && echo yes || echo no)"
-        else
-            check 'DHCPv6'         'disabled' "$(uci -q get "dhcp.$LAN.dhcpv6")"
-            check 'RA SLAAC'       '1'        "$(uci -q get "dhcp.$LAN.ra_slaac")"
-            check 'RA flags'       'none '    "$_raf"
+        check 'odhcpd running' 'yes' "$(pidof odhcpd >/dev/null 2>&1 && echo yes || echo no)"
+        check 'odhcpd enabled' 'yes' "$(/etc/init.d/odhcpd enabled >/dev/null 2>&1 && echo yes || echo no)"
+        if [ "$LAN_PLAN" = 'migrate' ]; then
+            check 'DHCPv6 (migrated)'  'server' "$(uci -q get "dhcp.$LAN.dhcpv6")"
+            check 'RA SLAAC (migrated)' '1'     "$(uci -q get "dhcp.$LAN.ra_slaac")"
+            check 'ULA present (migrated)' 'yes' "$([ -n "$(uci -q get network.globals.ula_prefix)" ] && echo yes || echo no)"
+            check 'migration recorded' 'yes'  "$([ -f "$MIGRATED_MARKER" ] && echo yes || echo no)"
         fi
-        check 'ula_prefix removed' ''     "$(uci -q get network.globals.ula_prefix)"
         if [ -n "$HOSTS" ]; then
+            check 'DHCPv6 server (for --host)' 'server' "$(uci -q get "dhcp.$LAN.dhcpv6")"
             _eh="$(existing_hosts)"
             while IFS=' ' read -r _hn _hkt _hk _hid; do
                 [ -n "$_hn" ] || continue
@@ -1855,16 +2158,20 @@ EH_EOF
 $HOSTS
 HOSTS_EOF
         fi
-        if [ "$LAN_MODE" = 'dhcpv6' ]; then
-            # A lease proves the path end to end, but odhcpd forgets leases on
-            # restart and a client asks again only on renew/reconnect, so an
-            # empty list right after a run is information, not a failed invariant.
-            _leases="$(ubus call dhcp ipv6leases 2>/dev/null | jsonfilter -e '@.device[*].leases[*]["ipv6-addr"][*].address' 2>/dev/null | tr '\n' ' ')"
-            if [ -n "$_leases" ]; then
-                ok "bound DHCPv6 leases: $_leases"
-            else
-                warn "no DHCPv6 lease bound yet — a client obtains one when it next asks (reconnect, renew, reboot)"
-            fi
+        # The operator's LAN settings: reported, never asserted.
+        printf '\nKept as found (not managed by the deployer):\n' >&2
+        info "ip6assign=${_ia:-<unset>} ip6class='${_cls:-<none>}' ula_prefix='$(uci -q get network.globals.ula_prefix)'"
+        info "dhcpv6='$(uci -q get "dhcp.$LAN.dhcpv6")' ra_slaac='$(uci -q get "dhcp.$LAN.ra_slaac")' ra_flags='$(uci -q get "dhcp.$LAN.ra_flags")'"
+        _lan_pfx="$(ifstatus "$LAN" 2>/dev/null | jsonfilter -e '@["ipv6-prefix-assignment"][*].address' 2>/dev/null | tr '\n' ' ')"
+        info "prefixes on '$LAN': ${_lan_pfx:-<none>}"
+        # A lease proves the DHCPv6 path end to end, but odhcpd forgets leases
+        # on restart and a client asks again only on renew/reconnect, so an
+        # empty list right after a run is information, not a failed invariant.
+        _leases="$(ubus call dhcp ipv6leases 2>/dev/null | jsonfilter -e '@.device[*].leases[*]["ipv6-addr"][*].address' 2>/dev/null | grep -i "^${YGG_PREFIX%%::*}" | tr '\n' ' ')"
+        if [ -n "$_leases" ]; then
+            ok "bound DHCPv6 leases in the routed /64: $_leases"
+        else
+            info "no DHCPv6 lease in the routed /64 yet — clients take one on renew, reconnect or reboot"
         fi
     fi
 
@@ -1873,6 +2180,13 @@ HOSTS_EOF
         check 'ygg zone output'  'ACCEPT' "$(uci -q get firewall.ygg.output)"
         check 'ygg zone forward' 'DROP'   "$(uci -q get firewall.ygg.forward)"
         check 'no NAT66'         ''       "$(uci -q get firewall.ygg.masq6)"
+        if [ "$DO_LAN_FORWARD" -eq 1 ]; then
+            check 'LAN-to-Yggdrasil rule' '200::/7' "$(uci -q get firewall.ygg_lan_out.dest_ip)"
+            # fw4 drops a rule whose zone does not exist; the ruleset is the proof
+            check 'rule in the ruleset' 'yes' "$(nft list ruleset 2>/dev/null | grep -q 'LAN-to-Yggdrasil' && echo yes || echo no)"
+        else
+            check 'LAN-to-Yggdrasil rule' ''        "$(uci -q get firewall.ygg_lan_out)"
+        fi
     fi
 
     if [ "$DO_DNS" -eq 1 ]; then
@@ -1919,8 +2233,10 @@ HOSTS_EOF
         printf '%s%s%s\n\n' "$C_ERR" "$RULE" "$C_RST" >&2
         err "review the [FAIL] lines above before relying on this router"
         err "configuration backup is at ${BACKUP_DIR:-<none>}"
+        [ -n "$GUARD_PID" ] && warn "the guard stays armed: the pre-run configuration returns in ${GUARD_MIN} min unless you run: mkdir $BACKUP_DIR/guard.state"
         return 0
     fi
+    cancel_guard
 
     printf '\n%s%s%s\n' "$C_OK" "$RULE" "$C_RST" >&2
     printf '%s%s SUCCESS — Yggdrasil is up and this router is reachable%s\n' \
@@ -1931,11 +2247,7 @@ HOSTS_EOF
     printf '      %s%s%s%s\n\n' "$C_OK" "$C_BLD" "$NODE_ADDR" "$C_RST" >&2
 
     printf '  Routed prefix advertised to the LAN\n' >&2
-    if [ "$DO_LAN" -eq 1 ] && [ "$LAN_MODE" = 'dhcpv6' ]; then
-        printf '      %s  (addresses assigned by DHCPv6; no SLAAC)\n\n' "$YGG_PREFIX" >&2
-    else
-        printf '      %s\n\n' "$YGG_PREFIX" >&2
-    fi
+    printf '      %s  (beside the LAN'"'"'s own prefixes; SLAAC and DHCPv6 as configured)\n\n' "$YGG_PREFIX" >&2
     if [ -n "$HOSTS" ]; then
         printf '  Reserved LAN addresses\n' >&2
         while IFS=' ' read -r _hn _hkt _hk _hid; do
