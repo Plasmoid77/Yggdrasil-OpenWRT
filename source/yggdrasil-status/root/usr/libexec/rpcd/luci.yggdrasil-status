@@ -302,14 +302,16 @@ find_active_lease_by_mac() {
 # IPv6-only host): it has a row, so it must be pinnable. Needs the lease list
 # collected (collect_host_duids + collect_dhcpv6_leases).
 find_active_lease6_by_mac() {
-	local fal6_wanted fal6_mac fal6_addr fal6_name
+	local fal6_wanted fal6_mac fal6_addr fal6_name fal6_how
 
 	LEASE_MATCH_IPV4=''
 	LEASE_MATCH_NAME=''
 	fal6_wanted="$(normalize_mac "$1")"
 	[ -n "${DHCPV6_LEASES:-}" ] || return 1
 
-	while IFS=' ' read -r fal6_mac fal6_addr fal6_name; do
+	# fal6_how (the attribution) is not needed here
+	# shellcheck disable=SC2034
+	while IFS=' ' read -r fal6_mac fal6_addr fal6_name fal6_how; do
 		[ "$fal6_mac" = "$fal6_wanted" ] || continue
 		[ -n "$fal6_addr" ] || continue
 		[ "$fal6_name" != '-' ] && LEASE_MATCH_NAME="$fal6_name"
@@ -451,17 +453,68 @@ host_mac_for_duid() {
 	'
 }
 
-# Bound DHCPv6 leases from odhcpd, one "<mac> <address> <hostname|->" line each,
-# limited to the routed prefix. The MAC is the one a config host ties to the lease's DUID
-# (the operator's word: a DUID-UUID or DUID-EN client has no MAC of its own in
-# the DUID), otherwise the one inside the DUID the way odhcpd itself matches a
-# config host by MAC: a 14-byte DUID-LLT (type 1) carries it in the last six
-# bytes, a 10-byte DUID-LL (type 3) in the last six as well. A lease with any
-# other DUID and no config host attributes to nothing here. odhcpd is the
+# The MAC a bound DHCPv6 lease belongs to, printed as "<mac> <how>", or
+# nothing. Three sources, in order of authority:
+#   host     - a config host ties this DUID (with IAID) to a MAC: the
+#              operator's word, the only way a DUID-UUID/EN client is named
+#              persistently;
+#   duid     - the MAC inside a 14-byte DUID-LLT (type 1) or 10-byte DUID-LL
+#              (type 3), the way odhcpd itself matches a config host by MAC;
+#              taken only with hardware type 1 (Ethernet) and a non-zero
+#              MAC - an all-zero one is a firmware defect (seen on a BMC),
+#              not an identity;
+#   neighbor - the LAN neighbour table: every address of the lease, in any
+#              prefix, that a neighbour entry attributes to one and the same
+#              MAC. Two different MACs, or none, attribute nothing.
+# The third is an observation of the moment, not an identity: it names a
+# row, authorises nothing, is never stored and cannot keep a row alive. One
+# resolver for the table and for Pin, so both name the same device.
+# $1 = duid (lower-case hex), $2 = iaid (hex, may be empty), $3.. = addresses
+mac_for_lease() {
+	local mfl_duid="$1" mfl_iaid="$2" mfl_mac mfl_hw mfl_seen mfl_addr mfl_n
+
+	shift 2
+	mfl_mac="$(host_mac_for_duid "$mfl_duid" "$mfl_iaid")"
+	if [ -n "$mfl_mac" ]; then
+		printf '%s host\n' "$mfl_mac"
+		return 0
+	fi
+	case "${#mfl_duid}:$mfl_duid" in
+		28:0001*|20:0003*)
+			mfl_hw="$(printf '%s' "$mfl_duid" | cut -c5-8)"
+			mfl_mac="${mfl_duid#"${mfl_duid%????????????}"}"
+			case "$mfl_hw:$mfl_mac" in
+				0001:000000000000) mfl_mac='' ;;
+				0001:*) mfl_mac="$(printf '%s' "$mfl_mac" | sed 's/\(..\)/\1:/g; s/:$//')" ;;
+				*) mfl_mac='' ;;
+			esac
+			if [ -n "$mfl_mac" ]; then
+				printf '%s duid\n' "$mfl_mac"
+				return 0
+			fi ;;
+	esac
+	mfl_seen=''
+	for mfl_addr in "$@"; do
+		[ -n "$mfl_addr" ] || continue
+		mfl_n="$(mac_for_neighbor "$(lower "$mfl_addr")")"
+		[ -n "$mfl_n" ] || continue
+		case "$mfl_seen" in
+			'') mfl_seen="$mfl_n" ;;
+			"$mfl_n") ;;
+			*) return 0 ;;
+		esac
+	done
+	[ -n "$mfl_seen" ] && printf '%s neighbor\n' "$mfl_seen"
+	return 0
+}
+
+# Bound DHCPv6 leases from odhcpd, one "<mac> <address> <hostname|-> <how>"
+# line each, limited to the routed prefix; the MAC and its provenance come
+# from mac_for_lease, a lease it cannot attribute is left out. odhcpd is the
 # router's own record of what it handed out, so a lease outranks every
 # observed address.
 collect_dhcpv6_leases() {
-	local cdl_lease cdl_duid cdl_iaid cdl_mac cdl_addr cdl_name
+	local cdl_lease cdl_duid cdl_iaid cdl_mac cdl_how cdl_addr cdl_addrs cdl_name
 
 	DHCPV6_LEASES=''
 	[ -n "$LAN_YGG_PREFIX" ] || return 0
@@ -480,24 +533,18 @@ collect_dhcpv6_leases() {
 		esac
 		cdl_name="$(printf '%s' "$cdl_lease" | jsonfilter -e '@.hostname' 2>/dev/null | tr -d ' ')"
 		valid_hostname "$cdl_name" || cdl_name='-'
-		cdl_mac="$(host_mac_for_duid "$cdl_duid" "$cdl_iaid")"
-		if [ -z "$cdl_mac" ]; then
-			case "${#cdl_duid}:$cdl_duid" in
-				28:0001*|20:0003*) cdl_mac="${cdl_duid#"${cdl_duid%????????????}"}" ;;
-				*) continue ;;
+		cdl_addrs="$(printf '%s' "$cdl_lease" | jsonfilter -e '@["ipv6-addr"][*].address' 2>/dev/null | tr '\n' ' ')"
+		# shellcheck disable=SC2086
+		cdl_mac="$(mac_for_lease "$cdl_duid" "$cdl_iaid" $cdl_addrs)"
+		[ -n "$cdl_mac" ] || continue
+		cdl_how="${cdl_mac#* }"
+		cdl_mac="${cdl_mac%% *}"
+		for cdl_addr in $cdl_addrs; do
+			cdl_addr="$(lower "$cdl_addr")"
+			case "$cdl_addr" in
+				"$LAN_YGG_PREFIX"*) printf '%s %s %s %s\n' "$cdl_mac" "$cdl_addr" "$cdl_name" "$cdl_how" ;;
 			esac
-			# an all-zero link-layer address is a firmware bug, not an identity
-			[ "$cdl_mac" != '000000000000' ] || continue
-			cdl_mac="$(printf '%s' "$cdl_mac" | sed 's/\(..\)/\1:/g; s/:$//')"
-		fi
-		printf '%s' "$cdl_lease" | jsonfilter -e '@["ipv6-addr"][*].address' 2>/dev/null |
-			while IFS= read -r cdl_addr || [ -n "$cdl_addr" ]; do
-				[ -n "$cdl_addr" ] || continue
-				cdl_addr="$(lower "$cdl_addr")"
-				case "$cdl_addr" in
-					"$LAN_YGG_PREFIX"*) printf '%s %s %s\n' "$cdl_mac" "$cdl_addr" "$cdl_name" ;;
-				esac
-			done
+		done
 	done <<EOF
 $(ubus call dhcp ipv6leases 2>/dev/null | jsonfilter -e '@.device[*].leases[*]' 2>/dev/null)
 EOF
@@ -510,6 +557,14 @@ dhcpv6_lease_for_mac() {
 	dlm_wanted="$(normalize_mac "$1")"
 	[ -n "${DHCPV6_LEASES:-}" ] || return 0
 	printf '%s\n' "${DHCPV6_LEASES:-}" | awk -v wanted="$dlm_wanted" '$1 == wanted { print $2 }'
+}
+
+# How the lease of one MAC was attributed (host, duid or neighbor).
+dhcpv6_lease_match_for_mac() {
+	local dlmm_wanted
+	dlmm_wanted="$(normalize_mac "$1")"
+	[ -n "${DHCPV6_LEASES:-}" ] || return 0
+	printf '%s\n' "${DHCPV6_LEASES:-}" | awk -v wanted="$dlmm_wanted" '$1 == wanted { print $4; exit }'
 }
 
 # A REACHABLE neighbor entry is a recent kernel-confirmed success, so avoid
@@ -1170,6 +1225,7 @@ emit_client() {
 	json_close_array
 	json_add_int ipv6_live "$ec_ipv6_live"
 	json_add_string ipv6_source "${KNOWN_IPV6_SOURCE:-}"
+	json_add_string ipv6_lease_match "$( [ -n "$ec_lease" ] && dhcpv6_lease_match_for_mac "$ec_mac" )"
 	json_add_int reserved_ipv6 "$(( ec_reserved_ipv6 | ec_implicit6 ))"
 	json_add_int dhcpv6_served "${DHCPV6_SERVED:-0}"
 	json_add_string ygg_node_ipv6 "$ec_node_primary"
@@ -1260,14 +1316,14 @@ emit_dynamic_leases() {
 # invisible until it takes a DHCPv4 lease or is reserved. The row lives as long
 # as odhcpd lists the lease as bound.
 emit_dynamic_leases6() {
-	local el_mac el_addr el_name el_persistent el_static_ipv4 el_managed el_shared el_complex el_ambiguous el_reserved6
+	local el_mac el_addr el_name el_how el_persistent el_static_ipv4 el_managed el_shared el_complex el_ambiguous el_reserved6
 
 	[ -n "${DHCPV6_LEASES:-}" ] || return 0
 
-	# el_addr is unused here: the address reaches the row through
-	# dhcpv6_lease_for_mac inside emit_client, like every other lease.
+	# el_addr and el_how are unused here: the address and its provenance reach
+	# the row through dhcpv6_lease_for_mac inside emit_client, like every lease.
 	# shellcheck disable=SC2034
-	while IFS=' ' read -r el_mac el_addr el_name; do
+	while IFS=' ' read -r el_mac el_addr el_name el_how; do
 		[ -n "$el_mac" ] || continue
 		mac_was_emitted "$el_mac" && continue
 
@@ -1543,35 +1599,37 @@ collect_taken_hostid() {
 	TAKEN_HOSTIDS="$(printf '%s\n%s %s' "$TAKEN_HOSTIDS" "$cth_id" "$cth_section" | sed '/^$/d')"
 }
 
-# The DUID (with IAID, as odhcpd's config wants it) behind a bound lease whose
-# address the neighbour table attributes to this MAC. The device answering
-# neighbour solicitations for a leased address is the device holding that
-# lease, so this ties a DUID-UUID client to its MAC without guessing.
+# The "DUID[%IAID]" (as odhcpd's config wants it) of the bound lease that
+# mac_for_lease attributes to this MAC - the same resolver the table uses, so
+# a pin records the lease the row shows. Read from odhcpd at the moment of
+# the pin. The caller collects HOST_DUID_MACS first.
 lease_duid_for_mac() {
-	local ldm_wanted ldm_lease ldm_addr ldm_neigh_mac ldm_duid ldm_iaid
+	local ldm_wanted ldm_lease ldm_addrs ldm_mac ldm_duid ldm_iaid ldm_iaid_hex
 	ldm_wanted="$(normalize_mac "$1")"
 
-	# heredoc-fed loops, not pipelines: return must leave the function
+	# heredoc-fed loop, not a pipeline: return must leave the function
 	while IFS= read -r ldm_lease; do
 		[ -n "$ldm_lease" ] || continue
 		printf '%s' "$ldm_lease" | jsonfilter -e '@.flags[*]' 2>/dev/null | grep -qx 'bound' || continue
-		while IFS= read -r ldm_addr || [ -n "$ldm_addr" ]; do
-			[ -n "$ldm_addr" ] || continue
-			ldm_neigh_mac="$(mac_for_neighbor "$(lower "$ldm_addr")")"
-			[ "$ldm_neigh_mac" = "$ldm_wanted" ] || continue
-			ldm_duid="$(printf '%s' "$ldm_lease" | jsonfilter -e '@.duid' 2>/dev/null | tr 'A-F' 'a-f')"
-			ldm_iaid="$(printf '%s' "$ldm_lease" | jsonfilter -e '@.iaid' 2>/dev/null)"
-			case "$ldm_iaid" in
-				''|*[!0-9-]*) printf '%s\n' "$ldm_duid" ;;
-				*) printf '%s%%%x\n' "$ldm_duid" $(( ldm_iaid & 0xffffffff )) ;;
-			esac
-			return 0
-		done <<ADDR_EOF
-$(printf '%s' "$ldm_lease" | jsonfilter -e '@["ipv6-addr"][*].address' 2>/dev/null)
-ADDR_EOF
-	done <<EOF
+		ldm_duid="$(printf '%s' "$ldm_lease" | jsonfilter -e '@.duid' 2>/dev/null | tr 'A-F' 'a-f')"
+		ldm_iaid="$(printf '%s' "$ldm_lease" | jsonfilter -e '@.iaid' 2>/dev/null)"
+		case "$ldm_iaid" in
+			''|*[!0-9-]*) ldm_iaid_hex='' ;;
+			*) ldm_iaid_hex="$(printf '%x' $(( ldm_iaid & 0xffffffff )))" ;;
+		esac
+		ldm_addrs="$(printf '%s' "$ldm_lease" | jsonfilter -e '@["ipv6-addr"][*].address' 2>/dev/null | tr '\n' ' ')"
+		# shellcheck disable=SC2086
+		ldm_mac="$(mac_for_lease "$ldm_duid" "$ldm_iaid_hex" $ldm_addrs)"
+		[ "${ldm_mac%% *}" = "$ldm_wanted" ] || continue
+		if [ -n "$ldm_iaid_hex" ]; then
+			printf '%s%%%s\n' "$ldm_duid" "$ldm_iaid_hex"
+		else
+			printf '%s\n' "$ldm_duid"
+		fi
+		return 0
+	done <<LEASES_EOF
 $(ubus call dhcp ipv6leases 2>/dev/null | jsonfilter -e '@.device[*].leases[*]' 2>/dev/null)
-EOF
+LEASES_EOF
 	return 0
 }
 
@@ -1602,6 +1660,9 @@ rpc_pin() {
 	}
 
 	NOW="$(date +%s)"
+	# the lease resolver reads the LAN neighbour table, so the device first
+	LAN_DEV="$(uci -q get network.${LAN_NET}.device)"
+	[ -n "$LAN_DEV" ] || LAN_DEV='br-lan'
 	config_load dhcp
 
 	if find_host_by_mac "$rp_mac"; then
@@ -1661,9 +1722,8 @@ rpc_pin() {
 		fi
 		# Tie the DUID to the pin when the device already holds a lease, so a
 		# DUID-UUID client (NetworkManager) matches; a DUID-LLT/LL client is
-		# matched by MAC anyway.
-		LAN_DEV="$(uci -q get network.${LAN_NET}.device)"
-		[ -n "$LAN_DEV" ] || LAN_DEV='br-lan'
+		# matched by MAC anyway. Same resolver as the table.
+		collect_host_duids
 		rp_duid="$(lease_duid_for_mac "$rp_mac")"
 	fi
 

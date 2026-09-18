@@ -26,7 +26,7 @@ for fn in lower normalize_mac valid_mac valid_hostname valid_ipv4 first_ipv4 \
     merge_node_cache write_address_memory save_address_memory ygg_node_is_live \
     recall_lan_addresses remember_lan_addresses \
     discover_lan_addresses confirm_discovered_addresses \
-    collect_host_duids collect_host_duid host_mac_for_duid collect_dhcpv6_leases dhcpv6_lease_for_mac \
+    collect_host_duids collect_host_duid host_mac_for_duid mac_for_lease collect_dhcpv6_leases dhcpv6_lease_for_mac dhcpv6_lease_match_for_mac \
     norm_hostid valid_hostid collect_taken_hostids collect_taken_hostid lease_duid_for_mac emit_dynamic_leases6 \
     iid_to_addr find_active_lease6_by_mac \
     emit_client rpc_pin rpc_unpin; do load "$fn"; done
@@ -386,12 +386,57 @@ nomac|00030001000000000000|'
     eq '300:1111:2222:3333::1:0' "$(iid_to_addr '300:1111:2222:3333:' 10000)"
     eq '300:1111:2222:3333:abcd:ef01:2345:6789' "$(iid_to_addr '300:1111:2222:3333:' abcdef0123456789)"
     eq '300:1111:2222:3333:1000::' "$(iid_to_addr '300:1111:2222:3333:' 1000000000000000)"
+    # no neighbour table here: the DUID-UUID lease with no config host stays out
+    LAN_DEV='br-lan'
+    ip() { :; }
     collect_dhcpv6_leases
     eq "$(printf '%s\n' \
-        'aa:bb:cc:dd:ee:ff 300:1111:2222:3333::10 zeonux' \
-        '11:22:33:44:55:66 300:1111:2222:3333::20 -' \
-        '3c:e1:a1:41:52:d0 300:1111:2222:3333::20 -' \
-        '14:4f:8a:8d:19:77 300:1111:2222:3333::21 -')" "$DHCPV6_LEASES"
+        'aa:bb:cc:dd:ee:ff 300:1111:2222:3333::10 zeonux duid' \
+        '11:22:33:44:55:66 300:1111:2222:3333::20 - duid' \
+        '3c:e1:a1:41:52:d0 300:1111:2222:3333::20 - host' \
+        '14:4f:8a:8d:19:77 300:1111:2222:3333::21 - host')" "$DHCPV6_LEASES"
+    eq duid "$(dhcpv6_lease_match_for_mac aa:bb:cc:dd:ee:ff)"
+    eq host "$(dhcpv6_lease_match_for_mac 3c:e1:a1:41:52:d0)"
+    # the neighbour table names the DUID-UUID lease when one device answers
+    # for its addresses - in any prefix - and nobody when two do
+    ip() {
+        case "$*" in
+            *'300:1111:2222:3333::40 '*) printf '%s\n' '300:1111:2222:3333::40 dev br-lan lladdr 66:77:88:99:aa:bb STALE' ;;
+        esac
+    }
+    collect_dhcpv6_leases
+    printf '%s\n' "$DHCPV6_LEASES" | grep -qxF '66:77:88:99:aa:bb 300:1111:2222:3333::40 - neighbor' \
+        || fail "DUID-UUID lease not attributed through the neighbour table: $DHCPV6_LEASES"
+    LEASE_UUID='{"duid":"00040001000000000000000000000000","flags":["bound"],"ipv6-addr":[{"address":"2001:db8::40"},{"address":"300:1111:2222:3333::40"}]}'
+    ip() {
+        case "$*" in
+            *'2001:db8::40 '*) printf '%s\n' '2001:db8::40 dev br-lan lladdr 66:77:88:99:aa:bb REACHABLE' ;;
+        esac
+    }
+    collect_dhcpv6_leases
+    printf '%s\n' "$DHCPV6_LEASES" | grep -qxF '66:77:88:99:aa:bb 300:1111:2222:3333::40 - neighbor' \
+        || fail "a neighbour entry for the native address did not attribute the routed one: $DHCPV6_LEASES"
+    ip() {
+        case "$*" in
+            *'2001:db8::40 '*) printf '%s\n' '2001:db8::40 dev br-lan lladdr 66:77:88:99:aa:bb REACHABLE' ;;
+            *'300:1111:2222:3333::40 '*) printf '%s\n' '300:1111:2222:3333::40 dev br-lan lladdr 00:de:ad:be:ef:00 STALE' ;;
+        esac
+    }
+    collect_dhcpv6_leases
+    printf '%s\n' "$DHCPV6_LEASES" | grep -q '::40 ' && fail "a lease answered by two MACs was attributed: $DHCPV6_LEASES"
+    # the MAC inside a DUID-LL/LLT is trusted only with hardware type 1 and a
+    # non-zero MAC; otherwise the neighbour table decides
+    eq '11:22:33:44:55:66 duid' "$(mac_for_lease 00030001112233445566 '')"
+    eq '' "$(mac_for_lease 00030006112233445566 '')"
+    eq '' "$(mac_for_lease 00030001000000000000 '')"
+    eq '' "$(mac_for_lease 0001000612345678112233445566 '')"
+    ip() { printf '%s\n' '300:1111:2222:3333::50 dev br-lan lladdr 0a:0b:0c:0d:0e:0f REACHABLE'; }
+    eq '0a:0b:0c:0d:0e:0f neighbor' "$(mac_for_lease 00030006112233445566 '' 300:1111:2222:3333::50)"
+    # a config host outranks both
+    eq '3c:e1:a1:41:52:d0 host' "$(mac_for_lease 0004ecbcbfb80ef2996849bca6b0d0a6ffce 206de1ca 300:1111:2222:3333::50)"
+    LEASE_UUID='{"duid":"00040001000000000000000000000000","flags":["bound"],"ipv6-addr":[{"address":"300:1111:2222:3333::40"}]}'
+    ip() { :; }
+    collect_dhcpv6_leases
     # an IPv6-only client (no DHCPv4 lease) gets a row from its bound lease,
     # named from the lease, merged by MAC like every other row; one already
     # emitted from DHCPv4 is not duplicated
@@ -401,6 +446,8 @@ nomac|00030001000000000000|'
     EMITTED_MACS='|11:22:33:44:55:66|'
     emit_dynamic_leases6
     eq '|zeonux/aa:bb:cc:dd:ee:ff/0|/3c:e1:a1:41:52:d0/0|/14:4f:8a:8d:19:77/0' "$ROWS"
+    find_active_lease6_by_mac aa:bb:cc:dd:ee:ff || fail 'IPv6-only client not found by its lease'
+    eq zeonux "$LEASE_MATCH_NAME"
     load emit_client
     eq '300:1111:2222:3333::10' "$(dhcpv6_lease_for_mac AA:BB:CC:DD:EE:FF)"
     eq '' "$(dhcpv6_lease_for_mac 00:00:00:00:00:00)"

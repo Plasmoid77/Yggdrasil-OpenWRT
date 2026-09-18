@@ -156,6 +156,13 @@ function ipv6Cell(client) {
 			attrs.title = client.reserved_ipv6
 				? _('Assigned by the router (DHCPv6), reserved for this device')
 				: _('Assigned by the router (DHCPv6)');
+			/*
+			 * How the lease was tied to this MAC: a config host, the MAC
+			 * inside the DUID, or the neighbour table - the last one is an
+			 * observation of the moment, worth saying so.
+			 */
+			if (client.ipv6_lease_match === 'neighbor')
+				attrs.title += '; ' + _('matched to this device through the neighbour table');
 		}
 		else if (!live) {
 			attrs.style = 'opacity: .55';

@@ -174,7 +174,7 @@ operator's LAN settings are reported, never asserted; leases are information
 | --- | --- | --- |
 | Active `/tmp/dhcp.leases` entry | Dynamic identity, current IPv4 and hostname | Until lease expires/disappears; expiry `0` means unlimited |
 | `/etc/config/dhcp` `config host` | Persistent identity and optional reservation | Until explicit removal; may exist without a lease or IPv4 reservation |
-| Kernel `ip -6 neigh` | Observed IPv6 enrichment matched by MAC | Runtime only; never creates persistence or extends row lifetime |
+| Kernel `ip -6 neigh` | Observed IPv6 enrichment matched by MAC; ties a bound DHCPv6 lease to a MAC when no `config host` or DUID does | Runtime only; never creates persistence or extends row lifetime; never an authorisation |
 | Established Yggdrasil peer link | Native node address of a LAN device running its own daemon | Remembered for exactly the lifetime of the row it belongs to, in that row's own storage class; never creates a row or extends one |
 | `config domain` | Optional canonical IPv6 and DNS name | Persistent metadata for an existing persistent identity |
 | Recent reachability / active probes | Online/Offline | A presence result, independent of identity lifetime |
@@ -213,25 +213,34 @@ otherwise observed modified EUI-64 -> that address only
 otherwise -> all unique observed addresses for that MAC in the Ygg prefix
 ```
 
-A DHCPv6 lease is attributed to a row by MAC: first through a `config host`
-that ties the lease's DUID (with its IAID, normalised the way odhcpd reads
-it - an exact `DUID%IAID` section wins over a DUID-only one) to a `mac`,
-otherwise through the MAC embedded in a DUID-LLT or DUID-LL - the same rule
-odhcpd applies when it matches `config host` by MAC. A lease with any other
-DUID type and no such section attributes to nothing. An all-zero link-layer
-address inside a DUID is a firmware defect and is ignored; only leases whose
-`flags` contain `bound` count. The lease is the router's own record of what
-it handed out, which is why it outranks anything merely observed but not the
-operator's canonical record. `ipv6_source` names the branch taken;
+A DHCPv6 lease is attributed to a row by MAC through one resolver
+(`mac_for_lease`, shared by the table and by Pin), in order of authority:
+`host` - a `config host` ties the lease's DUID (with its IAID, normalised the
+way odhcpd reads it - an exact `DUID%IAID` section wins over a DUID-only one)
+to a `mac`; `duid` - the MAC embedded in a DUID-LLT or DUID-LL, the same rule
+odhcpd applies when it matches `config host` by MAC, accepted only with
+hardware type 1 and a non-zero MAC (an all-zero one is a firmware defect);
+`neighbor` - the LAN neighbour table: every address of the lease, in any
+prefix the LAN carries, that a neighbour entry attributes to one and the
+same MAC. Two different MACs for one lease, or none, attribute nothing. The
+neighbour branch is what names a DUID-UUID client (NetworkManager, systemd)
+without a `config host`; it is an observation of the moment - a sleeping or
+silent host has no entry and stays unattributed until it speaks - never
+stored, never an authorisation, and it cannot keep a row alive. Only leases
+whose `flags` contain `bound` count. The lease is the router's own record of
+what it handed out, which is why it outranks anything merely observed but not
+the operator's canonical record. `ipv6_source` names the branch taken and
+`ipv6_lease_match` how the lease was attributed;
 `reserved_ipv6` is 1 when the row's `config host` carries `hostid`, or when
 it carries an IPv4 `ip` without `hostid` and the bound lease sits on the
 suffix odhcpd derives from it (`.235 -> ::235`).
 
 A bound lease also creates a row of its own for a client that holds no DHCPv4
 lease (an IPv6-only host), named from the lease's hostname, living as long as
-odhcpd lists the lease as bound - but only when its MAC is known by the rules
-above, because the row *is* the MAC. A DUID-UUID client with neither a DHCPv4
-lease nor a `config host` stays invisible until it has one of them.
+odhcpd lists the lease as bound - but only when the resolver names its MAC,
+because the row *is* the MAC. A DUID-UUID client with neither a DHCPv4 lease
+nor a `config host` gets its row through the neighbour branch while it is
+seen on the LAN, and stays invisible while it is not.
 
 The computed EUI-64 must actually be observed. Never invent an address merely
 from a MAC. The canonical address is the primary IPv6 and rendered in bold;
@@ -427,6 +436,7 @@ The rpcd object is `luci.yggdrasil-status`:
 | `canonical_ipv6` | String; empty when absent |
 | `ipv6_addresses` | Array of strings; stable-first selected set |
 | `ipv6_source` | String; `canonical`, `dhcpv6`, `eui64`, `observed`, `remembered` or empty |
+| `ipv6_lease_match` | String; with `ipv6_source` `dhcpv6`: `host`, `duid` or `neighbor` - how the lease was tied to this MAC (status 6.1); empty otherwise |
 | `reserved_ipv6` | Integer 0/1; the row's `config host` carries a DHCPv6 `hostid`, or an IPv4 `ip` whose implicit suffix the bound lease sits on |
 | `dhcpv6_served` | Integer 0/1; some interface has `dhcpv6=server` (the page offers an IPv6 suffix in Pin only then) |
 | `ygg_node_ipv6` | String; primary native node address, empty when the device runs no daemon |
@@ -450,12 +460,11 @@ Pin outcomes: `pinned`, `already_persistent`, `invalid_request`, `invalid_mac`,
 suffix (1-16 digits, not 0 = dynamic, not 1 = the router), accepted only where
 DHCPv6 is served and refused when any `config host` already claims it,
 explicitly (`hostid`) or implicitly (an IPv4 `ip`). Pin writes `hostid` and,
-when the device holds a bound lease whose address the neighbour table
-attributes to its MAC, that lease's `duid` (with IAID) as well - the device
-answering neighbour solicitations for a leased address is the device holding
-that lease - so a DUID-UUID client matches; without a lease the reply says
-the reservation applies only to a DUID-LLT/LL client. Device replies carry
-`reserved_ipv6` (the reserved address).
+when the resolver attributes a bound lease to the device at the moment of
+the pin, that lease's `duid` (with IAID) as well, so a DUID-UUID client
+matches; without a lease the reply says the reservation applies only to a
+DUID-LLT/LL client. Device replies carry `reserved_ipv6` (the reserved
+address).
 
 Unpin outcomes: `unpinned`, `already_dynamic`, `invalid_request`, `invalid_mac`,
 `busy`, `static_confirmation_required`, `ambiguous_host`, `shared_host`,

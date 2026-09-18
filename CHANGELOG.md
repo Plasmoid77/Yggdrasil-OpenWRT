@@ -1,5 +1,28 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## Status v6.1 - one lease resolver, and the neighbour table names DUID-UUID clients
+
+v6.0 attributed a DHCPv6 lease through a `config host` or the MAC inside a
+DUID-LLT/LL, so a NetworkManager or systemd-networkd client (DUID-UUID) with
+no reservation had no row and no bold lease address, although the router
+could see which device answered for the leased address. One resolver now
+serves the table and Pin alike:
+
+- `mac_for_lease`: `config host` DUID map (the operator's word), then the
+  MAC inside a DUID-LLT/LL - only with hardware type 1 and a non-zero MAC -
+  then the LAN neighbour table over every address of the lease in every
+  prefix the LAN carries. One MAC attributes; two different MACs, or none,
+  attribute nothing. The neighbour branch is an observation of the moment:
+  never stored, never an authorisation, never a reason to keep a row.
+- Rows carry `ipv6_lease_match` (`host`, `duid`, `neighbor`); the page says
+  in the address tooltip when a lease was matched through the neighbour
+  table.
+- Pin uses the same resolver (with the LAN device and the host DUID map set
+  up first), so the `duid` it records is the lease the row shows.
+- The stock hybrid LAN of deployer 2.0 gives a DHCPv6 client one lease
+  address per prefix; the resolver reads all of them, the table still shows
+  the routed-prefix one.
+
 ## Deployer 2.0.0 - the routed /64 joins the LAN instead of replacing its IPv6
 
 1.x made the routed `/64` the LAN's only IPv6: `ip6class` kept every other
