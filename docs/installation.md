@@ -9,15 +9,19 @@ Linux-client commands; run only with backups and another management path.
 ## Result
 
 ```text
-Yggdrasil routed /64 -> OpenWrt -> br-lan -> RA (+ SLAAC or DHCPv6) -> LAN clients
+Yggdrasil routed /64 -> OpenWrt -> br-lan (beside native IPv6 and the ULA) -> RA/DHCPv6 -> LAN clients
 ```
 
-LAN devices receive routed Yggdrasil IPv6 without running Yggdrasil. By
-default they form their own addresses (SLAAC); with `--dhcpv6` the router
-assigns, reserves and names every address itself (stateful DHCPv6, no
-SLAAC - see [architecture](architecture.md) for what each mode implies,
-including that Android gets no routed address in managed mode). NAT66 is not
-used. Remote access is limited to trusted Ygg `/128`s.
+LAN devices receive routed Yggdrasil IPv6 without running Yggdrasil. The
+routed `/64` is added beside the prefixes the LAN already has - the native
+one when the uplink has IPv6, the stock ULA - and the router's stock RA/DHCPv6
+configuration is kept: clients form SLAAC addresses and, when they run a
+DHCPv6 client, also take a stateful address per prefix that `--host` can
+reserve. Native IPv6 keeps working as before; on an IPv4-only uplink the LAN
+gets Yggdrasil + ULA. LAN hosts may initiate connections into Yggdrasil
+through the router (`--no-lan-forward` turns that off). NAT66 is not used.
+Remote access is limited to trusted Ygg `/128`s. See
+[architecture](architecture.md) for the reasoning and the 1.x migration.
 
 Optional modules provide a LuCI inventory, `home.arpa` names, and route-only
 Linux split DNS.
@@ -93,8 +97,8 @@ router
 [dns-hosts]             # as --dns-host, NAME=ADDR
 nas=<YGG_IPV6>
 
-[hosts]                 # as --host: DHCPv6 reservations, need the dhcpv6 flag
-nas=<MAC>=10            # <prefix>::10 for the client with this MAC
+[hosts]                 # as --host: DHCPv6 reservations (the LAN's stock DHCPv6 server)
+nas=<MAC>=10            # <every LAN prefix>::10 for the client with this MAC
 laptop=<MAC>+duid:<HEX>=20  # DUID for odhcpd, MAC for the status page
 bmc=duid:<HEX>%<IAID>=21  # by DUID (and IAID) alone
 
@@ -106,8 +110,9 @@ v5.4
 [flags]                 # the switches, one per line
 no-jumper
 no-dns
-dhcpv6                  # router-managed addressing; without dhcpv6/slaac the
-                        # router keeps its current mode (a fresh one: SLAAC)
+no-lan-forward          # LAN hosts may not initiate connections into Yggdrasil
+# migrate-legacy        # force the 1.x migration on a partial signature
+# dhcpv6 / slaac        # 1.x only: 2.0 refuses them, delete the line
 ```
 
 ```sh
@@ -117,8 +122,8 @@ ssh root@<router> 'chmod 600 /root/ygg.conf; sh deploy-openwrt-yggdrasil.sh -y -
 
 Options are applied in the order given: a `--peer`, `--trusted` or `--dns-host`
 after `--config` is added to the file's list, a later single value such as
-`--iface` wins, and `--config` may be repeated. `-n`/`--dry-run`, `-y`/`--yes`
-and `--wait` describe the run rather than the node and stay on the command line.
+`--iface` wins, and `--config` may be repeated. `-n`/`--dry-run`, `-y`/`--yes`,
+`--wait` and `--guard` describe the run rather than the node and stay on the command line.
 When the file holds the key, keep it mode 600 — the script warns if it is
 readable beyond its owner. Key precedence is `--private-key-file`, then the
 file's `[private-key]`, then `YGG_PRIVATE_KEY`; no option takes the key as a
@@ -165,6 +170,44 @@ errors. Optional status failures are warnings; final verification failures
 return nonzero without automatically undoing the configuration. Package
 installation is not rolled back. It finishes by printing
 the router's Yggdrasil address and the command to reach it.
+
+### A router reached only over the path being changed
+
+`--guard MINUTES` arms a detached watchdog after the confirmation and before
+the first change: unless the run ends in a successful verification, it puts
+the pre-run `network`, `dhcp` and `firewall` back after MINUTES and reloads
+the services. A successful run cancels it; a failed verification leaves it
+armed and says so; `touch /root/ygg-deploy-backup-<stamp>/guard.cancel` keeps
+the new configuration by hand. Use it on a router you reach over Yggdrasil
+or over the LAN whose IPv6 you are changing:
+
+```sh
+sh deploy-openwrt-yggdrasil.sh -y --config /root/ygg.conf --guard 15
+```
+
+### Migrating a router deployed with 1.x
+
+Run 2.0 with the same settings, minus `--dhcpv6`/`--slaac` (and the `[flags]`
+lines of the same name - the script refuses them). A router that still carries
+the whole 1.x LAN profile (`ip6class` naming the Yggdrasil class, no ULA, one
+of the two 1.x RA shapes) is migrated back to the stock LAN configuration once:
+`ip6class` removed, `dhcpv6=server` / `ra_slaac=1` / M+O flags, the ULA
+restored from the oldest `/root/ygg-deploy-backup-*/network` that has it
+(otherwise a fresh one is generated and said so), and the migration recorded
+in `/etc/yggdrasil-deploy/migrated`. A dry run prints the plan with the
+before/after values first:
+
+```sh
+sh deploy-openwrt-yggdrasil.sh -n --config /root/ygg.conf
+sh deploy-openwrt-yggdrasil.sh -y --config /root/ygg.conf --guard 15
+```
+
+If only part of the 1.x profile is left (you already changed something by
+hand), the script lists what it found, treats the RA/DHCPv6 and ULA settings
+as yours and only adds the routed prefix; `--migrate-legacy` forces the full
+migration instead. Reservations and bound DHCPv6 leases survive the reload;
+SLAAC addresses come back with the A flag; a client that used the old ULA is
+renumbered when the ULA is regenerated rather than restored.
 
 The rest of this document is the manual equivalent, and remains the reference for
 what the script does and why.
@@ -268,44 +311,32 @@ ifstatus ygg0 | jsonfilter -e '@["ipv6-prefix"][*].class'
 
 ## 2. Advertise the routed `/64` on LAN
 
-This intentionally removes the extra OpenWrt ULA and enables SLAAC-only RA
-(the default mode; the managed alternative follows):
+The routed prefix joins the prefixes the LAN already advertises; the stock
+RA/DHCPv6 configuration (`dhcpv6=server`, `ra_slaac=1`, M+O flags) and the
+stock ULA stay. Two settings are needed: RA on, and a default route announced
+even when the router has no native IPv6 uplink, so a client can answer a
+Yggdrasil source on an IPv4-only site. The LAN's `ip6assign` (stock `60`) is
+fine: netifd falls back to `/64` when the request does not fit. Do **not**
+add an `ip6class` list - that is what 1.x did to keep native IPv6 off the LAN;
+if one exists for other reasons, add the Yggdrasil class to it.
 
 ```sh
-uci set network.lan.ip6assign='64'
-uci -q delete network.lan.ip6class
-uci add_list network.lan.ip6class='ygg0'   # = the Yggdrasil interface name
-uci -q delete network.globals.ula_prefix
-
-uci set dhcp.lan.dhcpv6='disabled'
+uci -q get network.lan.ip6assign >/dev/null || uci set network.lan.ip6assign='64'
 uci set dhcp.lan.ra='server'
-uci set dhcp.lan.ra_slaac='1'
-uci -q delete dhcp.lan.ra_flags
-uci add_list dhcp.lan.ra_flags='none'
 uci set dhcp.lan.ra_default='2'
-uci set dhcp.lan.ra_preference='medium'
 
 uci commit network
 uci commit dhcp
 /etc/init.d/network reload
-/etc/init.d/odhcpd restart
+/etc/init.d/odhcpd reload                    # keeps the bound leases
+ifstatus lan | jsonfilter -e '@["ipv6-prefix-assignment"][*].address'   # must list the 3xx: prefix
 ```
 
-### 2a. Managed alternative: stateful DHCPv6, no SLAAC
-
-What `--dhcpv6` writes instead of the `dhcp.lan` block above. RA stays (it
-carries the default route and the M/O flags); only the A flag goes:
-
-```sh
-uci set dhcp.lan.dhcpv6='server'
-uci set dhcp.lan.ra='server'
-uci set dhcp.lan.ra_slaac='0'
-uci -q delete dhcp.lan.ra_flags
-uci add_list dhcp.lan.ra_flags='managed-config'
-uci add_list dhcp.lan.ra_flags='other-config'
-uci set dhcp.lan.ra_default='2'
-uci set dhcp.lan.ra_preference='medium'
-```
+Coming from 1.x by hand: `uci -q delete network.lan.ip6class`, set
+`dhcp.lan.dhcpv6='server'`, `ra_slaac='1'`, `ra_flags` to `managed-config` +
+`other-config`, and put `network.globals.ula_prefix` back from
+`/root/ygg-deploy-backup-*/network` (or `uci set network.globals.ula_prefix='auto'`
+and let stock generate one on the next boot - that renumbers the ULA side).
 
 A reservation is a native `config host` with `hostid` (the hex IID; never 0,
 which means dynamic, and not 1, the router). Match by MAC works only for
@@ -369,8 +400,8 @@ A normal LAN client should now have a routed `3xx:...` address.
 
 ## 3. Apply the firewall policy
 
-The named sections below are intended for a fresh installation. No blanket
-forwarding or NAT66 is created.
+The named sections below are intended for a fresh installation. No NAT66 is
+created; the only forwarding from the LAN is the explicit rule to `200::/7`.
 
 ```sh
 uci set firewall.ygg='zone'
@@ -401,6 +432,16 @@ uci set firewall.ygg_trusted_router.target='ACCEPT'
 uci -q delete firewall.ygg_trusted_router.src_ip
 uci add_list firewall.ygg_trusted_router.src_ip='<TRUSTED_YGG_IPV6_1>'
 uci add_list firewall.ygg_trusted_router.src_ip='<TRUSTED_YGG_IPV6_2>'
+
+# LAN hosts may initiate connections into Yggdrasil (omit for --no-lan-forward)
+uci set firewall.ygg_lan_out='rule'
+uci set firewall.ygg_lan_out.name='LAN-to-Yggdrasil'
+uci set firewall.ygg_lan_out.src='lan'
+uci set firewall.ygg_lan_out.dest='ygg'
+uci set firewall.ygg_lan_out.family='ipv6'
+uci set firewall.ygg_lan_out.proto='all'
+uci set firewall.ygg_lan_out.dest_ip='200::/7'
+uci set firewall.ygg_lan_out.target='ACCEPT'
 
 uci commit firewall
 /etc/init.d/firewall restart
@@ -557,28 +598,31 @@ ygg0             -> DNS Domain: ~home.arpa, Default Route: no
 
 ```sh
 ifstatus ygg0
+ifstatus lan | jsonfilter -e '@["ipv6-prefix-assignment"][*].address'
 ip -6 addr show dev br-lan
-uci -q get network.lan.ip6class
-uci -q get dhcp.lan.dhcpv6
+uci -q get network.lan.ip6class                   # empty, or a list that contains ygg0
 uci -q get dhcp.lan.ra
-uci -q get dhcp.lan.ra_slaac
-uci -q get dhcp.lan.ra_flags
+uci -q get dhcp.lan.ra_default
+uci -q get firewall.ygg_lan_out.dest_ip
 ubus -v list luci.yggdrasil-status
 ubus call luci.yggdrasil-status clients
-ubus call dhcp ipv6leases                    # managed mode only
+ubus call dhcp ipv6leases
 ```
 
 Expected invariants:
 
 ```text
-LAN ip6class = ygg0
-RA           = server
-SLAAC mode:    DHCPv6 = disabled, RA SLAAC = 1, RA flags = none
-managed mode:  DHCPv6 = server,   RA SLAAC = 0, RA flags = managed-config other-config
-Ygg zone     = input REJECT / output ACCEPT / forward DROP
-no NAT66
-no blanket ygg -> lan forwarding
+LAN prefixes  = the 3xx: routed /64 beside the LAN's own (native and/or ULA)
+RA            = server, RA default = 2
+LAN ip6class  = absent, or admits ygg0
+Ygg zone      = input REJECT / output ACCEPT / forward DROP
+LAN-to-Yggdrasil rule dest_ip = 200::/7 (absent with --no-lan-forward)
+no NAT66, no unsolicited ygg -> lan traffic beyond the trusted /128s
 ```
+
+The LAN's `dhcpv6`, `ra_slaac`, `ra_flags` and `ula_prefix` are yours; on a
+stock router they read `server`, `1`, `managed-config other-config` and an
+`fd..::/48`.
 
 For rationale see [architecture](architecture.md); for troubleshooting, updates
 and removal see [operations](operations.md).

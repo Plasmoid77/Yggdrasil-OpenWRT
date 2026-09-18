@@ -129,19 +129,19 @@ merge.
 For a DHCP-only client, the device row itself still disappears when the DHCP
 lease expires.
 
-In managed mode (`--dhcpv6`) the accumulation problem does not arise for
-DHCPv6 clients: the router itself handed out the address, the table shows the
-bound lease first (bold, `ipv6_source: dhcpv6`) and any lingering SLAAC
-address after it. Right after a switch from SLAAC both are expected until the
-SLAAC address's own lifetime ends on the client.
+For a DHCPv6 client the table shows the bound lease first (bold,
+`ipv6_source: dhcpv6`) and its SLAAC addresses after it: with the stock hybrid
+both exist at once, and the reservation names the lease address, not the ones
+the client formed itself.
 
-### A client shows no routed address in managed mode
+### A client shows no reserved address
 
 Three causes, in order of likelihood:
 
 1. It has no DHCPv6 client. Android has none by policy; some IoT and smart-TV
-   stacks neither. Such a device keeps IPv4 and link-local IPv6 only. If it
-   must be reachable over Yggdrasil, it runs its own Yggdrasil node.
+   stacks neither. Such a device takes SLAAC addresses from the routed prefix
+   like from any other and is reachable on those, but a reservation cannot
+   name them.
 2. It has not asked yet. A lease is obtained on connect, renew or reboot; the
    RA change alone does not trigger one. `ubus call dhcp ipv6leases` lists
    what is bound; `logread -e odhcpd` shows the exchange.
@@ -261,48 +261,50 @@ apk upgrade yggdrasil luci-proto-yggdrasil yggdrasil-jumper
 
 Do not assume every future package keeps the exact same UCI options.
 
-### Switching the LAN to router-managed addressing
+### Moving a 1.x router to the overlay (2.0)
 
-Managed mode (`--dhcpv6`) is opt-in; a rerun without `--dhcpv6`/`--slaac`
-keeps whatever mode the router runs. Migrating a router that was deployed
-with SLAAC:
+2.0 no longer replaces the LAN's IPv6 with the routed prefix; the 1.x modes
+(`--dhcpv6`/`--slaac`) are gone and the switches are refused. Migrating:
 
-1. Keep a second management path open (Yggdrasil to the router plus LAN, or
-   a serial console). The LAN stage reloads odhcpd (bound leases survive a
-   managed-mode rerun; a switch to SLAAC discards them with the DHCPv6
-   server); the router's own addresses and the `ygg` zone do not change.
-2. Rerun the deployer with the **complete** argument set of the original
-   deployment plus `--dhcpv6` and the `--host` reservations you want. The
-   deployer rewrites trusted rules, jumper and multicast sections from its
-   arguments on every run, so an omitted `--trusted` closes the zone. A
-   settings file (`--config`) is the way to keep that set complete. Drop a
-   `--dns-host` line for a name you now reserve with `--host`: the deployer
-   refuses the pair, because the old hand-written answer would otherwise
-   survive beside the reserved one.
-3. Read the preflight report: it lists every existing `config host` whose
-   IPv4 `ip` implies an IPv6 IID (`.235 -> ::235`) and refuses a `--host`
-   that would collide with one.
-4. Verify: the run's Stage 8 checks the mode's UCI values, each
-   reservation's `hostid` and lists bound leases. Then make one client ask
-   (reconnect it) and confirm its address in `ubus call dhcp ipv6leases`,
-   in the status table and by reaching it from a trusted node.
-5. Expect a transition: SLAAC addresses already formed stay valid on the
-   clients until their lifetime ends (odhcpd's default cap is 90 min; the
-   client decides); nothing forces them off. Devices without a DHCPv6 client
-   lose their routed address when theirs expires.
-6. Reboot the router once and re-check `ubus call dhcp ipv6leases` and the
-   prefix on `br-lan`: the known `ygg0` pending race (startup precautions
-   above) would leave odhcpd with nothing to serve.
+1. Keep a second management path open, or use `--guard 15`: it restores
+   `network`, `dhcp` and `firewall` after 15 minutes unless the run verifies
+   successfully. The LAN stage reloads network and odhcpd (bound leases
+   survive the reload); the router's own addresses and the `ygg` zone do not
+   change. If you reach the router over its LAN IPv6, note that the ULA
+   comes back and native IPv6 returns to the LAN - your session on a
+   routed-prefix address survives, a session on an address 1.x never had is
+   not affected either.
+2. `sh deploy-openwrt-yggdrasil.sh -n --config /root/ygg.conf` after deleting
+   `dhcpv6`/`slaac` from `[flags]`. The preflight prints the LAN plan: with
+   the whole 1.x signature present, the before/after table of the migration;
+   with part of it, what was found and the offer of `--migrate-legacy`.
+3. Run it for real with `-y` (and `--guard`). Stage 8 asserts the prefix on
+   the LAN, `ra`, `ra_default`, the rule and each reservation, and prints the
+   LAN settings it left to you.
+4. Expect: SLAAC addresses from the routed prefix reappear on every client
+   (Android included) at the next RA; DHCPv6 clients keep their leases; the
+   ULA is the original one when a 1.x backup held it, otherwise a new one
+   (`fd..::/48`) and clients that used the old ULA are renumbered; native
+   IPv6 addresses appear when the uplink delegates a prefix.
+5. `/etc/yggdrasil-deploy/migrated` records the migration with the original
+   values. Later runs never reinterpret your changes as 1.x remnants; delete
+   the marker only if you want the migration logic to look again.
 
-Back to SLAAC: the same rerun with `--slaac`. It restores the `dhcp.<lan>`
-values and, with the DNS module on (`--no-dns` skips the DNS stage entirely),
-removes the deployer-owned `ygg_rsv_*` DNS records - they are rebuilt from
-the `--host` lines on every run, `--slaac` accepts none, so no name is left
-pointing at an address nobody holds. `hostid` options stay in place: inert
-without DHCPv6, live again on the next `--dhcpv6` run. The deployer never
-removes a `hostid`; omitting a `--host` line on a `--dhcpv6` rerun drops its
-name and keeps its `hostid`. To retire a reservation for good:
-`uci delete dhcp.<section>.hostid; uci commit dhcp; /etc/init.d/odhcpd reload`.
+Reservations: the deployer never removes a `hostid`; omitting a `--host` line
+on a rerun drops its name and keeps its `hostid`. To retire a reservation for
+good: `uci delete dhcp.<section>.hostid; uci commit dhcp; /etc/init.d/odhcpd reload`.
+
+### LAN hosts and Yggdrasil
+
+By default LAN hosts can initiate connections into Yggdrasil through the
+router (`LAN-to-Yggdrasil` rule, IPv6 to `200::/7`). Turn it off with a rerun
+plus `--no-lan-forward` (or `no-lan-forward` in `[flags]`, so a later rerun
+does not turn it back on); flows already established end on their own. A LAN
+host that runs its own Yggdrasil node is unaffected either way: its own
+`200::/7` route wins over the router's default route. A client with privacy
+extensions uses a temporary routed-prefix address as source toward Yggdrasil,
+not its reserved one - remote allow-lists on the reserved address match
+inbound traffic to the host, not the host's outbound connections.
 
 ### Post-update verification
 
@@ -312,7 +314,7 @@ Re-run the relevant layer checks:
 ifstatus ygg0
 yggdrasilctl getPeers
 ubus call dhcp ipv6ra
-ubus call dhcp ipv6leases      # managed mode: the addresses the router handed out
+ubus call dhcp ipv6leases      # the stateful addresses the router handed out (one per prefix)
 fw4 print
 ```
 

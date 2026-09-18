@@ -42,72 +42,126 @@ identity or create another device.
 
 The current clean-install interface name is `ygg0`; older deployments used
 `ygg`. netifd derives a delegated prefix's class from its providing interface
-name. LAN `ip6class` must match that class. Setting `ip6class` on the Yggdrasil
-interface does not rename its published class. A mismatch can silently leave
-LAN without the routed prefix.
+name. An LAN `ip6class` list, if any, must admit that class. Setting `ip6class`
+on the Yggdrasil interface does not rename its published class.
 
-The LAN has two addressing modes, chosen at deployment and stored in
-`dhcp.<lan>`; the deployer verifies exactly one of them.
+### The overlay (deployer 2.0)
 
-Without `--dhcpv6` or `--slaac` the deployer keeps the mode the router already
-runs (it reads `dhcp.<lan>.dhcpv6`); a router that runs nothing yet gets
-SLAAC. A rerun for peers, trusted addresses or DNS therefore never changes LAN
-policy. The deployer takes the status module's DHCP lock before it stages any
-`dhcp` change, so a Pin/Unpin in progress makes it stop with nothing touched.
+The routed `/64` is **added** to the LAN beside whatever OpenWrt already
+advertises there: the native delegated prefix when the uplink has IPv6, and
+the stock ULA (`network.globals.ula_prefix`, a `/48` carved to `ip6assign`).
+An IPv4-only site therefore ends up with Yggdrasil + ULA on the LAN, a
+dual-stack site with native + ULA + Yggdrasil. Stock IPv6 keeps working as it
+did before the deployer ran; that is the premise, verified on a dual-stack LTE
+router on 2026-09-18 (`docs/history` keeps the 1.x replacement design).
 
-**SLAAC (fresh-router default, every 1.x deployment):** `dhcpv6=disabled`, `ra=server`,
-`ra_slaac=1`, `ra_flags=none`. The client selects its IID and may use EUI-64,
-stable privacy (RFC 7217), temporary addresses (RFC 4941) or several at once.
-The router does not force an IID and cannot know which address a device will
-use next; it can only observe. Every client with IPv6 gets an address, Android
-included.
+The LAN's RA/DHCPv6 configuration is the operator's. Stock OpenWrt runs the
+hybrid `dhcpv6=server`, `ra=server`, `ra_slaac=1`, `ra_flags` =
+`managed-config` + `other-config`: every client forms SLAAC addresses (stable,
+privacy, temporary) **and** every DHCPv6-capable client also takes one
+stateful address per prefix from odhcpd, with the same IID in each prefix.
+The deployer never writes `dhcpv6`, `ra_slaac`, `ra_flags`, `ra_preference`
+or `ula_prefix`. What it writes on the LAN:
 
-**Managed (`--dhcpv6`, deployer 1.9.0):** `dhcpv6=server`, `ra=server`,
-`ra_slaac=0`, `ra_flags` = `managed-config` + `other-config` (two list
-entries). RA stays because it is the only carrier of the default route, the
-on-link prefix and the M/O flags; only the autonomous flag goes away, so a
-client forms nothing itself and asks odhcpd instead. odhcpd hands out
-addresses from the delegated `/64` exactly as it would from an ISP prefix,
-keeps them in `ubus call dhcp ipv6leases`, writes `<hostname>.lan` for every
-lease with a hostname, and honours `config host` reservations: an explicit
-`option hostid` (hex IID), or, for a section that has an IPv4 `ip` but no
-`hostid`, the implicit IID odhcpd derives from the last IPv4 octet read as
-hex digits (`.235 -> ::235`). A MAC in `config host` matches only a client
-whose DUID is DUID-LLT or DUID-LL (the MAC is inside it); any other DUID type
-needs `option duid` (optionally `%IAID` in hex). `hostid` 0 means dynamic. A section may carry both `mac` and `duid`
-(`--host NAME=MAC+duid:HEX`): odhcpd matches by the DUID, the status page
-merges rows by MAC, so that is what makes a DUID-UUID client (NetworkManager)
-a named persistent row with its reserved address as canonical.
-Clients without a DHCPv6 client - Android by policy, some IoT - get **no**
-address from the routed prefix in this mode. That is the accepted trade: a
-phone that needs Yggdrasil runs its own node. The deployer refuses to enable
-the mode over `dhcpv6_na=0` or `ra_offlink=1` rather than override them.
+| Setting | 2.0 |
+| --- | --- |
+| `network.<lan>.ip6assign` | kept; `64` only when absent. netifd falls back to longer lengths down to /64 when the requested length does not fit, so stock `60` takes the routed `/64` whole (measured). After the reload the deployer checks `ifstatus <lan>` for the actual assignment and fails, with rollback, if the prefix did not reach the LAN |
+| `network.<lan>.ip6class` | absent: left alone (no restriction). Exactly the Ygg class (the 1.x singleton that kept native IPv6 and the ULA off the LAN): deleted. An operator's own list: kept, the Ygg class appended when missing |
+| `dhcp.<lan>.ra` | `server` |
+| `dhcp.<lan>.ra_default` | `2`: a default route is announced even without a native uplink, so a client's reply to a Yggdrasil source has a route on an IPv4-only site. On a dual-stack router this changes nothing while the uplink is up; while it is down, clients keep a default and IPv6-only destinations fail instead of being unreachable up front - Happy Eyeballs is the application's fallback, not the router's |
+| `config host` reservations | `--host` as in 1.9.0; they need the LAN's DHCPv6 server, which stock has. `--host` on a LAN whose operator disabled DHCPv6 (or set `dhcpv6_na=0` / `ra_offlink=1`) is refused in preflight, before anything is written; the deployer does not override those settings |
 
-Switching modes on a live LAN is a rerun of the deployer with the other flag.
-The LAN stage rewrites `dhcp.<lan>` and, as on every run, `network.<lan>`
-`ip6assign`/`ip6class` and the global ULA, then applies it with
-`odhcpd reload` (SIGHUP). Reload re-reads the configuration and keeps the
-bound DHCPv6 leases across a managed-mode rerun - a restart would empty the
-router's lease record until every client renews - but a switch to SLAAC
-disables the DHCPv6 server and odhcpd frees its assignments with it. A SLAAC address already formed stays valid on
-the client until its own lifetime ends (odhcpd's default cap is 90 min; the
-client decides), and a DHCPv6 lease appears only when the client next asks,
-so both can coexist for a while and the status page shows both. `--slaac`
-leaves `hostid` options in place (inert without DHCPv6) but, like every run,
-rebuilds the deployer-owned `ygg_rsv_*` DNS records from the `--host` lines
-given - none in SLAAC mode - so no name is left pointing at an address nobody
-holds.
+A reserved address (`option hostid`) lands in **every** prefix the LAN
+advertises - `<native>::10`, `<ula>::10`, `<ygg>::10` - because odhcpd uses one
+IID per lease. It is a stable *destination*, not the client's outbound
+identity: with the stock hybrid the client also holds SLAAC addresses, and a
+client with privacy extensions prefers its temporary address as source (RFC
+6724 rule 7 precedes the longest-match rule 8). Measured on Linux clients on
+the dual-stack test router: without temporary addresses the source toward
+`200::/7` is the routed-prefix address (the reservation, where one exists);
+with temporary addresses it is a temporary routed-prefix address. In every
+case the source prefix was the right one; a native source toward Yggdrasil
+was not observed (the A flag is per interface, so both prefixes get the same
+kinds of addresses). Remote `/128` allow-lists on the reserved address
+therefore match inbound traffic to that host, not necessarily its outbound
+connections. Android does DHCPv6 by policy not at all and takes SLAAC
+addresses from the routed prefix as from any other.
 
-Both modes remove OpenWrt's generated ULA; link-local IPv6 and normal DHCPv4
-remain. Keeping an additional ULA is a separate deliberately documented
-profile, not a silent default change.
+The deployer takes the status module's DHCP lock before it stages any `dhcp`
+change, so a Pin/Unpin in progress makes it stop with nothing touched.
+`odhcpd reload` (SIGHUP) applies the change and keeps the bound leases; the
+restart fallback, and a rollback's restart, empty the router's lease record
+until clients renew.
+
+### Migrating a 1.x router
+
+1.x wrote `ip6assign=64`, `ip6class=<ygg class>`, deleted the ULA and set one
+of its two RA modes (SLAAC-only `dhcpv6=disabled` / `ra_flags=none`, or
+managed `--dhcpv6` with `ra_slaac=0`). Each of those alone is a plausible
+operator choice, so the deployer reads the **combination** - `ip6class`
+exactly the Ygg class, no ULA, and one of the two mode shapes - as its own
+1.x profile, and only when `/etc/yggdrasil-deploy/migrated` does not exist.
+
+| Found | Action |
+| --- | --- |
+| Whole signature, no marker | migrate: `ip6class` deleted, `dhcpv6=server` / `ra_slaac=1` / `ra_flags` stock, the ULA restored from the oldest `/root/ygg-deploy-backup-*/network` that still holds it, otherwise generated stock-style (`fd` + 40 random bits `::/48` - a renumbering of the ULA side, said so in the output), the marker written with the originals and the run's backup path |
+| Marker present | overlay only; the RA/DHCPv6 and ULA settings are the operator's from now on |
+| Part of the signature | overlay only, the found parts listed, `--migrate-legacy` offered; with it the migration runs as above |
+| Nothing | overlay only |
+
+`--dhcpv6`, `--slaac` and the `[flags]` entries of the same name are refused
+with an explanation rather than ignored, so an old settings file is updated
+consciously. Every other flag is unchanged. A dry run prints the plan with the
+before/after values.
+
+The ULA that comes back is either the original (backup) or a new one: a
+client that used the old ULA address is renumbered. The migration keeps
+`config host` sections and DHCPv6 leases (reload), and SLAAC addresses return
+when the A flag does.
+
+### Guard for remote-only routers
+
+`--guard MINUTES` arms, after the operator confirms and before the first
+change, a detached watchdog (nohup, own copy of `network`, `dhcp` and
+`firewall` in the run's backup directory) that restores those files and
+reloads network, odhcpd, dnsmasq and firewall after MINUTES. A run that ends
+in a successful verification cancels it; a failed verification leaves it
+armed and says so; a rollback cancels it after restoring the same files. The
+operator can cancel by hand with `touch <backup>/guard.cancel`. It is the
+recovery path for a router whose only management path is the one being
+reconfigured; it does not depend on the deployer surviving or on Yggdrasil.
+
+### Firewall
 
 A dedicated `ygg` firewall zone is deny-by-default: INPUT REJECT, OUTPUT ACCEPT,
-FORWARD DROP. There is no NAT66 or blanket forwarding in either direction.
-Explicit trusted source `/128` rules authorize forwarding to LAN separately
-from router INPUT. The tested router rule permits TCP from trusted sources;
-it is not restricted to ports 22/80/443. Restricting ports further is optional
-hardening, not the current default. Trusted DNS permits TCP/UDP 53 separately.
+FORWARD DROP, no NAT66. Explicit trusted source `/128` rules authorize
+forwarding to LAN separately from router INPUT. The tested router rule permits
+TCP from trusted sources; it is not restricted to ports 22/80/443. Restricting
+ports further is optional hardening, not the current default. Trusted DNS
+permits TCP/UDP 53 separately.
+
+LAN hosts may **initiate** connections into Yggdrasil through the router
+(deployer 2.0, on by default): one explicit stateful rule `LAN-to-Yggdrasil`
+(`src lan`, `dest ygg`, `family ipv6`, `dest_ip 200::/7`, ACCEPT), the way
+stock lets the LAN initiate toward the WAN. It is a rule with a destination,
+not a zone forwarding, so anything else the tunnel might carry one day is not
+forwarded by accident. It changes nothing inbound: unsolicited traffic from
+Yggdrasil still reaches only what the trusted rules name. What it does add:
+every LAN host can reach any Yggdrasil node (a compromised LAN host gains an
+egress the same way it has one to the Internet), remote nodes see this
+router's whole routed `/64`, and the LAN's outbound flows now exercise the
+Yggdrasil path MTU (1280, PMTUD via the router's ICMPv6 PTB). `--no-lan-forward`
+(also `[flags] no-lan-forward`) removes the rule; established flows end on
+their own, the rule's removal does not cut them. Hosts that run their own
+Yggdrasil node keep using it: their own `200::/7` route wins over the router's
+default, so their LAN routed-prefix address is only their inbound identity -
+as in 1.x.
+
+Verification is in three classes: what the deployer wrote or requires is
+asserted (`ra`, `ra_default`, the prefix actually assigned to the LAN, an
+admitting `ip6class`, the zone, the rule, reservations, odhcpd running); the
+operator's LAN settings are reported, never asserted; leases are information
+(a client asks on renew, reconnect or reboot).
 
 ## Inventory data model
 
@@ -467,20 +521,24 @@ config interface 'lan'
     option device 'br-lan'
     option proto 'static'
     list ipaddr '<LAN_IPV4/CIDR>'
-    option ip6assign '64'
-    list ip6class 'ygg0'
-# network.globals.ula_prefix is absent in this profile.
+    option ip6assign '60'          # stock value kept; no ip6class
+# network.globals.ula_prefix stays as stock generated it.
 
-# /etc/config/dhcp (DHCPv4 start/limit/leasetime remain site-specific)
+# /etc/config/dhcp (stock hybrid RA/DHCPv6 kept; the deployer writes ra and ra_default)
 config dhcp 'lan'
     option interface 'lan'
     option dhcpv4 'server'
-    option dhcpv6 'disabled'
+    option dhcpv6 'server'
     option ra 'server'
     option ra_default '2'
-    option ra_preference 'medium'
     option ra_slaac '1'
-    list ra_flags 'none'
+    list ra_flags 'managed-config'
+    list ra_flags 'other-config'
+
+config host 'ygg_host_nas'          # --host nas=<MAC>=10 -> <every LAN prefix>::10
+    option name 'nas'
+    option mac '<MAC>'
+    option hostid '10'
 
 config host 'ygg_status_aabbccddeeff'
     option name 'Laptop'
@@ -502,6 +560,15 @@ config zone
     option output 'ACCEPT'
     option forward 'DROP'
     list network 'ygg0'
+
+config rule 'ygg_lan_out'           # absent with --no-lan-forward
+    option name 'LAN-to-Yggdrasil'
+    option src 'lan'
+    option dest 'ygg'
+    option family 'ipv6'
+    option proto 'all'
+    option dest_ip '200::/7'
+    option target 'ACCEPT'
 
 config rule
     option name 'YGG-Trusted-to-LAN'
@@ -534,7 +601,12 @@ config rule 'ygg_dns'
 | Decision | Reason and consequence |
 | --- | --- |
 | Native netifd/UCI/odhcpd/firewall4 | One owner for routing, prefix advertisement and policy; no container or parallel network manager |
-| SLAAC on a fresh router, stateful DHCPv6 as an opt-in mode, the current mode kept on rerun | SLAAC reaches every client, Android included, but the router can only observe the addresses clients pick; privacy and RFC 7217 IIDs are stable per host yet not derivable, so no router-side rule can name "the" address. Managed DHCPv6 makes the router the owner of every address - assigned, known, reserved, named - with nothing configured on hosts, at the cost of clients without a DHCPv6 client. Opt-in, because a rerun of the deployer must never change LAN policy by itself |
+| Overlay, not replacement (2.0) | The routed /64 is one more prefix beside native IPv6 and the ULA; the LAN's RA/DHCPv6 configuration is the operator's. 1.x replaced the LAN's IPv6 (`ip6class`, no ULA, its own RA mode), which broke native IPv6 on dual-stack uplinks and took Android off the routed prefix in managed mode. The stock hybrid gives DHCPv6-capable clients a reservable stateful address per prefix while every client keeps SLAAC |
+| `ra_default=2` kept (D1) | The one RA setting the overlay needs: replies to Yggdrasil sources need a default route on an IPv4-only site. Route Information Options (RFC 4191) for `200::/7` were rejected: odhcpd derives them only from `unreachable` routes with `ra_default=0`, Linux ignores them by default, Android accepts /48-/64 only |
+| LAN may initiate into Yggdrasil (D5, 2.0) | One explicit stateful rule to `200::/7`, opt-out `--no-lan-forward`. 1.x had no such forwarding, an unweighed default inherited from the remote-access use case. No NAT66: a wrong-source packet fails closed in Yggdrasil instead of being rewritten |
+| Migration by whole signature, recorded once | `ra_slaac=0` or a missing ULA alone are operator choices; only the 1.x combination is ours, and the marker stops a later run from reading operator changes as legacy. The ULA comes back from the oldest 1.x backup because regeneration renumbers |
+| Assignment length kept, prefix assignment verified | Forcing `ip6assign=64` removes downstream delegation space an operator planned for; netifd takes the routed /64 with stock 60 anyway. `ip6class`/`ip6assign` express a wish, so `ifstatus` is checked after the reload |
+| `--guard` watchdog | A remote-only router needs a recovery path independent of the deployer process and of Yggdrasil; the operator's confirmation arms it, a successful verification cancels it |
 | Reservations through native `config host` `hostid` | odhcpd already implements matching (DUID, or MAC for DUID-LLT/LL) and the implicit IPv4-derived IID; the deployer only validates, checks collisions and writes the section |
 | DHCP lease lifetime plus `config host` persistence | Guests disappear naturally; no custom TTL, history DB or cron cleanup |
 | A row's remembered addresses stored like the row itself | A pinned row survives a reboot, so what is remembered about it must too; a lease-backed one must not. Storage class follows row lifetime instead of a blanket "never touch flash" rule |
@@ -545,7 +617,7 @@ config rule 'ygg_dns'
 | `home.arpa` rather than `.lan` | RFC 8375 reserves a locally served home namespace |
 | On-page RPC polling | Operational dashboard, not permanent monitoring or traffic accounting |
 | Stable-first selection | Stop displaying/probing historical privacy addresses when a canonical or observed EUI-64 exists; preserve privacy-only behavior |
-| Explicit trusted sources | Route existence is separate from authorization; no blanket LAN exposure |
+| Explicit trusted sources | Route existence is separate from authorization; no unsolicited inbound reaches the LAN beyond the named /128s |
 | Jumper optional | Direct-path optimization must not become a dependency for base reachability |
 | Self-contained deployer | One downloaded file can run on BusyBox without a source checkout or shell-library loader |
 | apk only | opkg releases are unvalidated and have incompatible assumptions; fail at preflight instead of promising unsupported compatibility |

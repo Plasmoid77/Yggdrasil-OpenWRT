@@ -1,5 +1,59 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## Deployer 2.0.0 - the routed /64 joins the LAN instead of replacing its IPv6
+
+1.x made the routed `/64` the LAN's only IPv6: `ip6class` kept every other
+prefix off the LAN, the stock ULA was deleted and the RA ran in one of two
+deployer-owned modes. On a router whose uplink has IPv6 that broke native
+IPv6 for every LAN client, and the managed mode took Android off the routed
+prefix. Measured on a dual-stack LTE router (2026-09-18): the stock hybrid RA
+gives every DHCPv6 client one stateful address per prefix with the same IID,
+so reservations work on stock as they did in managed mode, while SLAAC stays
+on for everyone. Hence 2.0, breaking:
+
+- The LAN stage writes `ra=server`, `ra_default=2` and - only when unset -
+  `ip6assign=64`. `dhcpv6`, `ra_slaac`, `ra_flags`, `ra_preference` and
+  `ula_prefix` are the operator's and are never written. An `ip6class` list
+  is deleted only when it is exactly the 1.x singleton; a custom list is kept
+  and made to admit the Yggdrasil class. After the reload the stage checks
+  that netifd actually assigned the routed `/64` to the LAN (stock
+  `ip6assign=60` takes it whole) and fails, with rollback, if not.
+- `--dhcpv6`, `--slaac` and the `[flags]` entries are refused with an
+  explanation. A router still carrying the **whole** 1.x signature
+  (`ip6class` singleton, no ULA, a 1.x RA shape) is migrated back to stock
+  once - ULA restored from the oldest `/root/ygg-deploy-backup-*/network`,
+  else generated stock-style - and the migration is recorded in
+  `/etc/yggdrasil-deploy/migrated` so later runs never reinterpret operator
+  changes as legacy. A partial signature is reported and left alone;
+  `--migrate-legacy` forces the migration. A dry run prints the plan.
+- `--host` reservations no longer need a mode; they need the LAN's DHCPv6
+  server, which stock has. A LAN with `dhcpv6` disabled, `dhcpv6_na=0` or
+  `ra_offlink=1` is refused in preflight, before anything is written.
+- Firewall: LAN hosts may initiate connections into Yggdrasil through the
+  router - one explicit stateful rule `LAN-to-Yggdrasil` (`lan -> ygg`,
+  IPv6, `dest_ip 200::/7`), not a zone forwarding. `--no-lan-forward`
+  (`[flags] no-lan-forward`) removes it. Zone policy, trusted rules and the
+  no-NAT66 invariant are unchanged. 1.x had no LAN-to-Yggdrasil path at all.
+- `--guard MINUTES`: a detached watchdog restores `network`, `dhcp` and
+  `firewall` unless the run verifies successfully - the recovery path for a
+  router reached only over the path being reconfigured.
+- Verification separates what the deployer asserts (prefix on the LAN, `ra`,
+  `ra_default`, an admitting `ip6class`, zone, rule, reservations, odhcpd)
+  from the operator's LAN settings, which it reports.
+- GitHub fetches for the status module are retried three times; on the LTE
+  test router a single failed TLS handshake used to skip the module.
+- Tests: `tests/deploy-lan-mode.sh` became `tests/deploy-lan-overlay.sh`
+  (classification table, per-plan UCI values, the rule, refused switches).
+
+Validated on the SPb test router reset to stock OpenWrt 25.12.5 with a
+dual-stack LTE uplink: fresh install kept the native prefix and ULA on the
+LAN beside the routed `/64`, a NetworkManager laptop and a dhcpcd host got
+`::20`/`::10` in all three prefixes, LAN-initiated traffic reached Yggdrasil
+nodes with the routed-prefix source, untrusted inbound stayed rejected, and
+everything survived a reboot. Not yet validated: the 1.x migration on
+hardware, uplink loss, native prefix renumbering under load, PMTU transfers,
+non-Linux clients.
+
 ## Status v6.0 - the page can reserve addresses, and knows every client the router serves
 
 v5.5 read odhcpd's leases but could tie one to a row only through the MAC

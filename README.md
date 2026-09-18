@@ -1,9 +1,12 @@
 # Yggdrasil on OpenWrt
 
 Make an OpenWrt router a Yggdrasil gateway for ordinary IPv6-capable LAN
-clients. They receive addresses from the router's routed `/64` - by SLAAC, or
-with `--dhcpv6` assigned and reserved by the router itself - and do **not**
-need to run Yggdrasil themselves.
+clients. The router's routed `/64` is added to the LAN **beside** the IPv6 it
+already has - native prefix, stock ULA - on the stock RA/DHCPv6
+configuration: clients form SLAAC addresses from it, DHCPv6 clients also get a
+stateful address the router can reserve by `--host`, and they do **not** need
+to run Yggdrasil themselves. Native IPv6 keeps working; LAN hosts can reach
+Yggdrasil through the router, Yggdrasil reaches the LAN only from trusted nodes.
 
 ```text
 Yggdrasil peers -> OpenWrt -> routed /64 -> LAN clients
@@ -31,7 +34,7 @@ package installation. Do not run it merely to update documentation or LuCI.
 
 | Component | Purpose | Implementation |
 | --- | --- | --- |
-| Core | Routed Ygg `/64`, SLAAC or managed DHCPv6 with reservations, trusted-source firewall policy | [Standalone router deployer](deploy/deploy-openwrt-yggdrasil.sh) |
+| Core | Routed Ygg `/64` overlaid on the LAN's own IPv6, DHCPv6 reservations, trusted-source firewall policy, LAN-to-Yggdrasil egress | [Standalone router deployer](deploy/deploy-openwrt-yggdrasil.sh) |
 | Status | DHCP-lifetime inventory, persistent pins and safe Pin/Unpin | [LuCI/rpcd source](source/yggdrasil-status/) |
 | DNS | Optional names and trusted DNS access over Ygg | Native dnsmasq configuration in the deployer |
 | Linux client | Route only `home.arpa` to the router | [Client helper and systemd drop-in](client/linux/) |
@@ -41,9 +44,10 @@ includes both; `--no-status` and `--no-dns` opt out. Architectural optionality
 is not the same thing as the default installation profile.
 
 The design has no NAT66, custom inventory database, background inventory
-daemon or blanket `ygg -> lan` forwarding; stateful DHCPv6 is an explicit
-opt-in, never a side effect. Remote access is limited
-to explicitly trusted source addresses; reachability does not imply trust.
+daemon or unsolicited `ygg -> lan` forwarding; the LAN's RA/DHCPv6 and ULA
+settings are the operator's and the deployer never rewrites them (2.0; a 1.x
+router is migrated back to stock once). Remote access is limited to explicitly
+trusted source addresses; reachability does not imply trust.
 
 ## Documentation
 
