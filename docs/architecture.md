@@ -226,7 +226,10 @@ same MAC. Two different MACs for one lease, or none, attribute nothing. The
 neighbour branch is what names a DUID-UUID client (NetworkManager, systemd)
 without a `config host`; it is an observation of the moment - a sleeping or
 silent host has no entry and stays unattributed until it speaks - never
-stored, never an authorisation, and it cannot keep a row alive. Only leases
+stored, never an authorisation, and it cannot keep a row alive: a lease known
+this way alone does not make its client pinnable, and Pin records a DUID on
+such a match only while the kernel has just confirmed the neighbour entry
+(REACHABLE), never on a stale one. Only leases
 whose `flags` contain `bound` count. The lease is the router's own record of
 what it handed out, which is why it outranks anything merely observed but not
 the operator's canonical record. `ipv6_source` names the branch taken and
@@ -240,7 +243,9 @@ lease (an IPv6-only host), named from the lease's hostname, living as long as
 odhcpd lists the lease as bound - but only when the resolver names its MAC,
 because the row *is* the MAC. A DUID-UUID client with neither a DHCPv4 lease
 nor a `config host` gets its row through the neighbour branch while it is
-seen on the LAN, and stays invisible while it is not.
+seen on the LAN, and stays invisible while it is not; that row cannot be
+pinned until the client has a DHCPv4 lease or a `config host` (Pin needs
+identity evidence, not an observation).
 
 The computed EUI-64 must actually be observed. Never invent an address merely
 from a MAC. The canonical address is the primary IPv6 and rendered in bold;

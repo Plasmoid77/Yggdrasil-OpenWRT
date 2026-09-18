@@ -448,6 +448,23 @@ nomac|00030001000000000000|'
     eq '|zeonux/aa:bb:cc:dd:ee:ff/0|/3c:e1:a1:41:52:d0/0|/14:4f:8a:8d:19:77/0' "$ROWS"
     find_active_lease6_by_mac aa:bb:cc:dd:ee:ff || fail 'IPv6-only client not found by its lease'
     eq zeonux "$LEASE_MATCH_NAME"
+    # a lease known through the neighbour table alone names a row but does
+    # not make the client pinnable
+    saved_leases="$DHCPV6_LEASES"
+    DHCPV6_LEASES='66:77:88:99:aa:bb 300:1111:2222:3333::40 - neighbor'
+    if find_active_lease6_by_mac 66:77:88:99:aa:bb; then fail 'neighbour-attributed lease accepted as Pin evidence'; fi
+    DHCPV6_LEASES="$saved_leases"
+    # Pin records a DUID on a neighbour match only while the entry is REACHABLE
+    HOST_DUID_MACS=''
+    ip() { case "$*" in *'::40 '*) printf '%s\n' '300:1111:2222:3333::40 dev br-lan lladdr 66:77:88:99:aa:bb STALE' ;; esac; }
+    eq '' "$(lease_duid_for_mac 66:77:88:99:aa:bb)"
+    ip() { case "$*" in *'::40 '*) printf '%s\n' '300:1111:2222:3333::40 dev br-lan lladdr 66:77:88:99:aa:bb REACHABLE' ;; esac; }
+    eq '00040001000000000000000000000000' "$(lease_duid_for_mac 66:77:88:99:aa:bb)"
+    # ... while a config host or DUID-LL match needs no neighbour at all
+    ip() { :; }
+    eq '00030001112233445566' "$(lease_duid_for_mac 11:22:33:44:55:66)"
+    for sec in eth wlan any nomac; do collect_host_duid "$sec"; done
+    eq '0004ecbcbfb80ef2996849bca6b0d0a6ffce%206de1ca' "$(lease_duid_for_mac 3c:e1:a1:41:52:d0)"
     load emit_client
     eq '300:1111:2222:3333::10' "$(dhcpv6_lease_for_mac AA:BB:CC:DD:EE:FF)"
     eq '' "$(dhcpv6_lease_for_mac 00:00:00:00:00:00)"

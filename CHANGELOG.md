@@ -18,7 +18,10 @@ serves the table and Pin alike:
   in the address tooltip when a lease was matched through the neighbour
   table.
 - Pin uses the same resolver (with the LAN device and the host DUID map set
-  up first), so the `duid` it records is the lease the row shows.
+  up first), so the `duid` it records is the lease the row shows - but a
+  lease attributed only through the neighbour table is not evidence for a
+  pin, and the `duid` is recorded on such a match only while the kernel has
+  just confirmed the entry (REACHABLE), never on a stale one.
 - The stock hybrid LAN of deployer 2.0 gives a DHCPv6 client one lease
   address per prefix; the resolver reads all of them, the table still shows
   the routed-prefix one.

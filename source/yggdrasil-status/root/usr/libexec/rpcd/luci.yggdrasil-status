@@ -309,11 +309,12 @@ find_active_lease6_by_mac() {
 	fal6_wanted="$(normalize_mac "$1")"
 	[ -n "${DHCPV6_LEASES:-}" ] || return 1
 
-	# fal6_how (the attribution) is not needed here
-	# shellcheck disable=SC2034
 	while IFS=' ' read -r fal6_mac fal6_addr fal6_name fal6_how; do
 		[ "$fal6_mac" = "$fal6_wanted" ] || continue
 		[ -n "$fal6_addr" ] || continue
+		# a lease tied to this MAC only by the neighbour table names a row;
+		# it is not evidence enough to make the client persistent
+		[ "$fal6_how" != 'neighbor' ] || continue
 		[ "$fal6_name" != '-' ] && LEASE_MATCH_NAME="$fal6_name"
 		return 0
 	done <<EOF
@@ -467,8 +468,12 @@ host_mac_for_duid() {
 #              prefix, that a neighbour entry attributes to one and the same
 #              MAC. Two different MACs, or none, attribute nothing.
 # The third is an observation of the moment, not an identity: it names a
-# row, authorises nothing, is never stored and cannot keep a row alive. One
-# resolver for the table and for Pin, so both name the same device.
+# row, authorises nothing, is never stored and cannot keep a row alive; a
+# lease known only this way does not make its client pinnable
+# (find_active_lease6_by_mac), and Pin records a DUID on it only while the
+# kernel has just confirmed the entry (MFL_FRESH_ONLY=1: REACHABLE, not a
+# stale or reused entry). One resolver for the table and for Pin, so both
+# name the same device.
 # $1 = duid (lower-case hex), $2 = iaid (hex, may be empty), $3.. = addresses
 mac_for_lease() {
 	local mfl_duid="$1" mfl_iaid="$2" mfl_mac mfl_hw mfl_seen mfl_addr mfl_n
@@ -496,7 +501,11 @@ mac_for_lease() {
 	mfl_seen=''
 	for mfl_addr in "$@"; do
 		[ -n "$mfl_addr" ] || continue
-		mfl_n="$(mac_for_neighbor "$(lower "$mfl_addr")")"
+		mfl_addr="$(lower "$mfl_addr")"
+		if [ "${MFL_FRESH_ONLY:-0}" = 1 ] && ! neighbor_recently_reachable "$mfl_addr"; then
+			continue
+		fi
+		mfl_n="$(mac_for_neighbor "$mfl_addr")"
 		[ -n "$mfl_n" ] || continue
 		case "$mfl_seen" in
 			'') mfl_seen="$mfl_n" ;;
@@ -1618,8 +1627,10 @@ lease_duid_for_mac() {
 			*) ldm_iaid_hex="$(printf '%x' $(( ldm_iaid & 0xffffffff )))" ;;
 		esac
 		ldm_addrs="$(printf '%s' "$ldm_lease" | jsonfilter -e '@["ipv6-addr"][*].address' 2>/dev/null | tr '\n' ' ')"
+		# a DUID is written to flash on this: the neighbour branch counts
+		# only with a kernel-confirmed (REACHABLE) entry, never a stale one
 		# shellcheck disable=SC2086
-		ldm_mac="$(mac_for_lease "$ldm_duid" "$ldm_iaid_hex" $ldm_addrs)"
+		ldm_mac="$(MFL_FRESH_ONLY=1 mac_for_lease "$ldm_duid" "$ldm_iaid_hex" $ldm_addrs)"
 		[ "${ldm_mac%% *}" = "$ldm_wanted" ] || continue
 		if [ -n "$ldm_iaid_hex" ]; then
 			printf '%s%%%s\n' "$ldm_duid" "$ldm_iaid_hex"
