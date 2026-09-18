@@ -177,8 +177,9 @@ the router's Yggdrasil address and the command to reach it.
 the first change: unless the run ends in a successful verification, it puts
 the pre-run `network`, `dhcp` and `firewall` back after MINUTES and reloads
 the services. A successful run cancels it; a failed verification leaves it
-armed and says so; `touch /root/ygg-deploy-backup-<stamp>/guard.cancel` keeps
-the new configuration by hand. Use it on a router you reach over Yggdrasil
+armed and says so; `mkdir /root/ygg-deploy-backup-<stamp>/guard.state` keeps
+the new configuration by hand. A guard that fires stops the deployer first,
+then restores. Use it on a router you reach over Yggdrasil
 or over the LAN whose IPv6 you are changing:
 
 ```sh
@@ -203,9 +204,9 @@ sh deploy-openwrt-yggdrasil.sh -y --config /root/ygg.conf --guard 15
 ```
 
 If only part of the 1.x profile is left (you already changed something by
-hand), the script lists what it found, treats the RA/DHCPv6 and ULA settings
-as yours and only adds the routed prefix; `--migrate-legacy` forces the full
-migration instead. Reservations and bound DHCPv6 leases survive the reload;
+hand), the script stops in preflight and lists what it found: rerun with
+`--migrate-legacy` for the full migration, finish the change by hand first,
+or `--no-lan`. Reservations and bound DHCPv6 leases survive the reload;
 SLAAC addresses come back with the A flag; a client that used the old ULA is
 renumbered when the ULA is regenerated rather than restored.
 

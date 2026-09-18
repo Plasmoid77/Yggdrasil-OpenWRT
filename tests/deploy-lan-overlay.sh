@@ -29,7 +29,7 @@ extract_function() {
 eval "$(sed -n '/^set -u$/,/^VERSION=/p' "$SCRIPT" | sed '/^set -u$/d')"
 eval "$(sed -n '/^# -* defaults -*$/,/^usage() {$/p' "$SCRIPT" | sed '$d')"
 for f in add_peer add_trusted add_dns_host lower_str is_mac norm_duid norm_duid_opt duid_in_key mac_in_key norm_hostid add_host status_valid_version read_config \
-         classify_lan legacy_ula lan_has_ygg_prefix reserved_addr implicit_hostid existing_hosts section_is_client report_implicit_hosts apply_hosts stage_lan fw_rule_trusted stage_firewall; do
+         classify_lan legacy_ula lan_has_ygg_prefix lan_zone reserved_addr implicit_hostid existing_hosts section_is_client report_implicit_hosts apply_hosts stage_lan fw_rule_trusted stage_firewall; do
     body="$(extract_function "$f")"
     [ -n "$body" ] || { echo "FAIL: function $f not found in deployer" >&2; exit 1; }
     eval "$body"
@@ -38,8 +38,10 @@ PARSER="$(sed -n '/^while \[ \$# -gt 0 \]; do$/,/^done$/p' "$SCRIPT")"
 POSTCHECK="$(sed -n '/^# A reservation only means something/,/^# Ask for the Yggdrasil/p' "$SCRIPT" | sed '$d')"
 [ -n "$POSTCHECK" ] || { echo 'FAIL: --host post-parse check not found' >&2; exit 1; }
 
-DIED=''; WARNED=''; INFOD=''
+DIED=''; WARNED=''; INFOD=''; ERRED=''
 die()   { DIED="${DIED}${*}
+"; }
+err()   { ERRED="${ERRED}${*}
 "; }
 warn()  { WARNED="${WARNED}${*}
 "; }
@@ -52,7 +54,7 @@ have()  { return 1; }
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 reset() {
-    DIED=''; WARNED=''; INFOD=''; HOSTS=''; DNS_HOSTS=''; TRUSTED=''; DO_LAN=1; DO_DNS=1; DO_FIREWALL=1
+    DIED=''; WARNED=''; INFOD=''; ERRED=''; HOSTS=''; DNS_HOSTS=''; TRUSTED=''; DO_LAN=1; DO_DNS=1; DO_FIREWALL=1
     LAN_PLAN=''; MIGRATE_LEGACY=0; DO_LAN_FORWARD=1; GUARD_MIN=0
     CUR_IP6ASSIGN=''; CUR_IP6CLASS=''; CUR_ULA=''; CUR_DHCPV6=''; CUR_RA_SLAAC=''; CUR_RA_FLAGS=''
 }
@@ -116,9 +118,12 @@ legacy_slaac; reset; classify_lan
 [ "$LAN_PLAN" = migrate ] || fail "full 1.x --slaac signature not classified as migrate: $LAN_PLAN"
 # each part alone is an operator choice
 legacy_dhcpv6; U_ULA='fd11::/48'; U_IP6CLASS=''; reset; classify_lan
-[ "$LAN_PLAN" = overlay ] || fail "ra_slaac=0 alone was read as 1.x: $LAN_PLAN"
-printf '%s' "$WARNED" | grep -q 'part of the 1.x signature' || fail "partial signature not reported: $WARNED"
-printf '%s' "$WARNED" | grep -q -- '--migrate-legacy' || fail "partial signature did not point at --migrate-legacy"
+printf '%s' "$DIED" | grep -q -- '--no-lan' || fail "a partial 1.x signature did not stop the run: $DIED"
+printf '%s' "$ERRED" | grep -q 'part of the 1.x signature' || fail "partial signature not reported: $ERRED"
+printf '%s' "$ERRED" | grep -q -- '--migrate-legacy' || fail "partial signature did not point at --migrate-legacy"
+[ "$LAN_PLAN" = overlay ] || fail "a halted partial signature must not plan a migration: $LAN_PLAN"
+legacy_dhcpv6; U_ULA='fd11::/48'; reset; classify_lan
+printf '%s' "$DIED" | grep -q -- '--no-lan' || fail "ip6class singleton + 1.x mode with a ULA present was not stopped: $DIED"
 legacy_dhcpv6; U_ULA='fd11::/48'; reset; MIGRATE_LEGACY=1; classify_lan
 [ "$LAN_PLAN" = migrate ] || fail "--migrate-legacy did not force the migration on a partial signature: $LAN_PLAN"
 stock; reset; MIGRATE_LEGACY=1; classify_lan
@@ -410,6 +415,46 @@ printf '%s' "$INFOD" | grep -q 'cfg01 (3c:e1:a1:41:52:d0, ip 192.168.1.50) impli
 printf '%s' "$INFOD" | grep -q 'cfg02' && fail "a section with an explicit hostid was reported as implicit"
 echo 'PASS: reservation collisions, in-place update and protected sections'
 
+# 5b. the ULA comes back from the oldest 1.x backup, whatever the quoting;
+#     an unparseable value is skipped, nothing found means a generated one
+BACKUP_ROOT="$TMP/backups"
+mkdir -p "$BACKUP_ROOT/ygg-deploy-backup-20260901-010101" "$BACKUP_ROOT/ygg-deploy-backup-20260905-020202"
+printf "config globals 'globals'\n\toption ula_prefix \"fd12:3456:789a::/48\"\n" > "$BACKUP_ROOT/ygg-deploy-backup-20260901-010101/network"
+printf "config globals 'globals'\n\toption ula_prefix 'fdaa:bbbb:cccc::/48'\n" > "$BACKUP_ROOT/ygg-deploy-backup-20260905-020202/network"
+reset; got="$(legacy_ula)"
+[ "${got%% *}" = 'fd12:3456:789a::/48' ] || fail "double-quoted ULA in the oldest backup not restored: $got"
+printf '%s' "$got" | grep -q 'restored from' || fail "ULA origin missing: $got"
+printf "config globals 'globals'\n\toption ula_prefix 'not-a-prefix'\n" > "$BACKUP_ROOT/ygg-deploy-backup-20260901-010101/network"
+# legacy_ula runs in a subshell here, so let warn speak on stdout for this check
+warn() { printf 'WARN:%s\n' "$*"; }
+reset; got="$(legacy_ula | tail -n 1)"; warned="$(legacy_ula | head -n 1)"
+[ "${got%% *}" = 'fdaa:bbbb:cccc::/48' ] || fail "unparseable ULA not skipped in favour of the next backup: $got"
+printf '%s' "$warned" | grep -q 'WARN:.*unparseable' || fail "unparseable ULA not reported: $warned"
+warn()  { WARNED="${WARNED}${*}
+"; }
+printf "config globals 'globals'\n\toption ula_prefix fd00:1:2::/48\n" > "$BACKUP_ROOT/ygg-deploy-backup-20260901-010101/network"
+reset; got="$(legacy_ula)"
+[ "${got%% *}" = 'fd00:1:2::/48' ] || fail "unquoted ULA not restored: $got"
+rm -rf "$BACKUP_ROOT"; mkdir -p "$BACKUP_ROOT"
+reset; got="$(legacy_ula)"
+case "${got%% *}" in fd[0-9a-f][0-9a-f]:[0-9a-f]*:[0-9a-f]*::/48) ;; *) fail "generated ULA malformed: $got" ;; esac
+printf '%s' "$got" | grep -q 'generated' || fail "generated ULA not announced as such: $got"
+echo 'PASS: legacy ULA restoration and generation'
+
+# 5c. the firewall zone of the LAN network is resolved, not assumed
+LAN='guests'
+uci() { case "$1 $2" in 'show firewall') printf "%s\n" "firewall.cfg02dc81=zone" "firewall.cfg02dc81.name='lan'" "firewall.cfg02dc81.network='lan' 'guests'" "firewall.cfg03dc81=zone" "firewall.cfg03dc81.name='wan'" "firewall.cfg03dc81.network='wan' 'wan6'" ;; '-q get') case "$3" in firewall.cfg02dc81.name) echo lan ;; *) return 1 ;; esac ;; *) return 1 ;; esac; }
+reset; [ "$(lan_zone)" = 'lan' ] || fail "zone of network 'guests' not resolved to 'lan': $(lan_zone)"
+warn() { printf 'WARN:%s\n' "$*"; }
+LAN='dmz'; reset; got="$(lan_zone)"
+[ "${got##*
+}" = 'dmz' ] || fail "unlisted network did not fall back to its own name: $got"
+printf '%s' "$got" | grep -q 'WARN:no firewall zone lists' || fail "fallback not reported: $got"
+warn()  { WARNED="${WARNED}${*}
+"; }
+LAN='lan'; unset -f uci
+echo 'PASS: LAN zone resolution'
+
 # 6. the UCI values the LAN stage writes for each plan (dry run: no commit,
 #    no services, no assignment wait)
 DRY_RUN=1; IFACE='ygg0'; LAN='lan'; YGG_CLASS='ygg0'; YGG_PREFIX='303:170f:3ab2:166e::/64'
@@ -469,6 +514,7 @@ uci() { case "$1 $2" in 'show dhcp') printf '%s\n' "$FIXTURE" ;; '-q get') print
 echo 'PASS: the LAN stage writes exactly the overlay values per plan'
 
 # 7. the LAN-to-Yggdrasil rule follows --no-lan-forward; the zone is unchanged
+lan_zone() { echo lan; }
 reset; UCI_LOG=''; stage_firewall
 [ -z "$DIED" ] || fail "firewall stage died: $DIED"
 for want in 'set firewall.ygg_lan_out=rule' 'set firewall.ygg_lan_out.src=lan' 'set firewall.ygg_lan_out.dest=ygg' \

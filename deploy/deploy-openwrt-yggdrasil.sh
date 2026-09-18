@@ -41,6 +41,7 @@ MIGRATE_LEGACY=0            # --migrate-legacy: migrate on a partial 1.x signatu
 MIGRATED_MARKER='/etc/yggdrasil-deploy/migrated'
 LAN_PLAN=''                 # overlay | migrate, settled in preflight (classify_lan)
 CUR_IP6ASSIGN=''; CUR_IP6CLASS=''; CUR_ULA=''; CUR_DHCPV6=''; CUR_RA_SLAAC=''; CUR_RA_FLAGS=''
+MARKER_WRITTEN=0                # this run wrote the migration marker
 # LAN hosts may initiate connections into Yggdrasil through the router (one
 # explicit stateful rule, IPv6 to 200::/7 only). Inbound stays trusted-only.
 DO_LAN_FORWARD=1
@@ -81,6 +82,7 @@ SUPPLIED_KEY=''
 DRY_RUN=0
 ASSUME_YES=0
 WAIT_SECS=90
+BACKUP_ROOT='/root'         # where every run leaves ygg-deploy-backup-<stamp>/
 BACKUP_DIR=''
 
 # ------------------------------------------------------------------ output ---
@@ -735,6 +737,9 @@ rollback() {
     /etc/init.d/odhcpd restart  >/dev/null 2>&1 || true
     [ "$CHANGED_DHCP" -eq 1 ] && { /etc/init.d/dnsmasq restart >/dev/null 2>&1 || true; }
     /etc/init.d/firewall reload >/dev/null 2>&1 || true
+    if [ "$MARKER_WRITTEN" -eq 1 ]; then
+        rm -f "$MIGRATED_MARKER" && warn "  removed $MIGRATED_MARKER (the migration did not complete)"
+    fi
     cancel_guard
     warn "rollback done — verify the router state manually"
 }
@@ -784,12 +789,13 @@ classify_lan() {
             LAN_PLAN='migrate'
             warn "LAN: partial 1.x signature, migrating anyway (--migrate-legacy)"
         else
-            warn "LAN: part of the 1.x signature is present but not all of it:"
-            [ "$LEGACY_CLASS" -eq 1 ] && warn "    ip6class restricts the LAN to '$LAN_YGG_CLASS' (will be removed)"
-            [ "$LEGACY_ULA" -eq 1 ]   && warn "    no ULA prefix (left as it is)"
-            [ -n "$LEGACY_MODE" ]     && warn "    RA/DHCPv6 in the 1.x '$LEGACY_MODE' shape (left as it is)"
-            warn "  the RA/DHCPv6 and ULA settings are treated as the operator's; add"
-            warn "  --migrate-legacy to restore the stock LAN configuration instead"
+            err "LAN: part of the 1.x signature is present but not all of it:"
+            [ "$LEGACY_CLASS" -eq 1 ] && err "    ip6class restricts the LAN to '$LAN_YGG_CLASS'"
+            [ "$LEGACY_ULA" -eq 1 ]   && err "    no ULA prefix"
+            [ -n "$LEGACY_MODE" ]     && err "    RA/DHCPv6 in the 1.x '$LEGACY_MODE' shape"
+            err "  not guessing whose settings these are: rerun with --migrate-legacy to"
+            err "  restore the stock LAN configuration, put the parts right by hand first,"
+            die "or use --no-lan to leave the LAN untouched"
         fi
     elif [ "$MIGRATE_LEGACY" -eq 1 ]; then
         warn "--migrate-legacy: no 1.x signature on the LAN, nothing to migrate"
@@ -843,6 +849,11 @@ classify_lan() {
 # separate process with its own copy of the files, so it neither depends on
 # this script surviving nor on Yggdrasil coming up. nohup with every fd
 # redirected is what survives the SSH session ending on BusyBox.
+#
+# Exactly one of "fired" and "cancelled" happens: both sides claim the same
+# directory with mkdir, which is atomic. A firing guard first kills the
+# deployer outright (no trap, so no second restoration racing with it),
+# reverts pending UCI changes the way rollback does, then restores the files.
 GUARD_PID=''
 arm_guard() {
     [ "$DRY_RUN" -eq 0 ] && [ "$GUARD_MIN" -gt 0 ] || return 0
@@ -850,29 +861,41 @@ arm_guard() {
     cat > "$BACKUP_DIR/guard.sh" <<GUARD
 #!/bin/sh
 sleep $((GUARD_MIN * 60))
-[ -f "$BACKUP_DIR/guard.cancel" ] && exit 0
+mkdir "$BACKUP_DIR/guard.state" 2>/dev/null || exit 0   # cancelled first
+: > "$BACKUP_DIR/guard.state/fired"
+kill -9 $$ 2>/dev/null
+sleep 1
 for c in network dhcp firewall; do
-    [ -f "$BACKUP_DIR/\$c" ] && cp "$BACKUP_DIR/\$c" "/etc/config/\$c"
+    [ -f "$BACKUP_DIR/\$c" ] || continue
+    uci -q revert "\$c" 2>/dev/null
+    cp "$BACKUP_DIR/\$c" "/etc/config/\$c"
 done
+[ -f "$BACKUP_DIR/marker.created" ] && rm -f "$MIGRATED_MARKER"
 /etc/init.d/network reload
 /etc/init.d/odhcpd restart
 /etc/init.d/dnsmasq restart
 /etc/init.d/firewall reload
-logger -t ygg-deploy "guard: configuration restored from $BACKUP_DIR"
+logger -t ygg-deploy "guard: deployer stopped, configuration restored from $BACKUP_DIR"
 GUARD
     chmod 700 "$BACKUP_DIR/guard.sh"
     nohup sh "$BACKUP_DIR/guard.sh" >/dev/null 2>&1 </dev/null &
     GUARD_PID=$!
     ok "guard armed: network/dhcp/firewall restore in ${GUARD_MIN} min unless verification succeeds"
-    info "    cancel by hand: touch $BACKUP_DIR/guard.cancel"
+    info "    cancel by hand: mkdir $BACKUP_DIR/guard.state"
 }
 
 cancel_guard() {
     [ -n "$GUARD_PID" ] || return 0
-    touch "$BACKUP_DIR/guard.cancel" 2>/dev/null || true
-    kill "$GUARD_PID" 2>/dev/null || true
-    GUARD_PID=''
-    ok "guard cancelled"
+    if mkdir "$BACKUP_DIR/guard.state" 2>/dev/null; then
+        kill "$GUARD_PID" 2>/dev/null || true
+        GUARD_PID=''
+        ok "guard cancelled"
+    else
+        # The guard won the race: it is restoring, or has restored, the
+        # pre-run files. Nothing this process writes from here on is wanted.
+        GUARD_PID=''
+        die "the guard fired before this run finished — the pre-run configuration is being restored"
+    fi
 }
 
 stage_preflight() {
@@ -943,7 +966,7 @@ stage_preflight() {
     fi
 
     if [ "$DRY_RUN" -eq 0 ]; then
-        BACKUP_DIR="/root/ygg-deploy-backup-$(date +%Y%m%d-%H%M%S)"
+        BACKUP_DIR="$BACKUP_ROOT/ygg-deploy-backup-$(date +%Y%m%d-%H%M%S)"
         mkdir -p "$BACKUP_DIR" || die "cannot create $BACKUP_DIR"
         for _c in network dhcp firewall; do
             [ -f "/etc/config/$_c" ] && cp "/etc/config/$_c" "$BACKUP_DIR/$_c"
@@ -1478,10 +1501,18 @@ HOSTS_EOF
 # makes it - which renumbers the LAN's ULA side once, and is said so.
 legacy_ula() {
     _lu=''
-    for _b in /root/ygg-deploy-backup-*/network; do
+    for _b in "$BACKUP_ROOT"/ygg-deploy-backup-*/network; do
         [ -f "$_b" ] || continue
-        _lu="$(sed -n "s/^[[:space:]]*option ula_prefix[[:space:]]*'\{0,1\}\([^']*\)'\{0,1\}/\1/p" "$_b" | head -n 1)"
-        [ -n "$_lu" ] && { printf '%s restored from %s\n' "$_lu" "$_b"; return 0; }
+        # uci exports the value single-quoted; a hand-edited file may use
+        # double quotes or none. Take what is between the quotes, then insist
+        # on a ULA-looking prefix before restoring it.
+        _lu="$(sed -n "s/^[[:space:]]*option[[:space:]]\{1,\}['\"]\{0,1\}ula_prefix['\"]\{0,1\}[[:space:]]\{1,\}['\"]\{0,1\}\([^'\"[:space:]]*\)['\"]\{0,1\}[[:space:]]*\$/\1/p" "$_b" | head -n 1)"
+        case "$_lu" in
+            f[cd][0-9a-fA-F][0-9a-fA-F]:*::/4[89]|f[cd][0-9a-fA-F][0-9a-fA-F]:*::/5[0-9]|f[cd][0-9a-fA-F][0-9a-fA-F]:*::/6[0-4])
+                printf '%s restored from %s\n' "$_lu" "$_b"; return 0 ;;
+            '') ;;
+            *) warn "ignoring unparseable ula_prefix '$_lu' in $_b" ;;
+        esac
     done
     _r1=$(( $(hexdump -n1 -e '/1 "%u"' /dev/urandom) & 0xff ))
     _r2=$(( $(hexdump -n2 -e '/2 "%u"' /dev/urandom) & 0xffff ))
@@ -1576,17 +1607,6 @@ stage_lan() {
         uci commit network || die "uci commit network failed"
         uci commit dhcp    || die "uci commit dhcp failed"
         have flock && exec 9>&-
-        if [ "$LAN_PLAN" = 'migrate' ]; then
-            mkdir -p "${MIGRATED_MARKER%/*}" || die "cannot create ${MIGRATED_MARKER%/*}"
-            {
-                printf 'date=%s\n' "$(date +%Y-%m-%dT%H:%M:%S)"
-                printf 'deployer=%s\n' "$VERSION"
-                printf 'backup=%s\n' "$BACKUP_DIR"
-                printf 'ip6class=%s\n' "$CUR_IP6CLASS"
-                printf 'dhcpv6=%s\nra_slaac=%s\nra_flags=%s\n' "$CUR_DHCPV6" "$CUR_RA_SLAAC" "${CUR_RA_FLAGS% }"
-            } > "$MIGRATED_MARKER" || die "cannot write $MIGRATED_MARKER"
-            info "migration recorded in $MIGRATED_MARKER"
-        fi
         /etc/init.d/network reload >/dev/null 2>&1 || die "network reload failed"
         # reload (SIGHUP) re-reads the configuration but keeps the bound DHCPv6
         # leases; a restart would drop every lease from the router's record
@@ -1607,6 +1627,21 @@ stage_lan() {
         done
         if lan_has_ygg_prefix; then
             ok "LAN configuration applied — $YGG_PREFIX is assigned to '$LAN'"
+            # Recorded only now, after the migrated LAN proved to work; a
+            # rollback or the guard removes it again (MARKER_WRITTEN).
+            if [ "$LAN_PLAN" = 'migrate' ]; then
+                mkdir -p "${MIGRATED_MARKER%/*}" || die "cannot create ${MIGRATED_MARKER%/*}"
+                {
+                    printf 'date=%s\n' "$(date +%Y-%m-%dT%H:%M:%S)"
+                    printf 'deployer=%s\n' "$VERSION"
+                    printf 'backup=%s\n' "$BACKUP_DIR"
+                    printf 'ip6class=%s\n' "$CUR_IP6CLASS"
+                    printf 'dhcpv6=%s\nra_slaac=%s\nra_flags=%s\n' "$CUR_DHCPV6" "$CUR_RA_SLAAC" "${CUR_RA_FLAGS% }"
+                } > "$MIGRATED_MARKER" || die "cannot write $MIGRATED_MARKER"
+                MARKER_WRITTEN=1
+                [ -n "$BACKUP_DIR" ] && : > "$BACKUP_DIR/marker.created"
+                info "migration recorded in $MIGRATED_MARKER"
+            fi
         else
             err "netifd did not assign $YGG_PREFIX to '$LAN' (ifstatus $LAN: ipv6-prefix-assignment)"
             err "  interfaces requesting a prefix: $(uci show network 2>/dev/null | sed -n 's/^network\.\([^.]*\)\.ip6assign=.*/\1/p' | tr '\n' ' ')"
@@ -1616,6 +1651,20 @@ stage_lan() {
 }
 
 # ===================================================== stage 5: firewall policy
+
+# The firewall zone the LAN network belongs to. The network name and the zone
+# name coincide on stock ('lan'), but a zone is a list of networks and may be
+# called anything; a rule on a zone that does not exist matches nothing.
+lan_zone() {
+    _lz="$(uci show firewall 2>/dev/null | sed -n "s/^firewall\.\([^.]*\)\.network=.*['\" ]${LAN}['\" ].*/\1/p" | head -n 1)"
+    [ -n "$_lz" ] && _lz="$(uci -q get "firewall.$_lz.name")"
+    if [ -n "$_lz" ]; then
+        printf '%s\n' "$_lz"
+    else
+        warn "no firewall zone lists network '$LAN'; assuming a zone named '$LAN'"
+        printf '%s\n' "$LAN"
+    fi
+}
 
 fw_rule_trusted() {
     # $1 = section name, $2 = human name, and the caller pre-sets the specifics
@@ -1637,6 +1686,7 @@ stage_firewall() {
     step "Stage 5 — firewall zone and trusted rules"
 
     CHANGED_FIREWALL=1
+    LAN_ZONE="$(lan_zone)"
 
     uci_set 'firewall.ygg' 'zone'
     uci_set 'firewall.ygg.name' 'ygg'
@@ -1657,7 +1707,7 @@ stage_firewall() {
     if [ "$DO_LAN_FORWARD" -eq 1 ]; then
         uci_set 'firewall.ygg_lan_out' 'rule'
         uci_set 'firewall.ygg_lan_out.name' 'LAN-to-Yggdrasil'
-        uci_set 'firewall.ygg_lan_out.src' "$LAN"
+        uci_set 'firewall.ygg_lan_out.src' "$LAN_ZONE"
         uci_set 'firewall.ygg_lan_out.dest' 'ygg'
         uci_set 'firewall.ygg_lan_out.family' 'ipv6'
         uci_set 'firewall.ygg_lan_out.proto' 'all'
@@ -1677,7 +1727,7 @@ stage_firewall() {
         uci_set 'firewall.ygg_trusted_lan' 'rule'
         uci_set 'firewall.ygg_trusted_lan.name' 'YGG-Trusted-to-LAN'
         uci_set 'firewall.ygg_trusted_lan.src' 'ygg'
-        uci_set 'firewall.ygg_trusted_lan.dest' "$LAN"
+        uci_set 'firewall.ygg_trusted_lan.dest' "$LAN_ZONE"
         uci_set 'firewall.ygg_trusted_lan.family' 'ipv6'
         uci_set 'firewall.ygg_trusted_lan.proto' 'all'
         uci_set 'firewall.ygg_trusted_lan.target' 'ACCEPT'
@@ -2117,6 +2167,8 @@ HOSTS_EOF
         check 'no NAT66'         ''       "$(uci -q get firewall.ygg.masq6)"
         if [ "$DO_LAN_FORWARD" -eq 1 ]; then
             check 'LAN-to-Yggdrasil rule' '200::/7' "$(uci -q get firewall.ygg_lan_out.dest_ip)"
+            # fw4 drops a rule whose zone does not exist; the ruleset is the proof
+            check 'rule in the ruleset' 'yes' "$(nft list ruleset 2>/dev/null | grep -q 'LAN-to-Yggdrasil' && echo yes || echo no)"
         else
             check 'LAN-to-Yggdrasil rule' ''        "$(uci -q get firewall.ygg_lan_out)"
         fi
@@ -2166,7 +2218,7 @@ HOSTS_EOF
         printf '%s%s%s\n\n' "$C_ERR" "$RULE" "$C_RST" >&2
         err "review the [FAIL] lines above before relying on this router"
         err "configuration backup is at ${BACKUP_DIR:-<none>}"
-        [ -n "$GUARD_PID" ] && warn "the guard stays armed: the pre-run configuration returns in ${GUARD_MIN} min unless you touch $BACKUP_DIR/guard.cancel"
+        [ -n "$GUARD_PID" ] && warn "the guard stays armed: the pre-run configuration returns in ${GUARD_MIN} min unless you run: mkdir $BACKUP_DIR/guard.state"
         return 0
     fi
     cancel_guard

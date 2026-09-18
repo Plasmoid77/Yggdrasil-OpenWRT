@@ -106,7 +106,7 @@ exactly the Ygg class, no ULA, and one of the two mode shapes - as its own
 | --- | --- |
 | Whole signature, no marker | migrate: `ip6class` deleted, `dhcpv6=server` / `ra_slaac=1` / `ra_flags` stock, the ULA restored from the oldest `/root/ygg-deploy-backup-*/network` that still holds it, otherwise generated stock-style (`fd` + 40 random bits `::/48` - a renumbering of the ULA side, said so in the output), the marker written with the originals and the run's backup path |
 | Marker present | overlay only; the RA/DHCPv6 and ULA settings are the operator's from now on |
-| Part of the signature | overlay only, the found parts listed, `--migrate-legacy` offered; with it the migration runs as above |
+| Part of the signature | the run stops in preflight, before any change, listing what it found: rerun with `--migrate-legacy` (the migration runs as above), put the parts right by hand first, or `--no-lan` |
 | Nothing | overlay only |
 
 `--dhcpv6`, `--slaac` and the `[flags]` entries of the same name are refused
@@ -127,9 +127,13 @@ change, a detached watchdog (nohup, own copy of `network`, `dhcp` and
 reloads network, odhcpd, dnsmasq and firewall after MINUTES. A run that ends
 in a successful verification cancels it; a failed verification leaves it
 armed and says so; a rollback cancels it after restoring the same files. The
-operator can cancel by hand with `touch <backup>/guard.cancel`. It is the
-recovery path for a router whose only management path is the one being
-reconfigured; it does not depend on the deployer surviving or on Yggdrasil.
+operator can cancel by hand with `mkdir <backup>/guard.state`. Firing and
+cancelling claim that directory with `mkdir`, so exactly one of them happens;
+a firing guard first kills the deployer (no second restoration racing with
+it), reverts pending UCI changes, restores the files, removes a migration
+marker this run wrote, and reloads. It is the recovery path for a router
+whose only management path is the one being reconfigured; it does not depend
+on the deployer surviving or on Yggdrasil.
 
 ### Firewall
 
@@ -142,7 +146,7 @@ permits TCP/UDP 53 separately.
 
 LAN hosts may **initiate** connections into Yggdrasil through the router
 (deployer 2.0, on by default): one explicit stateful rule `LAN-to-Yggdrasil`
-(`src lan`, `dest ygg`, `family ipv6`, `dest_ip 200::/7`, ACCEPT), the way
+(`src <the LAN's zone>`, `dest ygg`, `family ipv6`, `dest_ip 200::/7`, ACCEPT), the way
 stock lets the LAN initiate toward the WAN. It is a rule with a destination,
 not a zone forwarding, so anything else the tunnel might carry one day is not
 forwarded by accident. It changes nothing inbound: unsolicited traffic from
@@ -159,7 +163,8 @@ as in 1.x.
 
 Verification is in three classes: what the deployer wrote or requires is
 asserted (`ra`, `ra_default`, the prefix actually assigned to the LAN, an
-admitting `ip6class`, the zone, the rule, reservations, odhcpd running); the
+admitting `ip6class`, the zone, the rule in UCI and in the live nft ruleset,
+reservations, odhcpd running); the
 operator's LAN settings are reported, never asserted; leases are information
 (a client asks on renew, reconnect or reboot).
 
@@ -604,7 +609,7 @@ config rule 'ygg_dns'
 | Overlay, not replacement (2.0) | The routed /64 is one more prefix beside native IPv6 and the ULA; the LAN's RA/DHCPv6 configuration is the operator's. 1.x replaced the LAN's IPv6 (`ip6class`, no ULA, its own RA mode), which broke native IPv6 on dual-stack uplinks and took Android off the routed prefix in managed mode. The stock hybrid gives DHCPv6-capable clients a reservable stateful address per prefix while every client keeps SLAAC |
 | `ra_default=2` kept (D1) | The one RA setting the overlay needs: replies to Yggdrasil sources need a default route on an IPv4-only site. Route Information Options (RFC 4191) for `200::/7` were rejected: odhcpd derives them only from `unreachable` routes with `ra_default=0`, Linux ignores them by default, Android accepts /48-/64 only |
 | LAN may initiate into Yggdrasil (D5, 2.0) | One explicit stateful rule to `200::/7`, opt-out `--no-lan-forward`. 1.x had no such forwarding, an unweighed default inherited from the remote-access use case. No NAT66: a wrong-source packet fails closed in Yggdrasil instead of being rewritten |
-| Migration by whole signature, recorded once | `ra_slaac=0` or a missing ULA alone are operator choices; only the 1.x combination is ours, and the marker stops a later run from reading operator changes as legacy. The ULA comes back from the oldest 1.x backup because regeneration renumbers |
+| Migration by whole signature, recorded once | `ra_slaac=0` or a missing ULA alone are operator choices; only the 1.x combination is ours, a partial one stops the run rather than guessing, and the marker (written after the migrated LAN proved to work, removed by a rollback) stops a later run from reading operator changes as legacy. The ULA comes back from the oldest 1.x backup because regeneration renumbers |
 | Assignment length kept, prefix assignment verified | Forcing `ip6assign=64` removes downstream delegation space an operator planned for; netifd takes the routed /64 with stock 60 anyway. `ip6class`/`ip6assign` express a wish, so `ifstatus` is checked after the reload |
 | `--guard` watchdog | A remote-only router needs a recovery path independent of the deployer process and of Yggdrasil; the operator's confirmation arms it, a successful verification cancels it |
 | Reservations through native `config host` `hostid` | odhcpd already implements matching (DUID, or MAC for DUID-LLT/LL) and the implicit IPv4-derived IID; the deployer only validates, checks collisions and writes the section |
