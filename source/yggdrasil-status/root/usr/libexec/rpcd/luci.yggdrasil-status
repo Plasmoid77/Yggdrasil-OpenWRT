@@ -461,9 +461,12 @@ host_mac_for_duid() {
 #              persistently;
 #   duid     - the MAC inside a 14-byte DUID-LLT (type 1) or 10-byte DUID-LL
 #              (type 3), the way odhcpd itself matches a config host by MAC;
-#              taken only with hardware type 1 (Ethernet) and a non-zero
-#              MAC - an all-zero one is a firmware defect (seen on a BMC),
-#              not an identity;
+#              taken only with hardware type 1 (Ethernet), a non-zero MAC
+#              (an all-zero one is a firmware defect, seen on a BMC) and
+#              only when that MAC is actually on this LAN (a DHCPv4 lease or
+#              a neighbour entry): Windows keeps one DUID per machine, made
+#              on whichever adapter came first, so a Wi-Fi client can present
+#              an Ethernet MAC that never appears here;
 #   neighbor - the LAN neighbour table: every address of the lease, in any
 #              prefix, that a neighbour entry attributes to one and the same
 #              MAC. Two different MACs, or none, attribute nothing.
@@ -474,6 +477,19 @@ host_mac_for_duid() {
 # kernel has just confirmed the entry (MFL_FRESH_ONLY=1: REACHABLE, not a
 # stale or reused entry). One resolver for the table and for Pin, so both
 # name the same device.
+# A MAC the LAN has actually seen: an active DHCPv4 lease or any neighbour
+# entry (IPv4 or IPv6) on the LAN device.
+mac_seen_on_lan() {
+	local msl_mac
+	msl_mac="$(normalize_mac "$1")"
+	[ -n "$msl_mac" ] || return 1
+	if [ -r "$LEASE_FILE" ] && awk -v m="$msl_mac" 'tolower($2) == m { f = 1 } END { exit !f }' "$LEASE_FILE" 2>/dev/null; then
+		return 0
+	fi
+	{ ip neigh show dev "$LAN_DEV" 2>/dev/null; ip -6 neigh show dev "$LAN_DEV" 2>/dev/null; } \
+		| awk -v m="$msl_mac" '{ for (i = 1; i < NF; i++) if ($i == "lladdr" && tolower($(i + 1)) == m) { f = 1; exit } } END { exit !f }'
+}
+
 # $1 = duid (lower-case hex), $2 = iaid (hex, may be empty), $3.. = addresses
 mac_for_lease() {
 	local mfl_duid="$1" mfl_iaid="$2" mfl_mac mfl_hw mfl_seen mfl_addr mfl_n
@@ -493,7 +509,7 @@ mac_for_lease() {
 				0001:*) mfl_mac="$(printf '%s' "$mfl_mac" | sed 's/\(..\)/\1:/g; s/:$//')" ;;
 				*) mfl_mac='' ;;
 			esac
-			if [ -n "$mfl_mac" ]; then
+			if [ -n "$mfl_mac" ] && mac_seen_on_lan "$mfl_mac"; then
 				printf '%s duid\n' "$mfl_mac"
 				return 0
 			fi ;;

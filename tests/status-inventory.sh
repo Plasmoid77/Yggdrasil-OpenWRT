@@ -26,7 +26,7 @@ for fn in lower normalize_mac valid_mac valid_hostname valid_ipv4 first_ipv4 \
     merge_node_cache write_address_memory save_address_memory ygg_node_is_live \
     recall_lan_addresses remember_lan_addresses \
     discover_lan_addresses confirm_discovered_addresses \
-    collect_host_duids collect_host_duid host_mac_for_duid mac_for_lease collect_dhcpv6_leases dhcpv6_lease_for_mac dhcpv6_lease_match_for_mac \
+    collect_host_duids collect_host_duid host_mac_for_duid mac_seen_on_lan mac_for_lease collect_dhcpv6_leases dhcpv6_lease_for_mac dhcpv6_lease_match_for_mac \
     norm_hostid valid_hostid collect_taken_hostids collect_taken_hostid lease_duid_for_mac emit_dynamic_leases6 \
     iid_to_addr find_active_lease6_by_mac \
     emit_client rpc_pin rpc_unpin; do load "$fn"; done
@@ -386,9 +386,12 @@ nomac|00030001000000000000|'
     eq '300:1111:2222:3333::1:0' "$(iid_to_addr '300:1111:2222:3333:' 10000)"
     eq '300:1111:2222:3333:abcd:ef01:2345:6789' "$(iid_to_addr '300:1111:2222:3333:' abcdef0123456789)"
     eq '300:1111:2222:3333:1000::' "$(iid_to_addr '300:1111:2222:3333:' 1000000000000000)"
-    # no neighbour table here: the DUID-UUID lease with no config host stays out
+    # no neighbour table here: the DUID-UUID lease with no config host stays out;
+    # the DUID-LLT/LL MACs are on the LAN through their DHCPv4 leases
     LAN_DEV='br-lan'
     ip() { :; }
+    LEASE_FILE="$TMP/dhcp.leases"
+    printf '%s\n' '9999999999 aa:bb:cc:dd:ee:ff 192.0.2.10 zeonux *' '9999999999 11:22:33:44:55:66 192.0.2.20 * *' > "$LEASE_FILE"
     collect_dhcpv6_leases
     eq "$(printf '%s\n' \
         'aa:bb:cc:dd:ee:ff 300:1111:2222:3333::10 zeonux duid' \
@@ -424,12 +427,20 @@ nomac|00030001000000000000|'
     }
     collect_dhcpv6_leases
     printf '%s\n' "$DHCPV6_LEASES" | grep -q '::40 ' && fail "a lease answered by two MACs was attributed: $DHCPV6_LEASES"
-    # the MAC inside a DUID-LL/LLT is trusted only with hardware type 1 and a
-    # non-zero MAC; otherwise the neighbour table decides
+    # the MAC inside a DUID-LL/LLT is trusted only with hardware type 1, a
+    # non-zero MAC and a MAC the LAN has seen; otherwise the neighbour table decides
     eq '11:22:33:44:55:66 duid' "$(mac_for_lease 00030001112233445566 '')"
     eq '' "$(mac_for_lease 00030006112233445566 '')"
     eq '' "$(mac_for_lease 00030001000000000000 '')"
     eq '' "$(mac_for_lease 0001000612345678112233445566 '')"
+    # a Windows DUID-LLT made on another adapter names a MAC the LAN never saw:
+    # the neighbour table attributes the lease to the adapter that is here
+    eq '' "$(mac_for_lease 000100012c3d9ac708bfb82cb43d '' 300:1111:2222:3333::36a)"
+    ip() { case "$*" in *'::36a '*) printf '%s\n' '300:1111:2222:3333::36a dev br-lan lladdr 58:1c:f8:29:fb:08 STALE' ;; esac; }
+    eq '58:1c:f8:29:fb:08 neighbor' "$(mac_for_lease 000100012c3d9ac708bfb82cb43d '' 300:1111:2222:3333::36a)"
+    # ... and a DUID MAC known only from a neighbour entry still counts
+    ip() { printf '%s\n' 'fe80::1 dev br-lan lladdr 08:bf:b8:2c:b4:3d REACHABLE'; }
+    eq '08:bf:b8:2c:b4:3d duid' "$(mac_for_lease 000100012c3d9ac708bfb82cb43d '' 300:1111:2222:3333::36a)"
     ip() { printf '%s\n' '300:1111:2222:3333::50 dev br-lan lladdr 0a:0b:0c:0d:0e:0f REACHABLE'; }
     eq '0a:0b:0c:0d:0e:0f neighbor' "$(mac_for_lease 00030006112233445566 '' 300:1111:2222:3333::50)"
     # a config host outranks both

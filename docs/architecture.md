@@ -191,7 +191,10 @@ A DHCPv6 lease is attributed to a row by MAC through one resolver
 way odhcpd reads it - an exact `DUID%IAID` section wins over a DUID-only one)
 to a `mac`; `duid` - the MAC embedded in a DUID-LLT or DUID-LL, the same rule
 odhcpd applies when it matches `config host` by MAC, accepted only with
-hardware type 1 and a non-zero MAC (an all-zero one is a firmware defect);
+hardware type 1, a non-zero MAC (an all-zero one is a firmware defect) and a
+MAC the LAN has seen in a DHCPv4 lease or a neighbour entry (Windows keeps
+one DUID per machine, made on whichever adapter came first, so a Wi-Fi
+client can carry an Ethernet MAC that is not here);
 `neighbor` - the LAN neighbour table: every address of the lease, in any
 prefix the LAN carries, that a neighbour entry attributes to one and the
 same MAC. Two different MACs for one lease, or none, attribute nothing. The

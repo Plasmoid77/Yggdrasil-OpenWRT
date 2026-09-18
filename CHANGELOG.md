@@ -9,9 +9,11 @@ could see which device answered for the leased address. One resolver now
 serves the table and Pin alike:
 
 - `mac_for_lease`: `config host` DUID map (the operator's word), then the
-  MAC inside a DUID-LLT/LL - only with hardware type 1 and a non-zero MAC -
-  then the LAN neighbour table over every address of the lease in every
-  prefix the LAN carries. One MAC attributes; two different MACs, or none,
+  MAC inside a DUID-LLT/LL - only with hardware type 1, a non-zero MAC and
+  a MAC the LAN has actually seen (DHCPv4 lease or neighbour entry): a
+  Windows 11 laptop on Wi-Fi presented a DUID-LLT made on its Ethernet
+  adapter, which would have produced a phantom row - then the LAN neighbour
+  table over every address of the lease in every prefix the LAN carries. One MAC attributes; two different MACs, or none,
   attribute nothing. The neighbour branch is an observation of the moment:
   never stored, never an authorisation, never a reason to keep a row.
 - Rows carry `ipv6_lease_match` (`host`, `duid`, `neighbor`); the page says
