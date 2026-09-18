@@ -66,7 +66,7 @@ or `ula_prefix`. What it writes on the LAN:
 | Setting | 2.0 |
 | --- | --- |
 | `network.<lan>.ip6assign` | kept; `64` only when absent. netifd falls back to longer lengths down to /64 when the requested length does not fit, so stock `60` takes the routed `/64` whole (measured). After the reload the deployer checks `ifstatus <lan>` for the actual assignment and fails, with rollback, if the prefix did not reach the LAN |
-| `network.<lan>.ip6class` | absent: left alone (no restriction). Exactly the Ygg class (the 1.x singleton that kept native IPv6 and the ULA off the LAN): deleted. An operator's own list: kept, the Ygg class appended when missing |
+| `network.<lan>.ip6class` | absent: left alone (no restriction). An operator's own list: kept, the Ygg class appended when missing |
 | `dhcp.<lan>.ra` | `server` |
 | `dhcp.<lan>.ra_default` | `2`: a default route is announced even without a native uplink, so a client's reply to a Yggdrasil source has a route on an IPv4-only site. On a dual-stack router this changes nothing while the uplink is up; while it is down, clients keep a default and IPv6-only destinations fail instead of being unreachable up front - Happy Eyeballs is the application's fallback, not the router's |
 | `config host` reservations | `--host` as in 1.9.0; they need the LAN's DHCPv6 server, which stock has. `--host` on a LAN whose operator disabled DHCPv6 (or set `dhcpv6_na=0` / `ra_offlink=1`) is refused in preflight, before anything is written; the deployer does not override those settings |
@@ -93,47 +93,19 @@ change, so a Pin/Unpin in progress makes it stop with nothing touched.
 restart fallback, and a rollback's restart, empty the router's lease record
 until clients renew.
 
-### Migrating a 1.x router
+### Fresh router, not a migration
 
-1.x wrote `ip6assign=64`, `ip6class=<ygg class>`, deleted the ULA and set one
-of its two RA modes (SLAAC-only `dhcpv6=disabled` / `ra_flags=none`, or
-managed `--dhcpv6` with `ra_slaac=0`). Each of those alone is a plausible
-operator choice, so the deployer reads the **combination** - `ip6class`
-exactly the Ygg class, no ULA, and one of the two mode shapes - as its own
-1.x profile, and only when `/etc/yggdrasil-deploy/migrated` does not exist.
-
-| Found | Action |
-| --- | --- |
-| Whole signature, no marker | migrate: `ip6class` deleted, `dhcpv6=server` / `ra_slaac=1` / `ra_flags` stock, the ULA restored from the oldest `/root/ygg-deploy-backup-*/network` that still holds it, otherwise generated stock-style (`fd` + 40 random bits `::/48` - a renumbering of the ULA side, said so in the output), the marker written with the originals and the run's backup path |
-| Marker present | overlay only; the RA/DHCPv6 and ULA settings are the operator's from now on |
-| Part of the signature | the run stops in preflight, before any change, listing what it found: rerun with `--migrate-legacy` (the migration runs as above), put the parts right by hand first, or `--no-lan` |
-| Nothing | overlay only |
-
+The deployer targets a stock router. A router deployed with 1.x (its LAN
+replaced by the routed /64: `ip6class`, no ULA, a deployer-owned RA mode) is
+brought to 2.0 by reinstalling: reset to stock, install 2.0 with the same
+peers, trusted addresses and reservations, and the old identity via
+`--private-key-file` (the node address and the routed /64 follow the key).
 `--dhcpv6`, `--slaac` and the `[flags]` entries of the same name are refused
 with an explanation rather than ignored, so an old settings file is updated
-consciously. Every other flag is unchanged. A dry run prints the plan with the
-before/after values.
-
-The ULA that comes back is either the original (backup) or a new one: a
-client that used the old ULA address is renumbered. The migration keeps
-`config host` sections and DHCPv6 leases (reload), and SLAAC addresses return
-when the A flag does.
-
-### Guard for remote-only routers
-
-`--guard MINUTES` arms, after the operator confirms and before the first
-change, a detached watchdog (`setsid`, own copy of `network`, `dhcp` and
-`firewall` in the run's backup directory) that restores those files and
-reloads network, odhcpd, dnsmasq and firewall after MINUTES. A run that ends
-in a successful verification cancels it; a failed verification leaves it
-armed and says so; a rollback cancels it after restoring the same files. The
-operator can cancel by hand with `mkdir <backup>/guard.state`. Firing and
-cancelling claim that directory with `mkdir`, so exactly one of them happens;
-a firing guard first kills the deployer (no second restoration racing with
-it), reverts pending UCI changes, restores the files, removes a migration
-marker this run wrote, and reloads. It is the recovery path for a router
-whose only management path is the one being reconfigured; it does not depend
-on the deployer surviving or on Yggdrasil.
+consciously. There is no in-place migration logic and no watchdog: the
+deployer's own backup + rollback on a fatal error is the recovery path, and
+a router reached only over the LAN being changed is what the second
+management path (Yggdrasil to the router, or a console) is for.
 
 ### Firewall
 
@@ -623,9 +595,8 @@ config rule 'ygg_dns'
 | Overlay, not replacement (2.0) | The routed /64 is one more prefix beside native IPv6 and the ULA; the LAN's RA/DHCPv6 configuration is the operator's. 1.x replaced the LAN's IPv6 (`ip6class`, no ULA, its own RA mode), which broke native IPv6 on dual-stack uplinks and took Android off the routed prefix in managed mode. The stock hybrid gives DHCPv6-capable clients a reservable stateful address per prefix while every client keeps SLAAC |
 | `ra_default=2` kept (D1) | The one RA setting the overlay needs: replies to Yggdrasil sources need a default route on an IPv4-only site. Route Information Options (RFC 4191) for `200::/7` were rejected: odhcpd derives them only from `unreachable` routes with `ra_default=0`, Linux ignores them by default, Android accepts /48-/64 only |
 | LAN may initiate into Yggdrasil (D5, 2.0) | One explicit stateful rule to `200::/7`, opt-out `--no-lan-forward`. 1.x had no such forwarding, an unweighed default inherited from the remote-access use case. No NAT66: a wrong-source packet fails closed in Yggdrasil instead of being rewritten |
-| Migration by whole signature, recorded once | `ra_slaac=0` or a missing ULA alone are operator choices; only the 1.x combination is ours, a partial one stops the run rather than guessing, and the marker (written after the migrated LAN proved to work, removed by a rollback) stops a later run from reading operator changes as legacy. The ULA comes back from the oldest 1.x backup because regeneration renumbers |
+| Reinstall instead of migration | Guessing whose settings a 1.x-shaped LAN carries (`ra_slaac=0`, a missing ULA) is exactly the kind of cleverness that goes wrong on a router nobody can reach; a reset plus the old key reproduces the identity and the routed /64 exactly |
 | Assignment length kept, prefix assignment verified | Forcing `ip6assign=64` removes downstream delegation space an operator planned for; netifd takes the routed /64 with stock 60 anyway. `ip6class`/`ip6assign` express a wish, so `ifstatus` is checked after the reload |
-| `--guard` watchdog | A remote-only router needs a recovery path independent of the deployer process and of Yggdrasil; the operator's confirmation arms it, a successful verification cancels it |
 | Reservations through native `config host` `hostid` | odhcpd already implements matching (DUID, or MAC for DUID-LLT/LL) and the implicit IPv4-derived IID; the deployer only validates, checks collisions and writes the section |
 | DHCP lease lifetime plus `config host` persistence | Guests disappear naturally; no custom TTL, history DB or cron cleanup |
 | A row's remembered addresses stored like the row itself | A pinned row survives a reboot, so what is remembered about it must too; a lease-backed one must not. Storage class follows row lifetime instead of a blanket "never touch flash" rule |

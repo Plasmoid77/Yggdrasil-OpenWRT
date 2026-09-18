@@ -21,7 +21,7 @@ reserve. Native IPv6 keeps working as before; on an IPv4-only uplink the LAN
 gets Yggdrasil + ULA. LAN hosts may initiate connections into Yggdrasil
 through the router (`--no-lan-forward` turns that off). NAT66 is not used.
 Remote access is limited to trusted Ygg `/128`s. See
-[architecture](architecture.md) for the reasoning and the 1.x migration.
+[architecture](architecture.md) for the reasoning.
 
 Optional modules provide a LuCI inventory, `home.arpa` names, and route-only
 Linux split DNS.
@@ -111,7 +111,6 @@ v5.4
 no-jumper
 no-dns
 no-lan-forward          # LAN hosts may not initiate connections into Yggdrasil
-# migrate-legacy        # force the 1.x migration on a partial signature
 # dhcpv6 / slaac        # 1.x only: 2.0 refuses them, delete the line
 ```
 
@@ -122,8 +121,8 @@ ssh root@<router> 'chmod 600 /root/ygg.conf; sh deploy-openwrt-yggdrasil.sh -y -
 
 Options are applied in the order given: a `--peer`, `--trusted` or `--dns-host`
 after `--config` is added to the file's list, a later single value such as
-`--iface` wins, and `--config` may be repeated. `-n`/`--dry-run`, `-y`/`--yes`,
-`--wait` and `--guard` describe the run rather than the node and stay on the command line.
+`--iface` wins, and `--config` may be repeated. `-n`/`--dry-run`, `-y`/`--yes`
+and `--wait` describe the run rather than the node and stay on the command line.
 When the file holds the key, keep it mode 600 — the script warns if it is
 readable beyond its owner. Key precedence is `--private-key-file`, then the
 file's `[private-key]`, then `YGG_PRIVATE_KEY`; no option takes the key as a
@@ -171,44 +170,14 @@ return nonzero without automatically undoing the configuration. Package
 installation is not rolled back. It finishes by printing
 the router's Yggdrasil address and the command to reach it.
 
-### A router reached only over the path being changed
+### A router deployed with 1.x
 
-`--guard MINUTES` arms a detached watchdog after the confirmation and before
-the first change: unless the run ends in a successful verification, it puts
-the pre-run `network`, `dhcp` and `firewall` back after MINUTES and reloads
-the services. A successful run cancels it; a failed verification leaves it
-armed and says so; `mkdir /root/ygg-deploy-backup-<stamp>/guard.state` keeps
-the new configuration by hand. A guard that fires stops the deployer first,
-then restores. Use it on a router you reach over Yggdrasil
-or over the LAN whose IPv6 you are changing:
-
-```sh
-sh deploy-openwrt-yggdrasil.sh -y --config /root/ygg.conf --guard 15
-```
-
-### Migrating a router deployed with 1.x
-
-Run 2.0 with the same settings, minus `--dhcpv6`/`--slaac` (and the `[flags]`
-lines of the same name - the script refuses them). A router that still carries
-the whole 1.x LAN profile (`ip6class` naming the Yggdrasil class, no ULA, one
-of the two 1.x RA shapes) is migrated back to the stock LAN configuration once:
-`ip6class` removed, `dhcpv6=server` / `ra_slaac=1` / M+O flags, the ULA
-restored from the oldest `/root/ygg-deploy-backup-*/network` that has it
-(otherwise a fresh one is generated and said so), and the migration recorded
-in `/etc/yggdrasil-deploy/migrated`. A dry run prints the plan with the
-before/after values first:
-
-```sh
-sh deploy-openwrt-yggdrasil.sh -n --config /root/ygg.conf
-sh deploy-openwrt-yggdrasil.sh -y --config /root/ygg.conf --guard 15
-```
-
-If only part of the 1.x profile is left (you already changed something by
-hand), the script stops in preflight and lists what it found: rerun with
-`--migrate-legacy` for the full migration, finish the change by hand first,
-or `--no-lan`. Reservations and bound DHCPv6 leases survive the reload;
-SLAAC addresses come back with the A flag; a client that used the old ULA is
-renumbered when the ULA is regenerated rather than restored.
+Reinstall rather than migrate: reset the router to stock (`firstboot`),
+bring its uplink back, then run 2.0 with the same peers, trusted addresses
+and `--host` reservations and the old identity via `--private-key-file`
+(the node address and the routed /64 follow the key). Delete `dhcpv6` /
+`slaac` from `[flags]` - the script refuses them. There is no in-place
+migration.
 
 The rest of this document is the manual equivalent, and remains the reference for
 what the script does and why.
@@ -332,12 +301,6 @@ uci commit dhcp
 /etc/init.d/odhcpd reload                    # keeps the bound leases
 ifstatus lan | jsonfilter -e '@["ipv6-prefix-assignment"][*].address'   # must list the 3xx: prefix
 ```
-
-Coming from 1.x by hand: `uci -q delete network.lan.ip6class`, set
-`dhcp.lan.dhcpv6='server'`, `ra_slaac='1'`, `ra_flags` to `managed-config` +
-`other-config`, and put `network.globals.ula_prefix` back from
-`/root/ygg-deploy-backup-*/network` (or `uci set network.globals.ula_prefix='auto'`
-and let stock generate one on the next boot - that renumbers the ULA side).
 
 A reservation is a native `config host` with `hostid` (the hex IID; never 0,
 which means dynamic, and not 1, the router). Match by MAC works only for

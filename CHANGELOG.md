@@ -48,19 +48,15 @@ on for everyone. Hence 2.0, breaking:
 
 - The LAN stage writes `ra=server`, `ra_default=2` and - only when unset -
   `ip6assign=64`. `dhcpv6`, `ra_slaac`, `ra_flags`, `ra_preference` and
-  `ula_prefix` are the operator's and are never written. An `ip6class` list
-  is deleted only when it is exactly the 1.x singleton; a custom list is kept
-  and made to admit the Yggdrasil class. After the reload the stage checks
+  `ula_prefix` are the operator's and are never written. An existing
+  `ip6class` list is kept and made to admit the Yggdrasil class. After the
+  reload the stage checks
   that netifd actually assigned the routed `/64` to the LAN (stock
   `ip6assign=60` takes it whole) and fails, with rollback, if not.
 - `--dhcpv6`, `--slaac` and the `[flags]` entries are refused with an
-  explanation. A router still carrying the **whole** 1.x signature
-  (`ip6class` singleton, no ULA, a 1.x RA shape) is migrated back to stock
-  once - ULA restored from the oldest `/root/ygg-deploy-backup-*/network`,
-  else generated stock-style - and the migration is recorded in
-  `/etc/yggdrasil-deploy/migrated` so later runs never reinterpret operator
-  changes as legacy. A partial signature stops the run before any change;
-  `--migrate-legacy` forces the migration. A dry run prints the plan.
+  explanation. A 1.x router is reinstalled, not migrated: reset to stock and
+  run 2.0 with the old key (`--private-key-file`), peers, trusted addresses
+  and reservations. No in-place migration logic.
 - `--host` reservations no longer need a mode; they need the LAN's DHCPv6
   server, which stock has. A LAN with `dhcpv6` disabled, `dhcpv6_na=0` or
   `ra_offlink=1` is refused in preflight, before anything is written.
@@ -69,9 +65,6 @@ on for everyone. Hence 2.0, breaking:
   IPv6, `dest_ip 200::/7`), not a zone forwarding. `--no-lan-forward`
   (`[flags] no-lan-forward`) removes it. Zone policy, trusted rules and the
   no-NAT66 invariant are unchanged. 1.x had no LAN-to-Yggdrasil path at all.
-- `--guard MINUTES`: a detached watchdog stops the deployer and restores
-  `network`, `dhcp` and `firewall` unless the run verifies successfully - the
-  recovery path for a router reached only over the path being reconfigured.
 - The trusted-to-LAN and LAN-to-Yggdrasil rules name the firewall zone the
   LAN network belongs to, not the network name (`--lan guests` in zone `lan`).
 - Verification separates what the deployer asserts (prefix on the LAN, `ra`,
@@ -80,7 +73,7 @@ on for everyone. Hence 2.0, breaking:
 - GitHub fetches for the status module are retried three times; on the LTE
   test router a single failed TLS handshake used to skip the module.
 - Tests: `tests/deploy-lan-mode.sh` became `tests/deploy-lan-overlay.sh`
-  (classification table, per-plan UCI values, the rule, refused switches).
+  (LAN inspection and preconditions, UCI values, the rule, refused switches).
 
 Validated on the SPb test router reset to stock OpenWrt 25.12.5 with a
 dual-stack LTE uplink: fresh install kept the native prefix and ULA on the
@@ -89,13 +82,12 @@ LAN beside the routed `/64`, a NetworkManager laptop and a dhcpcd host got
 nodes with the routed-prefix source, untrusted inbound stayed rejected, and
 everything survived a reboot. Also on that router: an IPv4-only PDN (Ygg +
 ULA only, default via `ra_default=2`, native destinations fail fast), the
-native prefix renumbering on PDN re-activation (LAN and leases followed), the
-guard (a frozen deployer killed after the deadline, files restored
-byte-identical; a successful run cancels it), and the 1.9.0 `--dhcpv6` ->
-2.0 migration (three prefixes back, the original ULA restored from the oldest
-1.x backup, leases kept through the reload, marker written, the rerun reads
-the marker). Not validated: PMTU with a remote node below 1500 (Yggdrasil's
-own PTB path), non-Linux clients.
+native prefix renumbering on PDN re-activation (LAN and leases followed).
+An in-place 1.x migration and a `--guard` watchdog were built, validated and
+then removed before release: the owner's call is reinstall-not-migrate on a
+clean system, and BusyBox has no `nohup` anyway (the watchdog needed
+`setsid`). Not validated: PMTU with a remote node below 1500 (Yggdrasil's own
+PTB path), non-Linux clients.
 
 ## Status v6.0 - the page can reserve addresses, and knows every client the router serves
 

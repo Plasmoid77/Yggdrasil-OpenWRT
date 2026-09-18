@@ -4,12 +4,11 @@
 # evaluated here, which hides their references from ShellCheck.
 #
 # Deployer 2.0 adds the routed /64 beside the LAN's own prefixes and keeps the
-# stock RA/DHCPv6 configuration; 1.x routers are recognised by their whole
-# signature and migrated once. This checks the option surface (the 1.x mode
-# switches are refused), the LAN classification table, the reservation
-# grammar, the address arithmetic, the collision check against existing
-# config host sections, the UCI values the LAN stage writes for each plan, and
-# the LAN-to-Yggdrasil firewall rule.
+# stock RA/DHCPv6 configuration. This checks the option surface (the 1.x mode
+# switches are refused), the LAN inspection and its --host preconditions, the
+# reservation grammar, the address arithmetic, the collision check against
+# existing config host sections, the UCI values the LAN stage writes, and the
+# LAN-to-Yggdrasil firewall rule.
 
 set -eu
 
@@ -29,7 +28,7 @@ extract_function() {
 eval "$(sed -n '/^set -u$/,/^VERSION=/p' "$SCRIPT" | sed '/^set -u$/d')"
 eval "$(sed -n '/^# -* defaults -*$/,/^usage() {$/p' "$SCRIPT" | sed '$d')"
 for f in add_peer add_trusted add_dns_host lower_str is_mac norm_duid norm_duid_opt duid_in_key mac_in_key norm_hostid add_host status_valid_version read_config \
-         classify_lan legacy_ula lan_has_ygg_prefix lan_zone reserved_addr implicit_hostid existing_hosts section_is_client report_implicit_hosts apply_hosts stage_lan fw_rule_trusted stage_firewall; do
+         inspect_lan lan_has_ygg_prefix lan_zone reserved_addr implicit_hostid existing_hosts section_is_client report_implicit_hosts apply_hosts stage_lan fw_rule_trusted stage_firewall; do
     body="$(extract_function "$f")"
     [ -n "$body" ] || { echo "FAIL: function $f not found in deployer" >&2; exit 1; }
     eval "$body"
@@ -55,39 +54,35 @@ have()  { return 1; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
 reset() {
     DIED=''; WARNED=''; INFOD=''; ERRED=''; HOSTS=''; DNS_HOSTS=''; TRUSTED=''; DO_LAN=1; DO_DNS=1; DO_FIREWALL=1
-    LAN_PLAN=''; MIGRATE_LEGACY=0; DO_LAN_FORWARD=1; GUARD_MIN=0
+    DO_LAN_FORWARD=1
     CUR_IP6ASSIGN=''; CUR_IP6CLASS=''; CUR_ULA=''; CUR_DHCPV6=''; CUR_RA_SLAAC=''; CUR_RA_FLAGS=''
 }
 
 # 1. option surface: the 1.x mode switches are refused with an explanation,
 #    the 2.0 switches and [flags] entries are applied
 reset; set --; eval "$PARSER"
-{ [ "$DO_LAN_FORWARD" = 1 ] && [ "$GUARD_MIN" = 0 ] && [ "$MIGRATE_LEGACY" = 0 ]; } || fail "2.0 defaults changed"
+[ "$DO_LAN_FORWARD" = 1 ] || fail "2.0 defaults changed"
 reset; set -- --dhcpv6; eval "$PARSER"
 printf '%s' "$DIED" | grep -q 'from 1.x' || fail "--dhcpv6 was not refused: $DIED"
 reset; set -- --slaac; eval "$PARSER"
 printf '%s' "$DIED" | grep -q 'from 1.x' || fail "--slaac was not refused: $DIED"
-reset; set -- --no-lan-forward --migrate-legacy --guard 15; eval "$PARSER"
+reset; set -- --no-lan-forward; eval "$PARSER"
 [ -z "$DIED" ] || fail "2.0 switches rejected: $DIED"
 [ "$DO_LAN_FORWARD" = 0 ] || fail "--no-lan-forward not applied"
-[ "$MIGRATE_LEGACY" = 1 ] || fail "--migrate-legacy not applied"
-[ "$GUARD_MIN" = 15 ] || fail "--guard not applied"
-reset; set -- --guard 5m; eval "$PARSER"
-printf '%s' "$DIED" | grep -q 'whole minutes' || fail "--guard 5m accepted"
 umask 077
-printf '[flags]\nno-lan-forward\nmigrate-legacy\n[hosts]\nnas=6c:92:bf:2f:aa:28=10\n' > "$TMP/overlay.conf"
+printf '[flags]\nno-lan-forward\n[hosts]\nnas=6c:92:bf:2f:aa:28=10\n' > "$TMP/overlay.conf"
 reset; set -- --config "$TMP/overlay.conf"; eval "$PARSER"
 [ -z "$DIED" ] || fail "2.0 settings file rejected: $DIED"
-{ [ "$DO_LAN_FORWARD" = 0 ] && [ "$MIGRATE_LEGACY" = 1 ]; } || fail "[flags] entries not applied"
+[ "$DO_LAN_FORWARD" = 0 ] || fail "[flags] entry not applied"
 [ "$HOSTS" = 'nas mac 6c:92:bf:2f:aa:28 10' ] || fail "[hosts] line not applied: '$HOSTS'"
 printf '[flags]\ndhcpv6\n' > "$TMP/legacy.conf"
 reset; set -- --config "$TMP/legacy.conf"; eval "$PARSER"
 printf '%s' "$DIED" | grep -q 'from 1.x' || fail "[flags] dhcpv6 was not refused: $DIED"
 echo 'PASS: 2.0 option surface, 1.x switches refused'
 
-# 1b. LAN classification: only the whole 1.x signature (or --migrate-legacy)
-#     means "migrate"; a marker means "already done"; --host needs DHCPv6
-LAN='lan'; IFACE='ygg0'; MIGRATED_MARKER="$TMP/migrated"
+# 1b. LAN inspection: the LAN is described, --host preconditions are settled
+#     before anything is written
+LAN='lan'; IFACE='ygg0'
 get_ygg_prefix() { printf '%s\n' "$YGG_PFX_LINE"; }
 # the router's LAN values, one variable per option
 uci() {
@@ -105,55 +100,31 @@ uci() {
     esac
 }
 stock() { U_IP6ASSIGN=60; U_IP6CLASS=''; U_ULA='fd75:921a:ca44::/48'; U_DHCPV6=server; U_RA_SLAAC=1; U_RA_FLAGS='managed-config other-config'; U_DHCPV6_NA=''; U_RA_OFFLINK=''; YGG_PFX_LINE=''; }
-legacy_dhcpv6() { U_IP6ASSIGN=64; U_IP6CLASS='ygg0'; U_ULA=''; U_DHCPV6=server; U_RA_SLAAC=0; U_RA_FLAGS='managed-config other-config'; U_DHCPV6_NA=''; U_RA_OFFLINK=''; YGG_PFX_LINE='303:170f:3ab2:166e::/64 ygg0'; }
-legacy_slaac()  { legacy_dhcpv6; U_DHCPV6=disabled; U_RA_SLAAC=1; U_RA_FLAGS='none'; }
-stock; reset; classify_lan
-[ "$LAN_PLAN" = overlay ] || fail "a stock router was not classified as overlay: $LAN_PLAN"
+stock; reset; inspect_lan
 [ -z "$DIED" ] || fail "stock router died: $DIED"
 [ "$LAN_YGG_CLASS" = ygg0 ] || fail "without a prefix the class must fall back to the interface name: $LAN_YGG_CLASS"
-legacy_dhcpv6; reset; classify_lan
-[ "$LAN_PLAN" = migrate ] || fail "full 1.x --dhcpv6 signature not classified as migrate: $LAN_PLAN"
-printf '%s' "$INFOD" | grep -q "ra_slaac   : '0' -> 1" || fail "migration plan not printed: $INFOD"
-legacy_slaac; reset; classify_lan
-[ "$LAN_PLAN" = migrate ] || fail "full 1.x --slaac signature not classified as migrate: $LAN_PLAN"
-# each part alone is an operator choice
-legacy_dhcpv6; U_ULA='fd11::/48'; U_IP6CLASS=''; reset; classify_lan
-printf '%s' "$DIED" | grep -q -- '--no-lan' || fail "a partial 1.x signature did not stop the run: $DIED"
-printf '%s' "$ERRED" | grep -q 'part of the 1.x signature' || fail "partial signature not reported: $ERRED"
-printf '%s' "$ERRED" | grep -q -- '--migrate-legacy' || fail "partial signature did not point at --migrate-legacy"
-[ "$LAN_PLAN" = overlay ] || fail "a halted partial signature must not plan a migration: $LAN_PLAN"
-legacy_dhcpv6; U_ULA='fd11::/48'; reset; classify_lan
-printf '%s' "$DIED" | grep -q -- '--no-lan' || fail "ip6class singleton + 1.x mode with a ULA present was not stopped: $DIED"
-legacy_dhcpv6; U_ULA='fd11::/48'; reset; MIGRATE_LEGACY=1; classify_lan
-[ "$LAN_PLAN" = migrate ] || fail "--migrate-legacy did not force the migration on a partial signature: $LAN_PLAN"
-stock; reset; MIGRATE_LEGACY=1; classify_lan
-[ "$LAN_PLAN" = overlay ] || fail "--migrate-legacy on a stock router migrated something"
-printf '%s' "$WARNED" | grep -q 'nothing to migrate' || fail "--migrate-legacy on stock not explained"
-# the marker ends the interpretation for good
-legacy_dhcpv6; printf 'date=2026-09-18T00:00:00\n' > "$MIGRATED_MARKER"; reset; classify_lan
-[ "$LAN_PLAN" = overlay ] || fail "a recorded migration was repeated: $LAN_PLAN"
-printf '%s' "$INFOD" | grep -q 'already migrated (2026-09-18' || fail "marker date not reported: $INFOD"
-rm -f "$MIGRATED_MARKER"
-# ip6class variants are described in the plan
-stock; U_IP6CLASS='wan6 local'; YGG_PFX_LINE='303::/64 ygg0'; reset; classify_lan
-printf '%s' "$INFOD" | grep -q "'ygg0' added to it" || fail "custom ip6class plan not described: $INFOD"
-stock; U_IP6CLASS='ygg0 local'; YGG_PFX_LINE='303::/64 ygg0'; reset; classify_lan
-printf '%s' "$INFOD" | grep -q 'already admits' || fail "admitting ip6class plan not described: $INFOD"
+[ "$CUR_IP6ASSIGN" = 60 ] && [ "$CUR_ULA" = 'fd75:921a:ca44::/48' ] || fail "LAN values not read"
+printf '%s' "$INFOD" | grep -q 'ULA fd75:921a:ca44::/48 kept' || fail "ULA not reported: $INFOD"
+# ip6class variants are described
+stock; U_IP6CLASS='wan6 local'; YGG_PFX_LINE='303::/64 ygg0'; reset; inspect_lan
+printf '%s' "$INFOD" | grep -q "'ygg0' added to it" || fail "custom ip6class not described: $INFOD"
+stock; U_IP6CLASS='ygg0 local'; YGG_PFX_LINE='303::/64 ygg0'; reset; inspect_lan
+printf '%s' "$INFOD" | grep -q "admits 'ygg0'" || fail "admitting ip6class not described: $INFOD"
 # --host preconditions, settled before anything is written
-stock; U_DHCPV6=disabled; reset; HOSTS='a mac 6c:92:bf:2f:aa:28 10'; classify_lan
+stock; U_DHCPV6=disabled; reset; HOSTS='a mac 6c:92:bf:2f:aa:28 10'; inspect_lan
 printf '%s' "$DIED" | grep -q "needs the LAN's DHCPv6 server" || fail "--host on a LAN without DHCPv6 accepted: $DIED"
-stock; U_DHCPV6=''; reset; HOSTS='a mac 6c:92:bf:2f:aa:28 10'; classify_lan
+stock; U_DHCPV6=''; reset; HOSTS='a mac 6c:92:bf:2f:aa:28 10'; inspect_lan
 printf '%s' "$DIED" | grep -q "found '<unset>'" || fail "--host with dhcpv6 unset accepted: $DIED"
-legacy_slaac; reset; HOSTS='a mac 6c:92:bf:2f:aa:28 10'; classify_lan
-[ -z "$DIED" ] || fail "--host on a 1.x SLAAC router about to be migrated refused: $DIED"
-stock; U_DHCPV6_NA=0; reset; HOSTS='a mac 6c:92:bf:2f:aa:28 10'; classify_lan
+stock; reset; HOSTS='a mac 6c:92:bf:2f:aa:28 10'; inspect_lan
+[ -z "$DIED" ] || fail "--host on a stock router refused: $DIED"
+stock; U_DHCPV6_NA=0; reset; HOSTS='a mac 6c:92:bf:2f:aa:28 10'; inspect_lan
 printf '%s' "$DIED" | grep -q 'dhcpv6_na=0' || fail "dhcpv6_na=0 was not refused"
-stock; U_RA_OFFLINK=1; reset; HOSTS='a mac 6c:92:bf:2f:aa:28 10'; classify_lan
+stock; U_RA_OFFLINK=1; reset; HOSTS='a mac 6c:92:bf:2f:aa:28 10'; inspect_lan
 printf '%s' "$DIED" | grep -q 'ra_offlink=1' || fail "ra_offlink=1 was not refused"
-stock; U_DHCPV6_NA=0; reset; classify_lan
+stock; U_DHCPV6_NA=0; reset; inspect_lan
 [ -z "$DIED" ] || fail "without --host the reservation preconditions must not apply: $DIED"
 unset -f uci
-echo 'PASS: LAN classification table'
+echo 'PASS: LAN inspection and --host preconditions'
 
 # 2. reservation grammar
 reset; set -- \
@@ -415,32 +386,6 @@ printf '%s' "$INFOD" | grep -q 'cfg01 (3c:e1:a1:41:52:d0, ip 192.168.1.50) impli
 printf '%s' "$INFOD" | grep -q 'cfg02' && fail "a section with an explicit hostid was reported as implicit"
 echo 'PASS: reservation collisions, in-place update and protected sections'
 
-# 5b. the ULA comes back from the oldest 1.x backup, whatever the quoting;
-#     an unparseable value is skipped, nothing found means a generated one
-BACKUP_ROOT="$TMP/backups"
-mkdir -p "$BACKUP_ROOT/ygg-deploy-backup-20260901-010101" "$BACKUP_ROOT/ygg-deploy-backup-20260905-020202"
-printf "config globals 'globals'\n\toption ula_prefix \"fd12:3456:789a::/48\"\n" > "$BACKUP_ROOT/ygg-deploy-backup-20260901-010101/network"
-printf "config globals 'globals'\n\toption ula_prefix 'fdaa:bbbb:cccc::/48'\n" > "$BACKUP_ROOT/ygg-deploy-backup-20260905-020202/network"
-reset; got="$(legacy_ula)"
-[ "${got%% *}" = 'fd12:3456:789a::/48' ] || fail "double-quoted ULA in the oldest backup not restored: $got"
-printf '%s' "$got" | grep -q 'restored from' || fail "ULA origin missing: $got"
-printf "config globals 'globals'\n\toption ula_prefix 'not-a-prefix'\n" > "$BACKUP_ROOT/ygg-deploy-backup-20260901-010101/network"
-# legacy_ula runs in a subshell here, so let warn speak on stdout for this check
-warn() { printf 'WARN:%s\n' "$*"; }
-reset; got="$(legacy_ula | tail -n 1)"; warned="$(legacy_ula | head -n 1)"
-[ "${got%% *}" = 'fdaa:bbbb:cccc::/48' ] || fail "unparseable ULA not skipped in favour of the next backup: $got"
-printf '%s' "$warned" | grep -q 'WARN:.*unparseable' || fail "unparseable ULA not reported: $warned"
-warn()  { WARNED="${WARNED}${*}
-"; }
-printf "config globals 'globals'\n\toption ula_prefix fd00:1:2::/48\n" > "$BACKUP_ROOT/ygg-deploy-backup-20260901-010101/network"
-reset; got="$(legacy_ula)"
-[ "${got%% *}" = 'fd00:1:2::/48' ] || fail "unquoted ULA not restored: $got"
-rm -rf "$BACKUP_ROOT"; mkdir -p "$BACKUP_ROOT"
-reset; got="$(legacy_ula)"
-case "${got%% *}" in fd[0-9a-f][0-9a-f]:[0-9a-f]*:[0-9a-f]*::/48) ;; *) fail "generated ULA malformed: $got" ;; esac
-printf '%s' "$got" | grep -q 'generated' || fail "generated ULA not announced as such: $got"
-echo 'PASS: legacy ULA restoration and generation'
-
 # 5c. the firewall zone of the LAN network is resolved, not assumed
 LAN='guests'
 uci() { case "$1 $2" in 'show firewall') printf "%s\n" "firewall.cfg02dc81=zone" "firewall.cfg02dc81.name='lan'" "firewall.cfg02dc81.network='lan' 'guests'" "firewall.cfg03dc81=zone" "firewall.cfg03dc81.name='wan'" "firewall.cfg03dc81.network='wan' 'wan6'" ;; '-q get') case "$3" in firewall.cfg02dc81.name) echo lan ;; *) return 1 ;; esac ;; *) return 1 ;; esac; }
@@ -455,13 +400,13 @@ warn()  { WARNED="${WARNED}${*}
 LAN='lan'; unset -f uci
 echo 'PASS: LAN zone resolution'
 
-# 6. the UCI values the LAN stage writes for each plan (dry run: no commit,
-#    no services, no assignment wait)
+# 6. the UCI values the LAN stage writes (dry run: no commit, no services,
+#    no assignment wait)
 DRY_RUN=1; IFACE='ygg0'; LAN='lan'; YGG_CLASS='ygg0'; YGG_PREFIX='303:170f:3ab2:166e::/64'
 uci() { case "$1 $2" in 'show dhcp') printf '%s\n' "$FIXTURE" ;; '-q get') printf '%s\n' "" ; return 0 ;; *) return 0 ;; esac; }
 wrote() { printf '%s' "$UCI_LOG" | grep -qxF "$1"; }
 # a stock router: only ra / ra_default; everything else untouched
-reset; UCI_LOG=''; LAN_PLAN=overlay; CUR_IP6ASSIGN=60; CUR_ULA='fd75:921a:ca44::/48'; CUR_DHCPV6=server; CUR_RA_SLAAC=1; CUR_RA_FLAGS='managed-config other-config '; stage_lan
+reset; UCI_LOG=''; CUR_IP6ASSIGN=60; CUR_ULA='fd75:921a:ca44::/48'; CUR_DHCPV6=server; CUR_RA_SLAAC=1; CUR_RA_FLAGS='managed-config other-config '; stage_lan
 [ -z "$DIED" ] || fail "overlay stage on stock died: $DIED"
 for want in 'set dhcp.lan.ra=server' 'set dhcp.lan.ra_default=2'; do
     wrote "$want" || fail "overlay did not write '$want':
@@ -474,44 +419,24 @@ done
 [ "$(printf '%s' "$UCI_LOG" | grep -c .)" = 2 ] || fail "overlay on stock must write exactly two values:
 $UCI_LOG"
 # ip6assign only when unset
-reset; UCI_LOG=''; LAN_PLAN=overlay; CUR_IP6ASSIGN=''; stage_lan
+reset; UCI_LOG=''; CUR_IP6ASSIGN=''; stage_lan
 wrote 'set network.lan.ip6assign=64' || fail "unset ip6assign not defaulted to 64"
-# the 1.x singleton ip6class goes, a custom list is kept and made to admit the class
-reset; UCI_LOG=''; LAN_PLAN=overlay; CUR_IP6ASSIGN=64; CUR_IP6CLASS='ygg0'; stage_lan
-wrote 'del network.lan.ip6class' || fail "1.x ip6class singleton not removed:
-$UCI_LOG"
-reset; UCI_LOG=''; LAN_PLAN=overlay; CUR_IP6ASSIGN=64; CUR_IP6CLASS='wan6 local'; stage_lan
+# an ip6class list is kept and made to admit the class; one that admits it is untouched
+reset; UCI_LOG=''; CUR_IP6ASSIGN=64; CUR_IP6CLASS='wan6 local'; stage_lan
 wrote 'add_list network.lan.ip6class=ygg0' || fail "custom ip6class did not gain the class:
 $UCI_LOG"
 printf '%s' "$UCI_LOG" | grep -q 'del network.lan.ip6class' && fail "custom ip6class was deleted"
-reset; UCI_LOG=''; LAN_PLAN=overlay; CUR_IP6ASSIGN=64; CUR_IP6CLASS='local ygg0'; stage_lan
+reset; UCI_LOG=''; CUR_IP6ASSIGN=64; CUR_IP6CLASS='local ygg0'; stage_lan
 printf '%s' "$UCI_LOG" | grep -q 'ip6class' && fail "an admitting ip6class was rewritten:
 $UCI_LOG"
-# the migration restores stock RA/DHCPv6 and the ULA, and records itself only outside dry run
-reset; UCI_LOG=''; LAN_PLAN=migrate; CUR_IP6ASSIGN=64; CUR_IP6CLASS='ygg0'; CUR_ULA=''; CUR_DHCPV6=server; CUR_RA_SLAAC=0; CUR_RA_FLAGS='managed-config other-config '
-legacy_ula() { printf 'fd12:3456:789a::/48 restored from /root/ygg-deploy-backup-1/network\n'; }
-stage_lan
-[ -z "$DIED" ] || fail "migrate stage died: $DIED"
-for want in 'del network.lan.ip6class' 'set network.globals.ula_prefix=fd12:3456:789a::/48' 'set dhcp.lan.dhcpv6=server' 'set dhcp.lan.ra_slaac=1' \
-            'del dhcp.lan.ra_flags' 'add_list dhcp.lan.ra_flags=managed-config' 'add_list dhcp.lan.ra_flags=other-config' 'set dhcp.lan.ra=server' 'set dhcp.lan.ra_default=2'; do
-    wrote "$want" || fail "migration did not write '$want':
-$UCI_LOG"
-done
-printf '%s' "$UCI_LOG" | grep -q 'ra_flags=none' && fail "migration wrote ra_flags=none"
-[ "$(printf '%s' "$UCI_LOG" | grep -c 'add_list dhcp.lan.ra_flags=')" = 2 ] || fail "ra_flags must be exactly two list entries"
-printf '%s' "$INFOD" | grep -q 'restored from /root/ygg-deploy-backup-1/network' || fail "ULA origin not reported: $INFOD"
-[ ! -f "$MIGRATED_MARKER" ] || fail "dry run wrote the migration marker"
-# a migration whose ULA survived does not touch it
-reset; UCI_LOG=''; LAN_PLAN=migrate; CUR_IP6ASSIGN=64; CUR_IP6CLASS='ygg0'; CUR_ULA='fd75::/48'; stage_lan
-printf '%s' "$UCI_LOG" | grep -q 'ula_prefix' && fail "an existing ULA was rewritten during migration"
-# reservations are applied on any plan (the section-5 uci stub: fixture + missing sections)
+# reservations are applied (the section-5 uci stub: fixture + missing sections)
 uci() { case "$1 $2" in 'show dhcp') printf '%s\n' "$FIXTURE" ;; '-q get') return 1 ;; *) return 0 ;; esac; }
-reset; UCI_LOG=''; LAN_PLAN=overlay; CUR_IP6ASSIGN=60; HOSTS='cam mac aa:bb:cc:dd:ee:70 70'; stage_lan
-[ -z "$DIED" ] || fail "overlay stage with a reservation died: $DIED"
-wrote 'set dhcp.ygg_host_cam.hostid=70' || fail "reservation not applied on the overlay plan:
+reset; UCI_LOG=''; CUR_IP6ASSIGN=60; HOSTS='cam mac aa:bb:cc:dd:ee:70 70'; stage_lan
+[ -z "$DIED" ] || fail "LAN stage with a reservation died: $DIED"
+wrote 'set dhcp.ygg_host_cam.hostid=70' || fail "reservation not applied:
 $UCI_LOG"
 uci() { case "$1 $2" in 'show dhcp') printf '%s\n' "$FIXTURE" ;; '-q get') printf '%s\n' "" ; return 0 ;; *) return 0 ;; esac; }
-echo 'PASS: the LAN stage writes exactly the overlay values per plan'
+echo 'PASS: the LAN stage writes exactly the overlay values'
 
 # 7. the LAN-to-Yggdrasil rule follows --no-lan-forward; the zone is unchanged
 lan_zone() { echo lan; }

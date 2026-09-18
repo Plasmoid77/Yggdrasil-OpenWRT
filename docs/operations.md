@@ -261,38 +261,15 @@ apk upgrade yggdrasil luci-proto-yggdrasil yggdrasil-jumper
 
 Do not assume every future package keeps the exact same UCI options.
 
-### Moving a 1.x router to the overlay (2.0)
+### Moving a 1.x router to 2.0
 
-2.0 no longer replaces the LAN's IPv6 with the routed prefix; the 1.x modes
-(`--dhcpv6`/`--slaac`) are gone and the switches are refused. Migrating:
-
-1. Keep a second management path open, or use `--guard 15`: it restores
-   `network`, `dhcp` and `firewall` after 15 minutes unless the run verifies
-   successfully. The LAN stage reloads network and odhcpd (bound leases
-   survive the reload); the router's own addresses and the `ygg` zone do not
-   change. If you reach the router over its LAN IPv6, note that the ULA
-   comes back and native IPv6 returns to the LAN - your session on a
-   routed-prefix address survives, a session on an address 1.x never had is
-   not affected either.
-2. `sh deploy-openwrt-yggdrasil.sh -n --config /root/ygg.conf` after deleting
-   `dhcpv6`/`slaac` from `[flags]`. The preflight prints the LAN plan: with
-   the whole 1.x signature present, the before/after table of the migration;
-   with part of it, what was found and the offer of `--migrate-legacy`.
-3. Run it for real with `-y` (and `--guard`). Stage 8 asserts the prefix on
-   the LAN, `ra`, `ra_default`, the rule and each reservation, and prints the
-   LAN settings it left to you.
-4. Expect: SLAAC addresses from the routed prefix reappear on every client
-   (Android included) at the next RA; DHCPv6 clients keep their leases; the
-   ULA is the original one when a 1.x backup held it, otherwise a new one
-   (`fd..::/48`) and clients that used the old ULA are renumbered; native
-   IPv6 addresses appear when the uplink delegates a prefix.
-5. `/etc/yggdrasil-deploy/migrated` records the migration with the original
-   values. Later runs never reinterpret your changes as 1.x remnants; delete
-   the marker only if you want the migration logic to look again.
-
-Reservations: the deployer never removes a `hostid`; omitting a `--host` line
-on a rerun drops its name and keeps its `hostid`. To retire a reservation for
-good: `uci delete dhcp.<section>.hostid; uci commit dhcp; /etc/init.d/odhcpd reload`.
+Reinstall: reset to stock, bring the uplink back, run 2.0 with the same
+settings file minus the `dhcpv6`/`slaac` flags and with the old private key
+(`--private-key-file`). The node address, the routed /64, reservations and
+trusted access come back from those inputs; there is no in-place migration.
+The deployer never removes a `hostid`; omitting a `--host` line on a rerun
+drops its name and keeps its `hostid`. To retire a reservation for good:
+`uci delete dhcp.<section>.hostid; uci commit dhcp; /etc/init.d/odhcpd reload`.
 
 ### LAN hosts and Yggdrasil
 

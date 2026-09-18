@@ -46,7 +46,7 @@ is not the same thing as the default installation profile.
 The design has no NAT66, custom inventory database, background inventory
 daemon or unsolicited `ygg -> lan` forwarding; the LAN's RA/DHCPv6 and ULA
 settings are the operator's and the deployer never rewrites them (2.0; a 1.x
-router is migrated back to stock once). Remote access is limited to explicitly
+router is reinstalled, not migrated). Remote access is limited to explicitly
 trusted source addresses; reachability does not imply trust.
 
 ## Documentation
