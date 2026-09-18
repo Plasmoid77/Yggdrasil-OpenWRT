@@ -3,16 +3,19 @@
 # The deployer's option loop and helpers are extracted with sed/awk and
 # evaluated here, which hides their references from ShellCheck.
 #
-# Deployer 1.9.0 added the LAN addressing mode (--dhcpv6 / --slaac) and DHCPv6
-# reservations (--host). This checks option precedence, the reservation
+# Deployer 2.0 adds the routed /64 beside the LAN's own prefixes and keeps the
+# stock RA/DHCPv6 configuration; 1.x routers are recognised by their whole
+# signature and migrated once. This checks the option surface (the 1.x mode
+# switches are refused), the LAN classification table, the reservation
 # grammar, the address arithmetic, the collision check against existing
-# config host sections, and the UCI values each mode writes.
+# config host sections, the UCI values the LAN stage writes for each plan, and
+# the LAN-to-Yggdrasil firewall rule.
 
 set -eu
 
 ROOT="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
 SCRIPT="$ROOT/deploy/deploy-openwrt-yggdrasil.sh"
-TMP="$(mktemp -d /tmp/ygg-lanmode-test.XXXXXX)"
+TMP="$(mktemp -d /tmp/ygg-lanoverlay-test.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 
 extract_function() {
@@ -26,7 +29,7 @@ extract_function() {
 eval "$(sed -n '/^set -u$/,/^VERSION=/p' "$SCRIPT" | sed '/^set -u$/d')"
 eval "$(sed -n '/^# -* defaults -*$/,/^usage() {$/p' "$SCRIPT" | sed '$d')"
 for f in add_peer add_trusted add_dns_host lower_str is_mac norm_duid norm_duid_opt duid_in_key mac_in_key norm_hostid add_host status_valid_version read_config \
-         resolve_lan_mode reserved_addr implicit_hostid existing_hosts section_is_client report_implicit_hosts apply_hosts stage_lan; do
+         classify_lan legacy_ula lan_has_ygg_prefix reserved_addr implicit_hostid existing_hosts section_is_client report_implicit_hosts apply_hosts stage_lan fw_rule_trusted stage_firewall; do
     body="$(extract_function "$f")"
     [ -n "$body" ] || { echo "FAIL: function $f not found in deployer" >&2; exit 1; }
     eval "$body"
@@ -48,45 +51,107 @@ usage() { :; }
 have()  { return 1; }
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
-reset() { DIED=''; WARNED=''; INFOD=''; HOSTS=''; DNS_HOSTS=''; LAN_MODE='keep'; DO_LAN=1; DO_DNS=1; }
+reset() {
+    DIED=''; WARNED=''; INFOD=''; HOSTS=''; DNS_HOSTS=''; TRUSTED=''; DO_LAN=1; DO_DNS=1; DO_FIREWALL=1
+    LAN_PLAN=''; MIGRATE_LEGACY=0; DO_LAN_FORWARD=1; GUARD_MIN=0
+    CUR_IP6ASSIGN=''; CUR_IP6CLASS=''; CUR_ULA=''; CUR_DHCPV6=''; CUR_RA_SLAAC=''; CUR_RA_FLAGS=''
+}
 
-# 1. mode precedence: last switch wins, file flags count like switches; without
-#    a switch the router keeps the mode it runs, a fresh router gets SLAAC
+# 1. option surface: the 1.x mode switches are refused with an explanation,
+#    the 2.0 switches and [flags] entries are applied
 reset; set --; eval "$PARSER"
-[ "$LAN_MODE" = keep ] || fail "default LAN mode is not keep"
-LAN='lan'
-uci() { case "$1 $2 $3" in '-q get dhcp.lan.dhcpv6') echo "$CUR_DHCPV6" ;; *) return 1 ;; esac; }
-CUR_DHCPV6='server'; reset; resolve_lan_mode
-[ "$LAN_MODE" = dhcpv6 ] || fail "a managed router was not kept managed on a plain rerun"
-CUR_DHCPV6='disabled'; reset; resolve_lan_mode
-[ "$LAN_MODE" = slaac ] || fail "a SLAAC router was not kept on SLAAC"
-CUR_DHCPV6=''; reset; resolve_lan_mode
-[ "$LAN_MODE" = slaac ] || fail "a fresh router did not default to SLAAC"
-CUR_DHCPV6='disabled'; reset; HOSTS='a mac 6c:92:bf:2f:aa:28 10'; resolve_lan_mode
-printf '%s' "$DIED" | grep -q 'needs --dhcpv6' || fail "--host on a kept SLAAC router accepted"
-CUR_DHCPV6='server'; reset; HOSTS='a mac 6c:92:bf:2f:aa:28 10'; resolve_lan_mode
-[ -z "$DIED" ] || fail "--host on a kept managed router rejected: $DIED"
-CUR_DHCPV6='server'; reset; LAN_MODE='slaac'; resolve_lan_mode
-[ "$LAN_MODE" = slaac ] || fail "an explicit --slaac did not override the current managed mode"
-unset -f uci
+{ [ "$DO_LAN_FORWARD" = 1 ] && [ "$GUARD_MIN" = 0 ] && [ "$MIGRATE_LEGACY" = 0 ]; } || fail "2.0 defaults changed"
 reset; set -- --dhcpv6; eval "$PARSER"
-[ "$LAN_MODE" = dhcpv6 ] || fail "--dhcpv6 not applied"
-reset; set -- --dhcpv6 --slaac; eval "$PARSER"
-[ "$LAN_MODE" = slaac ] || fail "--slaac after --dhcpv6 did not win"
-reset; set -- --slaac --dhcpv6; eval "$PARSER"
-[ "$LAN_MODE" = dhcpv6 ] || fail "--dhcpv6 after --slaac did not win"
+printf '%s' "$DIED" | grep -q 'from 1.x' || fail "--dhcpv6 was not refused: $DIED"
+reset; set -- --slaac; eval "$PARSER"
+printf '%s' "$DIED" | grep -q 'from 1.x' || fail "--slaac was not refused: $DIED"
+reset; set -- --no-lan-forward --migrate-legacy --guard 15; eval "$PARSER"
+[ -z "$DIED" ] || fail "2.0 switches rejected: $DIED"
+[ "$DO_LAN_FORWARD" = 0 ] || fail "--no-lan-forward not applied"
+[ "$MIGRATE_LEGACY" = 1 ] || fail "--migrate-legacy not applied"
+[ "$GUARD_MIN" = 15 ] || fail "--guard not applied"
+reset; set -- --guard 5m; eval "$PARSER"
+printf '%s' "$DIED" | grep -q 'whole minutes' || fail "--guard 5m accepted"
 umask 077
-printf '[flags]\ndhcpv6\n[hosts]\nnas=6c:92:bf:2f:aa:28=10\n' > "$TMP/managed.conf"
-reset; set -- --config "$TMP/managed.conf"; eval "$PARSER"
-[ -z "$DIED" ] || fail "managed settings file rejected: $DIED"
-[ "$LAN_MODE" = dhcpv6 ] || fail "[flags] dhcpv6 not applied"
+printf '[flags]\nno-lan-forward\nmigrate-legacy\n[hosts]\nnas=6c:92:bf:2f:aa:28=10\n' > "$TMP/overlay.conf"
+reset; set -- --config "$TMP/overlay.conf"; eval "$PARSER"
+[ -z "$DIED" ] || fail "2.0 settings file rejected: $DIED"
+{ [ "$DO_LAN_FORWARD" = 0 ] && [ "$MIGRATE_LEGACY" = 1 ]; } || fail "[flags] entries not applied"
 [ "$HOSTS" = 'nas mac 6c:92:bf:2f:aa:28 10' ] || fail "[hosts] line not applied: '$HOSTS'"
-reset; set -- --config "$TMP/managed.conf" --slaac; eval "$PARSER"
-[ "$LAN_MODE" = slaac ] || fail "--slaac after a managed settings file did not win"
-echo 'PASS: LAN mode precedence'
+printf '[flags]\ndhcpv6\n' > "$TMP/legacy.conf"
+reset; set -- --config "$TMP/legacy.conf"; eval "$PARSER"
+printf '%s' "$DIED" | grep -q 'from 1.x' || fail "[flags] dhcpv6 was not refused: $DIED"
+echo 'PASS: 2.0 option surface, 1.x switches refused'
+
+# 1b. LAN classification: only the whole 1.x signature (or --migrate-legacy)
+#     means "migrate"; a marker means "already done"; --host needs DHCPv6
+LAN='lan'; IFACE='ygg0'; MIGRATED_MARKER="$TMP/migrated"
+get_ygg_prefix() { printf '%s\n' "$YGG_PFX_LINE"; }
+# the router's LAN values, one variable per option
+uci() {
+    [ "$1 $2" = '-q get' ] || return 1
+    case "$3" in
+        network.lan.ip6assign) printf '%s\n' "$U_IP6ASSIGN" ;;
+        network.lan.ip6class)  printf '%s\n' "$U_IP6CLASS" ;;
+        network.globals.ula_prefix) printf '%s\n' "$U_ULA" ;;
+        dhcp.lan.dhcpv6)    printf '%s\n' "$U_DHCPV6" ;;
+        dhcp.lan.ra_slaac)  printf '%s\n' "$U_RA_SLAAC" ;;
+        dhcp.lan.ra_flags)  printf '%s\n' "$U_RA_FLAGS" ;;
+        dhcp.lan.dhcpv6_na) printf '%s\n' "${U_DHCPV6_NA:-}" ;;
+        dhcp.lan.ra_offlink) printf '%s\n' "${U_RA_OFFLINK:-}" ;;
+        *) return 1 ;;
+    esac
+}
+stock() { U_IP6ASSIGN=60; U_IP6CLASS=''; U_ULA='fd75:921a:ca44::/48'; U_DHCPV6=server; U_RA_SLAAC=1; U_RA_FLAGS='managed-config other-config'; U_DHCPV6_NA=''; U_RA_OFFLINK=''; YGG_PFX_LINE=''; }
+legacy_dhcpv6() { U_IP6ASSIGN=64; U_IP6CLASS='ygg0'; U_ULA=''; U_DHCPV6=server; U_RA_SLAAC=0; U_RA_FLAGS='managed-config other-config'; U_DHCPV6_NA=''; U_RA_OFFLINK=''; YGG_PFX_LINE='303:170f:3ab2:166e::/64 ygg0'; }
+legacy_slaac()  { legacy_dhcpv6; U_DHCPV6=disabled; U_RA_SLAAC=1; U_RA_FLAGS='none'; }
+stock; reset; classify_lan
+[ "$LAN_PLAN" = overlay ] || fail "a stock router was not classified as overlay: $LAN_PLAN"
+[ -z "$DIED" ] || fail "stock router died: $DIED"
+[ "$LAN_YGG_CLASS" = ygg0 ] || fail "without a prefix the class must fall back to the interface name: $LAN_YGG_CLASS"
+legacy_dhcpv6; reset; classify_lan
+[ "$LAN_PLAN" = migrate ] || fail "full 1.x --dhcpv6 signature not classified as migrate: $LAN_PLAN"
+printf '%s' "$INFOD" | grep -q "ra_slaac   : '0' -> 1" || fail "migration plan not printed: $INFOD"
+legacy_slaac; reset; classify_lan
+[ "$LAN_PLAN" = migrate ] || fail "full 1.x --slaac signature not classified as migrate: $LAN_PLAN"
+# each part alone is an operator choice
+legacy_dhcpv6; U_ULA='fd11::/48'; U_IP6CLASS=''; reset; classify_lan
+[ "$LAN_PLAN" = overlay ] || fail "ra_slaac=0 alone was read as 1.x: $LAN_PLAN"
+printf '%s' "$WARNED" | grep -q 'part of the 1.x signature' || fail "partial signature not reported: $WARNED"
+printf '%s' "$WARNED" | grep -q -- '--migrate-legacy' || fail "partial signature did not point at --migrate-legacy"
+legacy_dhcpv6; U_ULA='fd11::/48'; reset; MIGRATE_LEGACY=1; classify_lan
+[ "$LAN_PLAN" = migrate ] || fail "--migrate-legacy did not force the migration on a partial signature: $LAN_PLAN"
+stock; reset; MIGRATE_LEGACY=1; classify_lan
+[ "$LAN_PLAN" = overlay ] || fail "--migrate-legacy on a stock router migrated something"
+printf '%s' "$WARNED" | grep -q 'nothing to migrate' || fail "--migrate-legacy on stock not explained"
+# the marker ends the interpretation for good
+legacy_dhcpv6; printf 'date=2026-09-18T00:00:00\n' > "$MIGRATED_MARKER"; reset; classify_lan
+[ "$LAN_PLAN" = overlay ] || fail "a recorded migration was repeated: $LAN_PLAN"
+printf '%s' "$INFOD" | grep -q 'already migrated (2026-09-18' || fail "marker date not reported: $INFOD"
+rm -f "$MIGRATED_MARKER"
+# ip6class variants are described in the plan
+stock; U_IP6CLASS='wan6 local'; YGG_PFX_LINE='303::/64 ygg0'; reset; classify_lan
+printf '%s' "$INFOD" | grep -q "'ygg0' added to it" || fail "custom ip6class plan not described: $INFOD"
+stock; U_IP6CLASS='ygg0 local'; YGG_PFX_LINE='303::/64 ygg0'; reset; classify_lan
+printf '%s' "$INFOD" | grep -q 'already admits' || fail "admitting ip6class plan not described: $INFOD"
+# --host preconditions, settled before anything is written
+stock; U_DHCPV6=disabled; reset; HOSTS='a mac 6c:92:bf:2f:aa:28 10'; classify_lan
+printf '%s' "$DIED" | grep -q "needs the LAN's DHCPv6 server" || fail "--host on a LAN without DHCPv6 accepted: $DIED"
+stock; U_DHCPV6=''; reset; HOSTS='a mac 6c:92:bf:2f:aa:28 10'; classify_lan
+printf '%s' "$DIED" | grep -q "found '<unset>'" || fail "--host with dhcpv6 unset accepted: $DIED"
+legacy_slaac; reset; HOSTS='a mac 6c:92:bf:2f:aa:28 10'; classify_lan
+[ -z "$DIED" ] || fail "--host on a 1.x SLAAC router about to be migrated refused: $DIED"
+stock; U_DHCPV6_NA=0; reset; HOSTS='a mac 6c:92:bf:2f:aa:28 10'; classify_lan
+printf '%s' "$DIED" | grep -q 'dhcpv6_na=0' || fail "dhcpv6_na=0 was not refused"
+stock; U_RA_OFFLINK=1; reset; HOSTS='a mac 6c:92:bf:2f:aa:28 10'; classify_lan
+printf '%s' "$DIED" | grep -q 'ra_offlink=1' || fail "ra_offlink=1 was not refused"
+stock; U_DHCPV6_NA=0; reset; classify_lan
+[ -z "$DIED" ] || fail "without --host the reservation preconditions must not apply: $DIED"
+unset -f uci
+echo 'PASS: LAN classification table'
 
 # 2. reservation grammar
-reset; set -- --dhcpv6 \
+reset; set -- \
     --host 'Nas-1=6C:92:BF:2F:AA:28=010' \
     --host 'bmc=duid:00030001000000000000%2B67=20' \
     --host 'cam=duid:000100012F3A02A76c92bf2faa29=ABCD1234'
@@ -96,17 +161,17 @@ printf '%s\n' "$HOSTS" | grep -qxF 'Nas-1 mac 6c:92:bf:2f:aa:28 10' || fail "MAC
 printf '%s\n' "$HOSTS" | grep -qxF 'bmc duid 00030001000000000000%2b67 20' || fail "duid%IAID form not kept: $HOSTS"
 printf '%s\n' "$HOSTS" | grep -qxF 'cam duid 000100012f3a02a76c92bf2faa29 abcd1234' || fail "duid form not normalised: $HOSTS"
 # MAC and DUID together, for a client whose DUID carries no MAC
-reset; set -- --dhcpv6 --host 'Laptop=3C:E1:A1:41:52:D0+duid:0004ECBCBFB80EF2996849BCA6B0D0A6FFCE%0000A=20'; eval "$PARSER"
+reset; set -- --host 'Laptop=3C:E1:A1:41:52:D0+duid:0004ECBCBFB80EF2996849BCA6B0D0A6FFCE%0000A=20'; eval "$PARSER"
 [ -z "$DIED" ] || fail "MAC+duid form rejected: $DIED"
 [ "$HOSTS" = 'Laptop mac+duid 3c:e1:a1:41:52:d0+0004ecbcbfb80ef2996849bca6b0d0a6ffce%a 20' ] || fail "MAC+duid form not normalised: $HOSTS"
 [ "$(mac_in_key mac+duid '3c:e1:a1:41:52:d0+0004ecbc%a')" = '3c:e1:a1:41:52:d0' ] || fail "mac_in_key on the combined form"
 [ "$(duid_in_key mac+duid '3c:e1:a1:41:52:d0+0004ecbc%a')" = '0004ecbc%a' ] || fail "duid_in_key on the combined form"
 [ -z "$(duid_in_key mac '3c:e1:a1:41:52:d0')" ] || fail "duid_in_key invented a DUID for a MAC"
-reset; set -- --dhcpv6 --host 'a=3c:e1:a1:41:52+duid:0004ecbcbfb80ef2996849bca6b0d0a6ffce=20'; eval "$PARSER"
+reset; set -- --host 'a=3c:e1:a1:41:52+duid:0004ecbcbfb80ef2996849bca6b0d0a6ffce=20'; eval "$PARSER"
 printf '%s' "$DIED" | grep -q "before '+duid:' is not a MAC" || fail "bad MAC before +duid accepted"
-reset; set -- --dhcpv6 --host 'a=3c:e1:a1:41:52:d0+duid:0004ecbcbfb80ef2996849bca6b0d0a6ffce=20' --host 'b=duid:0004ECBCBFB80EF2996849BCA6B0D0A6FFCE=21'; eval "$PARSER"
+reset; set -- --host 'a=3c:e1:a1:41:52:d0+duid:0004ecbcbfb80ef2996849bca6b0d0a6ffce=20' --host 'b=duid:0004ECBCBFB80EF2996849BCA6B0D0A6FFCE=21'; eval "$PARSER"
 printf '%s' "$DIED" | grep -q 'same client (DUID 0004ecbcbfb80ef2996849bca6b0d0a6ffce)' || fail "the same DUID under two forms accepted: $DIED"
-reset; set -- --dhcpv6 --host 'a=3c:e1:a1:41:52:d0+duid:0004ecbcbfb80ef2996849bca6b0d0a6ffce=20' --host 'b=3c:e1:a1:41:52:d0=21'; eval "$PARSER"
+reset; set -- --host 'a=3c:e1:a1:41:52:d0+duid:0004ecbcbfb80ef2996849bca6b0d0a6ffce=20' --host 'b=3c:e1:a1:41:52:d0=21'; eval "$PARSER"
 printf '%s' "$DIED" | grep -q 'same client (MAC 3c:e1:a1:41:52:d0)' || fail "the same MAC under two forms accepted: $DIED"
 echo 'PASS: --host accepts MAC, DUID and DUID%IAID forms and normalises them'
 
@@ -117,68 +182,64 @@ for case_ in 'no-hostid:a=6c:92:bf:2f:aa:28' 'bad-mac:a=6c:92:bf:2f:aa=10' 'shor
              'empty-duid:a=duid:=10' 'odd-duid:a=duid:abc=10' 'bad-iaid:a=duid:0004ecbcbfb80ef2996849bca6b0d0a6ffce%zz=10' \
              'long-iaid:a=duid:0004ecbcbfb80ef2996849bca6b0d0a6ffce%123456789=10' 'empty-name:=6c:92:bf:2f:aa:28=10'; do
     name="${case_%%:*}"
-    reset; set -- --dhcpv6 --host "${case_#*:}"; eval "$PARSER"
+    reset; set -- --host "${case_#*:}"; eval "$PARSER"
     [ -n "$DIED" ] || fail "--host case '$name' was accepted"
 done
-reset; set -- --dhcpv6 --host 'a=6c:92:bf:2f:aa:28=10' --host 'a=6c:92:bf:2f:aa:29=11'; eval "$PARSER"
+reset; set -- --host 'a=6c:92:bf:2f:aa:28=10' --host 'a=6c:92:bf:2f:aa:29=11'; eval "$PARSER"
 printf '%s' "$DIED" | grep -q 'given twice' || fail "duplicate hostname accepted"
-reset; set -- --dhcpv6 --host 'a=6c:92:bf:2f:aa:28=10' --host 'b=6C:92:BF:2F:AA:28=11'; eval "$PARSER"
+reset; set -- --host 'a=6c:92:bf:2f:aa:28=10' --host 'b=6C:92:BF:2F:AA:28=11'; eval "$PARSER"
 printf '%s' "$DIED" | grep -q 'given twice' || fail "duplicate client accepted"
-reset; set -- --dhcpv6 --host 'a=6c:92:bf:2f:aa:28=10' --host 'b=6c:92:bf:2f:aa:29=010'; eval "$PARSER"
+reset; set -- --host 'a=6c:92:bf:2f:aa:28=10' --host 'b=6c:92:bf:2f:aa:29=010'; eval "$PARSER"
 printf '%s' "$DIED" | grep -q 'given twice' || fail "duplicate HOSTID (10 vs 010) accepted"
-reset; set -- --dhcpv6 --host 'Nas=6c:92:bf:2f:aa:28=10' --host 'nas=6c:92:bf:2f:aa:29=11'; eval "$PARSER"
+reset; set -- --host 'Nas=6c:92:bf:2f:aa:28=10' --host 'nas=6c:92:bf:2f:aa:29=11'; eval "$PARSER"
 printf '%s' "$DIED" | grep -q 'given twice' || fail "hostnames differing only in case accepted (DNS is case-insensitive)"
 # a DUID-LLT/LL carries the MAC: the same machine under two keys
-reset; set -- --dhcpv6 --host 'a=6c:92:bf:2f:aa:28=10' --host 'b=duid:00010001323a02a76c92bf2faa28=11'; eval "$PARSER"
+reset; set -- --host 'a=6c:92:bf:2f:aa:28=10' --host 'b=duid:00010001323a02a76c92bf2faa28=11'; eval "$PARSER"
 printf '%s' "$DIED" | grep -q 'same client (MAC 6c:92:bf:2f:aa:28)' || fail "MAC line and DUID-LLT line for one client accepted: $DIED"
-reset; set -- --dhcpv6 --host 'a=duid:000300016c92bf2faa28=10' --host 'b=6C:92:BF:2F:AA:28=11'; eval "$PARSER"
+reset; set -- --host 'a=duid:000300016c92bf2faa28=10' --host 'b=6C:92:BF:2F:AA:28=11'; eval "$PARSER"
 printf '%s' "$DIED" | grep -q 'same client' || fail "DUID-LL line and MAC line for one client accepted: $DIED"
-reset; set -- --dhcpv6 --host 'a=duid:0004ecbcbfb80ef2996849bca6b0d0a6ffce=10' --host 'b=6c:92:bf:2f:aa:28=11'; eval "$PARSER"
+reset; set -- --host 'a=duid:0004ecbcbfb80ef2996849bca6b0d0a6ffce=10' --host 'b=6c:92:bf:2f:aa:28=11'; eval "$PARSER"
 [ -z "$DIED" ] || fail "a DUID-UUID line was treated as carrying a MAC: $DIED"
 [ "$(mac_in_key duid 000300016c92bf2faa28%2b67)" = '6c:92:bf:2f:aa:28' ] || fail "mac_in_key does not ignore the IAID suffix"
 [ -z "$(mac_in_key duid 00030001000000000000%2b67)" ] || fail "mac_in_key treated an all-zero MAC as an identity"
 [ -z "$(mac_in_key duid 0004ecbcbfb80ef2996849bca6b0d0a6ffce)" ] || fail "mac_in_key invented a MAC for a UUID DUID"
 # a BMC with one all-zero DUID on two ports: odhcpd keys host sections on DUID
 # bytes and MACs only, so two duid-only lines differing by IAID collapse - refused
-reset; set -- --dhcpv6 --host 'bmc1=duid:00030001000000000000%2b67=20' --host 'bmc2=duid:00030001000000000000%56ce=21'; eval "$PARSER"
+reset; set -- --host 'bmc1=duid:00030001000000000000%2b67=20' --host 'bmc2=duid:00030001000000000000%56ce=21'; eval "$PARSER"
 printf '%s' "$DIED" | grep -q 'differ only by IAID' || fail "two duid-only lines differing by IAID accepted: $DIED"
 # ... with the MACs they are two sections, and the all-zero MAC in the DUID does not merge them
-reset; set -- --dhcpv6 --host 'bmc1=6c:92:bf:2f:aa:2a+duid:00030001000000000000%2b67=20' --host 'bmc2=6c:92:bf:2f:aa:2b+duid:00030001000000000000%56ce=21'; eval "$PARSER"
+reset; set -- --host 'bmc1=6c:92:bf:2f:aa:2a+duid:00030001000000000000%2b67=20' --host 'bmc2=6c:92:bf:2f:aa:2b+duid:00030001000000000000%56ce=21'; eval "$PARSER"
 [ -z "$DIED" ] || fail "two BMC ports with their MACs rejected: $DIED"
 # DUID length: odhcpd ignores clients under 10 or over 130 bytes
-reset; set -- --dhcpv6 --host 'a=duid:0004ecbc=20'; eval "$PARSER"
+reset; set -- --host 'a=duid:0004ecbc=20'; eval "$PARSER"
 printf '%s' "$DIED" | grep -q 'shorter than 10 bytes' || fail "a 4-byte DUID accepted"
-reset; set -- --dhcpv6 --host "a=duid:$(printf 'ab%.0s' $(seq 131))=20"; eval "$PARSER"
+reset; set -- --host "a=duid:$(printf 'ab%.0s' $(seq 131))=20"; eval "$PARSER"
 printf '%s' "$DIED" | grep -q 'longer than 130 bytes' || fail "a 131-byte DUID accepted"
-reset; set -- --dhcpv6 --host "a=duid:$(printf 'ab%.0s' $(seq 130))=20"; eval "$PARSER"
+reset; set -- --host "a=duid:$(printf 'ab%.0s' $(seq 130))=20"; eval "$PARSER"
 [ -z "$DIED" ] || fail "a 130-byte DUID rejected: $DIED"
 # odhcpd parses the IAID and the hostid numerically
-reset; set -- --dhcpv6 --host 'a=duid:0004ecbcbfb80ef2996849bca6b0d0a6ffce%000a=20' --host 'b=duid:0004ecbcbfb80ef2996849bca6b0d0a6ffce%a=21'; eval "$PARSER"
+reset; set -- --host 'a=duid:0004ecbcbfb80ef2996849bca6b0d0a6ffce%000a=20' --host 'b=duid:0004ecbcbfb80ef2996849bca6b0d0a6ffce%a=21'; eval "$PARSER"
 printf '%s' "$DIED" | grep -q 'given twice' || fail "IAID %000a and %a accepted as different clients"
 [ "$(norm_hostid 0x20)" = 20 ] || fail "norm_hostid does not strip a 0x prefix"
 for case_ in 'leading-dash:-nas=6c:92:bf:2f:aa:28=10' 'trailing-dash:nas-=6c:92:bf:2f:aa:28=10' \
              "too-long:$(printf 'a%.0s' $(seq 64))=6c:92:bf:2f:aa:28=10"; do
     name="${case_%%:*}"
-    reset; set -- --dhcpv6 --host "${case_#*:}"; eval "$PARSER"
+    reset; set -- --host "${case_#*:}"; eval "$PARSER"
     [ -n "$DIED" ] || fail "--host case '$name' was accepted"
 done
-reset; set -- --dhcpv6 --host "$(printf 'a%.0s' $(seq 63))=6c:92:bf:2f:aa:28=10"; eval "$PARSER"
+reset; set -- --host "$(printf 'a%.0s' $(seq 63))=6c:92:bf:2f:aa:28=10"; eval "$PARSER"
 [ -z "$DIED" ] || fail "a 63-character hostname rejected: $DIED"
 echo 'PASS: --host rejects malformed and duplicate reservations'
 
-# 3. --host needs managed mode and the LAN stage
-reset; set -- --slaac --host 'a=6c:92:bf:2f:aa:28=10'; eval "$PARSER"; eval "$POSTCHECK"
-printf '%s' "$DIED" | grep -q 'needs --dhcpv6' || fail "--host with --slaac accepted"
-reset; set -- --dhcpv6 --no-lan --host 'a=6c:92:bf:2f:aa:28=10'; eval "$PARSER"; eval "$POSTCHECK"
+# 3. --host needs the LAN stage; the DHCPv6 precondition is preflight's
+reset; set -- --no-lan --host 'a=6c:92:bf:2f:aa:28=10'; eval "$PARSER"; eval "$POSTCHECK"
 printf '%s' "$DIED" | grep -q 'no-lan' || fail "--host with --no-lan accepted"
-reset; set -- --dhcpv6 --host 'a=6c:92:bf:2f:aa:28=10'; eval "$PARSER"; eval "$POSTCHECK"
-[ -z "$DIED" ] || fail "--dhcpv6 --host rejected: $DIED"
 reset; set -- --host 'a=6c:92:bf:2f:aa:28=10'; eval "$PARSER"; eval "$POSTCHECK"
-[ -z "$DIED" ] || fail "--host without a mode switch must wait for preflight to settle the mode: $DIED"
+[ -z "$DIED" ] || fail "--host alone must wait for preflight to check the LAN: $DIED"
 # the same name as --dns-host and --host would leave two answers
-reset; set -- --dhcpv6 --dns-host 'nas=300:1::5' --host 'NAS=6c:92:bf:2f:aa:28=10'; eval "$PARSER"; eval "$POSTCHECK"
+reset; set -- --dns-host 'nas=300:1::5' --host 'NAS=6c:92:bf:2f:aa:28=10'; eval "$PARSER"; eval "$POSTCHECK"
 printf '%s' "$DIED" | grep -q 'also given as --dns-host' || fail "--dns-host and --host for one name accepted"
-echo 'PASS: --host is refused outside managed mode'
+echo 'PASS: --host post-parse checks'
 
 # 4. address arithmetic
 for case_ in '10:303:170f:3ab2:166e::10' '235:303:170f:3ab2:166e::235' 'abcd1234:303:170f:3ab2:166e::abcd:1234' \
@@ -349,36 +410,78 @@ printf '%s' "$INFOD" | grep -q 'cfg01 (3c:e1:a1:41:52:d0, ip 192.168.1.50) impli
 printf '%s' "$INFOD" | grep -q 'cfg02' && fail "a section with an explicit hostid was reported as implicit"
 echo 'PASS: reservation collisions, in-place update and protected sections'
 
-# 6. the UCI values each mode writes (dry run: no commit, no services)
-DRY_RUN=1; IFACE='ygg0'; LAN='lan'; YGG_CLASS='ygg0'
+# 6. the UCI values the LAN stage writes for each plan (dry run: no commit,
+#    no services, no assignment wait)
+DRY_RUN=1; IFACE='ygg0'; LAN='lan'; YGG_CLASS='ygg0'; YGG_PREFIX='303:170f:3ab2:166e::/64'
 uci() { case "$1 $2" in 'show dhcp') printf '%s\n' "$FIXTURE" ;; '-q get') printf '%s\n' "" ; return 0 ;; *) return 0 ;; esac; }
-reset; UCI_LOG=''; LAN_MODE='slaac'; stage_lan
-[ -z "$DIED" ] || fail "slaac stage died: $DIED"
-for want in 'set dhcp.lan.dhcpv6=disabled' 'set dhcp.lan.ra_slaac=1' 'del dhcp.lan.ra_flags' 'add_list dhcp.lan.ra_flags=none' \
-            'set dhcp.lan.ra=server' 'set dhcp.lan.ra_default=2' 'set dhcp.lan.ra_preference=medium' \
-            'set network.lan.ip6assign=64' 'add_list network.lan.ip6class=ygg0' 'del network.globals.ula_prefix'; do
-    printf '%s' "$UCI_LOG" | grep -qxF "$want" || fail "slaac mode did not write '$want':
+wrote() { printf '%s' "$UCI_LOG" | grep -qxF "$1"; }
+# a stock router: only ra / ra_default; everything else untouched
+reset; UCI_LOG=''; LAN_PLAN=overlay; CUR_IP6ASSIGN=60; CUR_ULA='fd75:921a:ca44::/48'; CUR_DHCPV6=server; CUR_RA_SLAAC=1; CUR_RA_FLAGS='managed-config other-config '; stage_lan
+[ -z "$DIED" ] || fail "overlay stage on stock died: $DIED"
+for want in 'set dhcp.lan.ra=server' 'set dhcp.lan.ra_default=2'; do
+    wrote "$want" || fail "overlay did not write '$want':
 $UCI_LOG"
 done
-printf '%s' "$UCI_LOG" | grep -q 'managed-config' && fail "slaac mode wrote managed-config"
-reset; UCI_LOG=''; LAN_MODE='dhcpv6'; stage_lan
-[ -z "$DIED" ] || fail "managed stage died: $DIED"
-for want in 'set dhcp.lan.dhcpv6=server' 'set dhcp.lan.ra_slaac=0' 'del dhcp.lan.ra_flags' \
-            'add_list dhcp.lan.ra_flags=managed-config' 'add_list dhcp.lan.ra_flags=other-config' 'set dhcp.lan.ra=server'; do
-    printf '%s' "$UCI_LOG" | grep -qxF "$want" || fail "managed mode did not write '$want':
+for forbidden in 'network.lan.ip6assign' 'ip6class' 'ula_prefix' 'dhcp.lan.dhcpv6' 'ra_slaac' 'ra_flags' 'ra_preference'; do
+    printf '%s' "$UCI_LOG" | grep -q "$forbidden" && fail "overlay on a stock router touched $forbidden:
 $UCI_LOG"
 done
-printf '%s' "$UCI_LOG" | grep -q 'ra_flags=none' && fail "managed mode wrote ra_flags=none"
+[ "$(printf '%s' "$UCI_LOG" | grep -c .)" = 2 ] || fail "overlay on stock must write exactly two values:
+$UCI_LOG"
+# ip6assign only when unset
+reset; UCI_LOG=''; LAN_PLAN=overlay; CUR_IP6ASSIGN=''; stage_lan
+wrote 'set network.lan.ip6assign=64' || fail "unset ip6assign not defaulted to 64"
+# the 1.x singleton ip6class goes, a custom list is kept and made to admit the class
+reset; UCI_LOG=''; LAN_PLAN=overlay; CUR_IP6ASSIGN=64; CUR_IP6CLASS='ygg0'; stage_lan
+wrote 'del network.lan.ip6class' || fail "1.x ip6class singleton not removed:
+$UCI_LOG"
+reset; UCI_LOG=''; LAN_PLAN=overlay; CUR_IP6ASSIGN=64; CUR_IP6CLASS='wan6 local'; stage_lan
+wrote 'add_list network.lan.ip6class=ygg0' || fail "custom ip6class did not gain the class:
+$UCI_LOG"
+printf '%s' "$UCI_LOG" | grep -q 'del network.lan.ip6class' && fail "custom ip6class was deleted"
+reset; UCI_LOG=''; LAN_PLAN=overlay; CUR_IP6ASSIGN=64; CUR_IP6CLASS='local ygg0'; stage_lan
+printf '%s' "$UCI_LOG" | grep -q 'ip6class' && fail "an admitting ip6class was rewritten:
+$UCI_LOG"
+# the migration restores stock RA/DHCPv6 and the ULA, and records itself only outside dry run
+reset; UCI_LOG=''; LAN_PLAN=migrate; CUR_IP6ASSIGN=64; CUR_IP6CLASS='ygg0'; CUR_ULA=''; CUR_DHCPV6=server; CUR_RA_SLAAC=0; CUR_RA_FLAGS='managed-config other-config '
+legacy_ula() { printf 'fd12:3456:789a::/48 restored from /root/ygg-deploy-backup-1/network\n'; }
+stage_lan
+[ -z "$DIED" ] || fail "migrate stage died: $DIED"
+for want in 'del network.lan.ip6class' 'set network.globals.ula_prefix=fd12:3456:789a::/48' 'set dhcp.lan.dhcpv6=server' 'set dhcp.lan.ra_slaac=1' \
+            'del dhcp.lan.ra_flags' 'add_list dhcp.lan.ra_flags=managed-config' 'add_list dhcp.lan.ra_flags=other-config' 'set dhcp.lan.ra=server' 'set dhcp.lan.ra_default=2'; do
+    wrote "$want" || fail "migration did not write '$want':
+$UCI_LOG"
+done
+printf '%s' "$UCI_LOG" | grep -q 'ra_flags=none' && fail "migration wrote ra_flags=none"
 [ "$(printf '%s' "$UCI_LOG" | grep -c 'add_list dhcp.lan.ra_flags=')" = 2 ] || fail "ra_flags must be exactly two list entries"
-# operator settings that would defeat the mode are refused, not overridden
-uci() { case "$1 $2" in '-q get') case "$3" in *dhcpv6_na) echo 0 ;; *) echo '' ;; esac ;; 'show dhcp') printf '%s\n' "$FIXTURE" ;; *) return 0 ;; esac; }
-reset; UCI_LOG=''; LAN_MODE='dhcpv6'; stage_lan
-printf '%s' "$DIED" | grep -q 'dhcpv6_na=0' || fail "dhcpv6_na=0 was not refused"
-uci() { case "$1 $2" in '-q get') case "$3" in *ra_offlink) echo 1 ;; *) echo '' ;; esac ;; 'show dhcp') printf '%s\n' "$FIXTURE" ;; *) return 0 ;; esac; }
-reset; UCI_LOG=''; LAN_MODE='dhcpv6'; stage_lan
-printf '%s' "$DIED" | grep -q 'ra_offlink=1' || fail "ra_offlink=1 was not refused"
-reset; UCI_LOG=''; LAN_MODE='slaac'; stage_lan
-[ -z "$DIED" ] || fail "slaac mode must not care about dhcpv6_na/ra_offlink: $DIED"
-echo 'PASS: each LAN mode writes exactly its UCI values'
+printf '%s' "$INFOD" | grep -q 'restored from /root/ygg-deploy-backup-1/network' || fail "ULA origin not reported: $INFOD"
+[ ! -f "$MIGRATED_MARKER" ] || fail "dry run wrote the migration marker"
+# a migration whose ULA survived does not touch it
+reset; UCI_LOG=''; LAN_PLAN=migrate; CUR_IP6ASSIGN=64; CUR_IP6CLASS='ygg0'; CUR_ULA='fd75::/48'; stage_lan
+printf '%s' "$UCI_LOG" | grep -q 'ula_prefix' && fail "an existing ULA was rewritten during migration"
+# reservations are applied on any plan (the section-5 uci stub: fixture + missing sections)
+uci() { case "$1 $2" in 'show dhcp') printf '%s\n' "$FIXTURE" ;; '-q get') return 1 ;; *) return 0 ;; esac; }
+reset; UCI_LOG=''; LAN_PLAN=overlay; CUR_IP6ASSIGN=60; HOSTS='cam mac aa:bb:cc:dd:ee:70 70'; stage_lan
+[ -z "$DIED" ] || fail "overlay stage with a reservation died: $DIED"
+wrote 'set dhcp.ygg_host_cam.hostid=70' || fail "reservation not applied on the overlay plan:
+$UCI_LOG"
+uci() { case "$1 $2" in 'show dhcp') printf '%s\n' "$FIXTURE" ;; '-q get') printf '%s\n' "" ; return 0 ;; *) return 0 ;; esac; }
+echo 'PASS: the LAN stage writes exactly the overlay values per plan'
 
-echo 'deploy-lan-mode: all checks passed'
+# 7. the LAN-to-Yggdrasil rule follows --no-lan-forward; the zone is unchanged
+reset; UCI_LOG=''; stage_firewall
+[ -z "$DIED" ] || fail "firewall stage died: $DIED"
+for want in 'set firewall.ygg_lan_out=rule' 'set firewall.ygg_lan_out.src=lan' 'set firewall.ygg_lan_out.dest=ygg' \
+            'set firewall.ygg_lan_out.family=ipv6' 'set firewall.ygg_lan_out.dest_ip=200::/7' 'set firewall.ygg_lan_out.target=ACCEPT' \
+            'set firewall.ygg.forward=DROP' 'set firewall.ygg.input=REJECT' 'del firewall.ygg.masq6'; do
+    wrote "$want" || fail "firewall stage did not write '$want':
+$UCI_LOG"
+done
+printf '%s' "$UCI_LOG" | grep -q '=forwarding' && fail "a zone-wide forwarding was written instead of a rule"
+reset; UCI_LOG=''; DO_LAN_FORWARD=0; stage_firewall
+wrote 'del firewall.ygg_lan_out' || fail "--no-lan-forward did not remove the rule:
+$UCI_LOG"
+printf '%s' "$UCI_LOG" | grep -q 'set firewall.ygg_lan_out' && fail "--no-lan-forward still wrote the rule"
+echo 'PASS: LAN-to-Yggdrasil rule'
+
+echo 'deploy-lan-overlay: all checks passed'
