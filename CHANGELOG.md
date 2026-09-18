@@ -24,7 +24,7 @@ on for everyone. Hence 2.0, breaking:
   once - ULA restored from the oldest `/root/ygg-deploy-backup-*/network`,
   else generated stock-style - and the migration is recorded in
   `/etc/yggdrasil-deploy/migrated` so later runs never reinterpret operator
-  changes as legacy. A partial signature is reported and left alone;
+  changes as legacy. A partial signature stops the run before any change;
   `--migrate-legacy` forces the migration. A dry run prints the plan.
 - `--host` reservations no longer need a mode; they need the LAN's DHCPv6
   server, which stock has. A LAN with `dhcpv6` disabled, `dhcpv6_na=0` or
@@ -34,9 +34,11 @@ on for everyone. Hence 2.0, breaking:
   IPv6, `dest_ip 200::/7`), not a zone forwarding. `--no-lan-forward`
   (`[flags] no-lan-forward`) removes it. Zone policy, trusted rules and the
   no-NAT66 invariant are unchanged. 1.x had no LAN-to-Yggdrasil path at all.
-- `--guard MINUTES`: a detached watchdog restores `network`, `dhcp` and
-  `firewall` unless the run verifies successfully - the recovery path for a
-  router reached only over the path being reconfigured.
+- `--guard MINUTES`: a detached watchdog stops the deployer and restores
+  `network`, `dhcp` and `firewall` unless the run verifies successfully - the
+  recovery path for a router reached only over the path being reconfigured.
+- The trusted-to-LAN and LAN-to-Yggdrasil rules name the firewall zone the
+  LAN network belongs to, not the network name (`--lan guests` in zone `lan`).
 - Verification separates what the deployer asserts (prefix on the LAN, `ra`,
   `ra_default`, an admitting `ip6class`, zone, rule, reservations, odhcpd)
   from the operator's LAN settings, which it reports.
