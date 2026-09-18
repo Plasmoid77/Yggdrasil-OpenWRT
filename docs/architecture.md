@@ -122,7 +122,7 @@ when the A flag does.
 ### Guard for remote-only routers
 
 `--guard MINUTES` arms, after the operator confirms and before the first
-change, a detached watchdog (nohup, own copy of `network`, `dhcp` and
+change, a detached watchdog (`setsid`, own copy of `network`, `dhcp` and
 `firewall` in the run's backup directory) that restores those files and
 reloads network, odhcpd, dnsmasq and firewall after MINUTES. A run that ends
 in a successful verification cancels it; a failed verification leaves it

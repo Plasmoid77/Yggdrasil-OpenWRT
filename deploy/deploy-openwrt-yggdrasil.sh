@@ -847,8 +847,10 @@ classify_lan() {
 # reconfigured: unless the run reaches a successful verification, it puts the
 # pre-run network/dhcp/firewall files back after GUARD_MIN minutes. It is a
 # separate process with its own copy of the files, so it neither depends on
-# this script surviving nor on Yggdrasil coming up. nohup with every fd
-# redirected is what survives the SSH session ending on BusyBox.
+# this script surviving nor on Yggdrasil coming up. OpenWrt's BusyBox has no
+# nohup: setsid (a separate applet, present on 25.12) or, failing that, a
+# subshell that ignores HUP, with every fd redirected, is what outlives the
+# SSH session; the deployer checks the watchdog is alive before going on.
 #
 # Exactly one of "fired" and "cancelled" happens: both sides claim the same
 # directory with mkdir, which is atomic. A firing guard first kills the
@@ -860,6 +862,8 @@ arm_guard() {
     [ -n "$BACKUP_DIR" ] && [ -d "$BACKUP_DIR" ] || return 0
     cat > "$BACKUP_DIR/guard.sh" <<GUARD
 #!/bin/sh
+trap '' HUP INT PIPE
+echo \$\$ > "$BACKUP_DIR/guard.pid"
 sleep $((GUARD_MIN * 60))
 mkdir "$BACKUP_DIR/guard.state" 2>/dev/null || exit 0   # cancelled first
 : > "$BACKUP_DIR/guard.state/fired"
@@ -878,9 +882,20 @@ done
 logger -t ygg-deploy "guard: deployer stopped, configuration restored from $BACKUP_DIR"
 GUARD
     chmod 700 "$BACKUP_DIR/guard.sh"
-    nohup sh "$BACKUP_DIR/guard.sh" >/dev/null 2>&1 </dev/null &
-    GUARD_PID=$!
-    ok "guard armed: network/dhcp/firewall restore in ${GUARD_MIN} min unless verification succeeds"
+    rm -f "$BACKUP_DIR/guard.pid"
+    if have setsid; then
+        setsid sh "$BACKUP_DIR/guard.sh" >/dev/null 2>&1 </dev/null &
+    else
+        ( trap '' HUP INT PIPE; exec sh "$BACKUP_DIR/guard.sh" ) >/dev/null 2>&1 </dev/null &
+    fi
+    _i=0
+    while [ ! -s "$BACKUP_DIR/guard.pid" ] && [ "$_i" -lt 20 ]; do sleep 1; _i=$((_i + 1)); done
+    GUARD_PID="$(cat "$BACKUP_DIR/guard.pid" 2>/dev/null)"
+    case "$GUARD_PID" in ''|*[!0-9]*) GUARD_PID='' ;; esac
+    if [ -z "$GUARD_PID" ] || ! kill -0 "$GUARD_PID" 2>/dev/null; then
+        die "the guard did not start (no live watchdog process) — refusing to continue unguarded"
+    fi
+    ok "guard armed (pid $GUARD_PID): network/dhcp/firewall restore in ${GUARD_MIN} min unless verification succeeds"
     info "    cancel by hand: mkdir $BACKUP_DIR/guard.state"
 }
 
