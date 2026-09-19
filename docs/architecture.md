@@ -437,6 +437,7 @@ The rpcd object is `luci.yggdrasil-status`:
 | `ygg_node_live` | Integer 0/1; the address comes from a current peer link rather than memory |
 | `dns` | String; lowercase JSON key, optional canonical DNS alias |
 | `online`, `persistent`, `static_ipv4` | Integer 0/1 flags |
+| `ipv6_native` | Array of strings; the device's global addresses outside the routed prefix (native and ULA) from the neighbour table, display only (status 6.2) |
 | `probed` | Integer 0/1; 0 when the call's probe budget was spent before this row could be probed (status 6.1.3) |
 | `reserved_ipv4` | String; configured valid reservation or empty |
 | `managed_pin`, `shared_host`, `complex_host`, `ambiguous_host`, `protected_host` | Integer 0/1 flags |

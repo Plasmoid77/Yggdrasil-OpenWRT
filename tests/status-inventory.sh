@@ -21,7 +21,7 @@ for fn in lower normalize_mac valid_mac valid_hostname valid_ipv4 first_ipv4 \
     lease_is_active mac_was_emitted remember_emitted_mac remember_persistent_mac \
     find_active_lease_by_mac \
     eui64_ipv6_for_mac append_unique_ipv6 observed_ipv6_for_mac build_known_ipv6 \
-    neighbor_recently_reachable probe_budget_left probe_online emit_dynamic_leases emit_persistent_host \
+    neighbor_recently_reachable probe_budget_left probe_online emit_dynamic_leases emit_persistent_host native_ipv6_for_mac \
     mac_for_neighbor ygg_peer_endpoints ygg_node_rows ygg_node_addresses_for_mac \
     merge_node_cache write_address_memory save_address_memory ygg_node_is_live \
     recall_lan_addresses remember_lan_addresses \
@@ -230,6 +230,21 @@ pinned_node_memory() {
     save_address_memory
     eq '' "$(cat "$NODE_STORE_FILE")"
     eq "$PINNED 200:aaaa::9" "$(cat "$NODE_CACHE_FILE")"
+}
+
+native_addresses() {
+    LAN_DEV=br-lan
+    LAN_YGG_PREFIX='300:1111:2222:3333:'
+    ip() { printf '%s\n' \
+        '300:1111:2222:3333::20 dev br-lan lladdr aa:bb:cc:dd:ee:ff REACHABLE' \
+        '2a03:d000:1:2:aaaa:bbbb:cccc:dddd dev br-lan lladdr aa:bb:cc:dd:ee:ff STALE' \
+        'fd75:921a:ca44::20 dev br-lan lladdr aa:bb:cc:dd:ee:ff STALE' \
+        '2a03:d000:1:2::dead dev br-lan lladdr aa:bb:cc:dd:ee:ff FAILED' \
+        'fe80::1 dev br-lan lladdr aa:bb:cc:dd:ee:ff REACHABLE' \
+        '2a03:d000:1:2::other dev br-lan lladdr 11:22:33:44:55:66 REACHABLE'; }
+    # native and ULA only: no routed-prefix, link-local, FAILED or other-MAC entries
+    eq "$(printf '%s\n' 2a03:d000:1:2:aaaa:bbbb:cccc:dddd fd75:921a:ca44::20)" "$(native_ipv6_for_mac AA:BB:CC:DD:EE:FF)"
+    eq '' "$(native_ipv6_for_mac 00:00:00:00:00:01)"
 }
 
 presence() {
@@ -863,6 +878,7 @@ run 'canonical, observed EUI-64, privacy and foreign-prefix selection' ipv6_sele
 run 'LAN Yggdrasil node addresses correlated by MAC' ygg_node_map
 run 'remembered node addresses live and die with their row' node_memory
 run 'a pinned row keeps its node address across a reboot' pinned_node_memory
+run 'native and ULA addresses per MAC' native_addresses
 run 'REACHABLE shortcut, ARP, IPv6 and failed presence' presence
 run 'DHCP lifetime, MAC merge and persistent lease-free rows' identity_lifetime
 run 'dynamic hostnames cannot inherit canonical metadata' canonical_guard

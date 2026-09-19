@@ -1,5 +1,15 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## Status v6.2 - the table shows native addresses and stops breaking them
+
+- New column "Native IPv6": the device's global addresses outside the routed
+  prefix (native `2000::/3` and ULA `fc00::/7`) as the neighbour table shows
+  them; display only, never stored. A device that has not used such an
+  address through the router shows "—" with a tooltip saying so. RPC rows
+  carry `ipv6_native` (array).
+- MAC, IPv4, the address columns and DNS are monospace and never broken
+  inside a value; the table scrolls horizontally instead of wrapping letters.
+
 ## Status v6.1.3 - presence probes share one time budget
 
 `clients` once ran past ubus's 30 s limit: every row the neighbour table did

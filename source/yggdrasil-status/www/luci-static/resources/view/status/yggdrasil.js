@@ -75,9 +75,11 @@ function lastError(peer) {
 }
 
 
-function makeTable(headers, rows, id, compactColumns) {
+function makeTable(headers, rows, id, compactColumns, monoColumns) {
 	var attrs = { 'class': 'table' };
 	var compact = compactColumns || [];
+	/* addresses: one per line, never broken inside; the table scrolls instead */
+	var mono = monoColumns || [];
 
 	if (id)
 		attrs.id = id;
@@ -105,15 +107,26 @@ function makeTable(headers, rows, id, compactColumns) {
 					'data-title': headers[i],
 					'style': isCompact
 						? 'width: 1%; white-space: nowrap; text-align: center; word-break: normal'
-						: 'word-break: break-word'
+						: (mono.indexOf(i) !== -1
+							? 'white-space: nowrap; word-break: normal; font-family: monospace'
+							: 'word-break: break-word')
 				}, value == null || value === '' ? '—' : value);
 			})
 		));
 	});
 
-	return table;
+	return E('div', { 'style': 'overflow-x: auto' }, table);
 }
 
+/* The device's own global addresses outside the routed prefix: native and ULA. */
+function nativeCell(client) {
+	var addresses = Array.isArray(client.ipv6_native) ? client.ipv6_native : [];
+
+	if (!addresses.length)
+		return E('span', { 'title': _('The router has not seen this device use a native or ULA address yet') }, '—');
+
+	return E('div', {}, addresses.map(function(addr) { return E('div', {}, addr); }));
+}
 
 function ipv6Cell(client) {
 	var addresses = Array.isArray(client.ipv6_addresses)
@@ -547,6 +560,7 @@ function makeClientTable(clients) {
 		_('MAC'),
 		_('IPv4'),
 		_('Yggdrasil IPv6'),
+		_('Native IPv6'),
 		_('Yggdrasil node'),
 		_('DNS'),
 		_('State'),
@@ -559,6 +573,7 @@ function makeClientTable(clients) {
 			client.mac || '—',
 			client.ipv4 || '—',
 			ipv6Cell(client),
+			nativeCell(client),
 			nodeCell(client),
 			client.dns || '—',
 			client.online
@@ -575,7 +590,8 @@ function makeClientTable(clients) {
 		return String(a[0]).localeCompare(String(b[0]));
 	});
 
-	return makeTable(headers, rows, 'yggdrasil-lan-clients');
+	/* MAC, IPv4, the three address columns and DNS: monospace, no mid-address wraps */
+	return makeTable(headers, rows, 'yggdrasil-lan-clients', null, [1, 2, 3, 4, 5, 6]);
 }
 
 

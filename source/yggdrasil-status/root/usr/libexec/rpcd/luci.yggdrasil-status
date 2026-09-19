@@ -638,6 +638,38 @@ neighbor_recently_reachable() {
 }
 
 
+# The device's global IPv6 addresses outside the routed prefix - native
+# (2000::/3) and ULA (fc00::/7) - as the kernel neighbour table shows them.
+# Display only: never stored, never used for identity or presence.
+native_ipv6_for_mac() {
+	local n6_wanted="$1"
+
+	ip -6 neigh show dev "$LAN_DEV" 2>/dev/null |
+		awk -v wanted="$(normalize_mac "$n6_wanted")" -v prefix="$LAN_YGG_PREFIX" '
+		{
+			addr = tolower($1)
+			mac = ""
+			for (i = 1; i <= NF; i++) {
+				if ($i == "lladdr" && (i + 1) <= NF) {
+					mac = tolower($(i + 1))
+					break
+				}
+			}
+			if (mac != wanted)
+				next
+			if (prefix != "" && index(addr, prefix) == 1)
+				next
+			if ($NF == "FAILED" || $NF == "INCOMPLETE")
+				next
+			# global unicast 2000::/3 and ULA fc00::/7 only
+			if (addr ~ /^[23][0-9a-f]*:/ || addr ~ /^f[cd][0-9a-f][0-9a-f]:/) {
+				if (!seen[addr]++)
+					print addr
+			}
+		}
+	'
+}
+
 # Runtime SLAAC addresses associated with a MAC in the kernel neighbor table.
 # These are enrichment only and are never written to UCI or a cache.
 observed_ipv6_for_mac() {
@@ -1301,6 +1333,11 @@ emit_client() {
 	done
 	json_close_array
 	json_add_int ipv6_live "$ec_ipv6_live"
+	json_add_array ipv6_native
+	for ec_addr in $(native_ipv6_for_mac "$ec_mac"); do
+		json_add_string "" "$ec_addr"
+	done
+	json_close_array
 	json_add_string ipv6_source "${KNOWN_IPV6_SOURCE:-}"
 	json_add_string ipv6_lease_match "$( [ -n "$ec_lease" ] && dhcpv6_lease_match_for_mac "$ec_mac" )"
 	json_add_int reserved_ipv6 "$(( ec_reserved_ipv6 | ec_implicit6 ))"
