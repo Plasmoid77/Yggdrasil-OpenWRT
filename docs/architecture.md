@@ -40,6 +40,14 @@ by MAC, so a self-contained node is distinguishable from a device that reaches
 Yggdrasil only through the router. An NDP `router` flag does not change the MAC
 identity or create another device.
 
+The deployer edits one package file: it inserts a wait for the TUN device
+into `/lib/netifd/proto/yggdrasil.sh`, between starting the daemon and the
+link-up update. Without it a cold boot can send the update before the device
+exists, netifd rejects it, and the interface stays `pending` with no address,
+no prefix and no firewall-zone device — the router is unreachable over
+Yggdrasil until `ifup ygg0`. The insert is marked, idempotent, and re-applied
+by a rerun after a package upgrade (operations: "The cold-boot race").
+
 The current clean-install interface name is `ygg0`; older deployments used
 `ygg`. netifd derives a delegated prefix's class from its providing interface
 name. An LAN `ip6class` list, if any, must admit that class. Setting `ip6class`

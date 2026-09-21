@@ -1,5 +1,26 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## Deployer 2.0.1 - the cold-boot race that locks the router out
+
+The stock netifd proto handler sends its link-up update before yggdrasil has
+created the `ygg0` TUN device; on a cold boot netifd then rejects the update
+(`notify_proto … (Unknown error)`) and leaves the interface `pending` forever:
+no address, no prefix, no device in the `ygg` zone, every Yggdrasil packet
+rejected by the router itself. Seen once during 1.x testing as an unexplained
+rarity, seen again on 2026-09-21 after an unattended reboot, root-caused in
+netifd's `proto_ext_update_link` (`device_claim` on a missing device).
+
+- New step after the package stage, `patch_proto_handler`: inserts a wait for
+  `/sys/class/net/ygg0` (up to 10 s, normally 0) after `proto_run_command`;
+  on timeout the update is still sent (stock behaviour) and a `daemon.warn`
+  log line says why the interface stayed pending. Idempotent, requires
+  exactly one known anchor line, verifies the written file, dry-run aware.
+  A package upgrade restores the stock file; a rerun puts the wait back.
+  (Astra: checked install, single anchor, explicit timeout handling.)
+- Test `tests/deploy-proto-handler.sh`; docs: operations "The cold-boot race",
+  "Update deliberately", architecture "Core network".
+- Not fixed upstream (`openwrt/packages` master, 2026-09-21).
+
 ## Status v6.2 - the table shows native addresses and stops breaking them
 
 - New column "Native IPv6": the device's global addresses outside the routed

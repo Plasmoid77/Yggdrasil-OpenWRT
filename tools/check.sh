@@ -31,6 +31,8 @@ sh tests/deploy-config-file.sh
 busybox ash tests/deploy-config-file.sh
 sh tests/deploy-lan-overlay.sh
 busybox ash tests/deploy-lan-overlay.sh
+sh tests/deploy-proto-handler.sh
+busybox ash tests/deploy-proto-handler.sh
 sh tests/status-inventory.sh
 busybox ash tests/status-inventory.sh
 sh tests/status-download.sh
