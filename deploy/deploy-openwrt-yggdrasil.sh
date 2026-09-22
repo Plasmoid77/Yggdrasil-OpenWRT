@@ -942,7 +942,8 @@ stage_packages() {
 # setup ("pending") is restarted through ubus. The device's ifindex is checked
 # again so a device recreated meanwhile (someone already restarted it) is left
 # alone. Recovery by retry, not a guarantee: each restart plays the same race,
-# which a warmed-up system wins.
+# which a warmed-up system wins; at most five restarts per boot (a counter in
+# /tmp), so a system that keeps losing does not bounce the daemon forever.
 HOTPLUG_FILE='/etc/hotplug.d/net/50-yggdrasil-pending'
 
 hotplug_guard_text() {
@@ -958,8 +959,12 @@ ifindex="\$(cat '/sys/class/net/$IFACE/ifindex' 2>/dev/null)" || exit 0
 	sleep 10
 	[ "\$(cat '/sys/class/net/$IFACE/ifindex' 2>/dev/null)" = "\$ifindex" ] || exit 0
 	[ "\$(ifstatus '$IFACE' | jsonfilter -e '@.pending')" = true ] || exit 0
-	logger -t yggdrasil-hotplug "$IFACE still pending 10 s after its TUN device appeared: restarting the interface"
-	ubus call 'network.interface.$IFACE' down && ubus call 'network.interface.$IFACE' up
+	n="\$(cat '/tmp/yggdrasil-hotplug.$IFACE' 2>/dev/null || echo 0)"
+	[ "\$n" -lt 5 ] || { logger -t yggdrasil-hotplug "$IFACE still pending after 5 restarts this boot: giving up, run 'ifup $IFACE' by hand"; exit 0; }
+	echo "\$((n + 1))" > '/tmp/yggdrasil-hotplug.$IFACE'
+	logger -t yggdrasil-hotplug "$IFACE still pending 10 s after its TUN device appeared: restarting the interface (\$((n + 1))/5)"
+	ubus call 'network.interface.$IFACE' down && ubus call 'network.interface.$IFACE' up \\
+		|| logger -t yggdrasil-hotplug "restart of $IFACE failed"
 ) &
 EOF
 }

@@ -52,7 +52,8 @@ first reloads the whole network configuration). A device recreated meanwhile
 means somebody already restarted it, and the script does nothing. If the
 daemon never starts there is no device, no event and no loop. Each restart
 plays the same race again, which a warmed-up system wins; this is recovery by
-retry, not a guarantee. Verified on the router with a deliberately induced
+retry, not a guarantee, and it stops after five restarts per boot (a counter
+in `/tmp`, gone at the next boot) rather than bounce the daemon forever. Verified on the router with a deliberately induced
 failure: update sent before the daemon → `Unknown error` → ten seconds later
 `yggdrasil-hotplug: ygg0 still pending … restarting the interface` → `is now
 up` one second after. And on the second of two validation cold reboots the

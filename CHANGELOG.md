@@ -16,8 +16,8 @@ netifd (`device_claim` on a missing device).
 - New `install_hotplug_guard`: writes `/etc/hotplug.d/net/50-yggdrasil-pending`.
   On the device's hotplug `add` it waits 10 s in the background and, if the
   interface is still `pending` and the device is unchanged (ifindex), restarts
-  it via `ubus call network.interface.<iface> down`/`up`. Idempotent, dry-run
-  aware, interface name substituted. (Review: ubus down/up instead of `ifup`,
+  it via `ubus call network.interface.<iface> down`/`up`; at most five
+  restarts per boot. Idempotent, dry-run aware, interface name substituted. (Review: ubus down/up instead of `ifup`,
   ifindex guard against stale timers, `pending` is the right predicate.)
 - Verified on the router with an induced failure (update sent before the
   daemon): `Unknown error` → guard restart at +10 s → `is now up` at +11 s;

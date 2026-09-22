@@ -50,8 +50,11 @@ grep -q "^ifindex=\"\$(cat '/sys/class/net/ygg0/ifindex' 2>/dev/null)\" || exit 
     || fail 'ifindex capture line differs'
 grep -q "^	\[ \"\$(ifstatus 'ygg0' | jsonfilter -e '@.pending')\" = true \] || exit 0$" "$HOTPLUG_FILE" \
     || fail 'pending check line differs'
-grep -q "^	ubus call 'network.interface.ygg0' down && ubus call 'network.interface.ygg0' up$" "$HOTPLUG_FILE" \
+grep -q "^	ubus call 'network.interface.ygg0' down && ubus call 'network.interface.ygg0' up \\\\$" "$HOTPLUG_FILE" \
     || fail 'restart line differs (must be ubus down/up, not ifup)'
+grep -q "^	n=\"\$(cat '/tmp/yggdrasil-hotplug.ygg0' 2>/dev/null || echo 0)\"$" "$HOTPLUG_FILE" \
+    || fail 'retry counter line differs'
+grep -q '^	\[ "\$n" -lt 5 \] || { logger' "$HOTPLUG_FILE" || fail 'retry bound missing'
 grep -q '^	sleep 10$' "$HOTPLUG_FILE" || fail 'ten-second wait missing'
 grep -q '^	logger -t yggdrasil-hotplug "ygg0 still pending' "$HOTPLUG_FILE" || fail 'restart is not logged'
 ! grep -q 'IFACE' "$HOTPLUG_FILE" || fail 'unexpanded $IFACE in the guard'
@@ -99,7 +102,7 @@ GUARD="$TMP/guard-under-test"
 # The guard reads the ifindex from sysfs; point it at a file we control, and
 # do not wait: a stub for sleep would not do, BusyBox sh runs its applets
 # without consulting PATH.
-sed "s|/sys/class/net/ygg0/ifindex|$TMP/ifindex|g; s|^	sleep 10$|	sleep 0|" "$HOTPLUG_FILE" > "$GUARD"
+sed "s|/sys/class/net/ygg0/ifindex|$TMP/ifindex|g; s|/tmp/yggdrasil-hotplug.ygg0|$TMP/retries|g; s|^	sleep 10$|	sleep 0|" "$HOTPLUG_FILE" > "$GUARD"
 grep -q '^	sleep 0$' "$GUARD" || fail 'could not neutralise the wait in the guard under test' 
 run_guard() { # $1 = up, $2 = pending
     : > "$LOG"
@@ -121,6 +124,12 @@ ACTION=remove DEVICENAME=ygg0 UP=false PENDING=true LOG="$LOG" PATH="$STUBS:$PAT
 : > "$LOG"
 ACTION=add DEVICENAME=eth0 UP=false PENDING=true LOG="$LOG" PATH="$STUBS:$PATH" sh "$GUARD"; sleep 1
 [ ! -s "$LOG" ] || fail 'guard acted on another device'
+[ "$(cat "$TMP/retries")" = 1 ] || fail "retry counter not 1 after one restart: $(cat "$TMP/retries" 2>/dev/null)"
+echo 5 > "$TMP/retries"
+run_guard false true
+! grep -q 'ubus' "$LOG" || fail 'guard restarted beyond the five-per-boot bound'
+[ "$(cat "$TMP/retries")" = 5 ] || fail 'counter changed after giving up'
+rm -f "$TMP/retries"
 rm -f "$TMP/ifindex"
 : > "$LOG"
 ACTION=add DEVICENAME=ygg0 UP=false PENDING=true LOG="$LOG" PATH="$STUBS:$PATH" sh "$GUARD"; sleep 1
