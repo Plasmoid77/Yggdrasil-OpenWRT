@@ -662,7 +662,7 @@ native_ipv6_for_mac() {
 			if ($NF == "FAILED" || $NF == "INCOMPLETE")
 				next
 			# global unicast 2000::/3 and ULA fc00::/7 only
-			if (addr ~ /^[23][0-9a-f]*:/ || addr ~ /^f[cd][0-9a-f][0-9a-f]:/) {
+			if (addr ~ /^[23][0-9a-f][0-9a-f][0-9a-f]:/ || addr ~ /^f[cd][0-9a-f][0-9a-f]:/) {
 				if (!seen[addr]++)
 					print addr
 			}

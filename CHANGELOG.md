@@ -9,6 +9,14 @@
   the install goes on. The guard text is unchanged, so an installed router
   needs no rerun. Found in an independent review (Astra).
 
+## Status (unreleased) - the native IPv6 column no longer admits 200::/7
+
+- `native_ipv6_for_mac` matched `^[23][0-9a-f]*:`, which also takes any
+  `2xx:`/`3xx:` Yggdrasil address; it now requires a four-digit first group,
+  i.e. `2000::/3` as its comment says. The router's own routed prefix was
+  already excluded before this test, so a normal install shows no change.
+  Ships with the next status release; no release was cut for this alone.
+
 ## Deployer 2.0.2 - the cold-boot race, handled without touching the package
 
 The stock netifd proto handler sends its link-up update before yggdrasil has

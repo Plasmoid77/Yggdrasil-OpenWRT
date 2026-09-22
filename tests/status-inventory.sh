@@ -237,12 +237,13 @@ native_addresses() {
     LAN_YGG_PREFIX='300:1111:2222:3333:'
     ip() { printf '%s\n' \
         '300:1111:2222:3333::20 dev br-lan lladdr aa:bb:cc:dd:ee:ff REACHABLE' \
+        '203:4444:5555:6666::20 dev br-lan lladdr aa:bb:cc:dd:ee:ff REACHABLE' \
         '2a03:d000:1:2:aaaa:bbbb:cccc:dddd dev br-lan lladdr aa:bb:cc:dd:ee:ff STALE' \
         'fd75:921a:ca44::20 dev br-lan lladdr aa:bb:cc:dd:ee:ff STALE' \
         '2a03:d000:1:2::dead dev br-lan lladdr aa:bb:cc:dd:ee:ff FAILED' \
         'fe80::1 dev br-lan lladdr aa:bb:cc:dd:ee:ff REACHABLE' \
         '2a03:d000:1:2::other dev br-lan lladdr 11:22:33:44:55:66 REACHABLE'; }
-    # native and ULA only: no routed-prefix, link-local, FAILED or other-MAC entries
+    # native and ULA only: no routed-prefix, other 200::/7, link-local, FAILED or other-MAC entries
     eq "$(printf '%s\n' 2a03:d000:1:2:aaaa:bbbb:cccc:dddd fd75:921a:ca44::20)" "$(native_ipv6_for_mac AA:BB:CC:DD:EE:FF)"
     eq '' "$(native_ipv6_for_mac 00:00:00:00:00:01)"
 }
