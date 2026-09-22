@@ -374,10 +374,11 @@ Current implementation order in `probe_online()`:
 3. If needed, try `ping -6 -c 1 -W 1` against selected IPv6 addresses.
 4. No success means Offline.
 
-Steps 2-3 share one 20 s budget per `clients` call (ubus allows 30): each
-active probe costs about a second and runs for every row the neighbour table
-does not confirm, so many offline rows would otherwise push the call past the
-limit. A row reached after the budget is spent is reported `probed: 0` and
+Steps 2-3 share one 8 s budget per `clients` call: each active probe costs
+about a second and runs for every row the neighbour table does not confirm,
+so many offline rows would otherwise stretch the call. ubus would allow 30 s,
+but the browser gives an RPC 20 s and a call near that leaves the page on its
+spinner for good, so the budget stays well below it. A row reached after the budget is spent is reported `probed: 0` and
 shown as "Unknown" - not asked, not guessed; the next refresh asks again.
 
 `STALE`, `DELAY`, `PROBE`, `FAILED` or missing NDP entries are not an Online or

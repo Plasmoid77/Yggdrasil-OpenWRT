@@ -27,6 +27,14 @@ netifd (`device_claim` on a missing device).
 - Not fixed upstream (`openwrt/packages` master, 2026-09-21); no PR by the
   owner's decision.
 
+## Status v6.2.1 - the LAN table no longer risks the browser's RPC timeout
+
+`clients` probed for up to 20 s. The browser's LuCI client gives an RPC 20 s,
+and a call that approaches it leaves the page loading forever - which is what
+the status page did over Yggdrasil while the owner was away. The probe budget
+is now 8 s; rows not reached are shown "Unknown" and probed by the next
+15-second refresh, as before.
+
 ## Status v6.2 - the table shows native addresses and stops breaking them
 
 - New column "Native IPv6": the device's global addresses outside the routed

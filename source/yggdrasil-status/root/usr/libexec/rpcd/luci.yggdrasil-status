@@ -1183,7 +1183,10 @@ build_known_ipv6() {
 # so they share one budget: PROBE_DEADLINE (epoch seconds, set per call).
 # Once it is spent, a row that the neighbour table does not already confirm
 # is reported with probed=0 instead of being asked - and instead of being
-# guessed offline.
+# guessed offline. The budget is 8 s, not the 20 s ubus would allow: LuCI's
+# browser client gives an RPC 20 s, and a call that approaches that leaves
+# the page on its spinner for good, while an unprobed row costs nothing -
+# the view refreshes every 15 s and asks again.
 PROBE_DEADLINE=''
 PROBED=1
 probe_budget_left() {
@@ -1504,7 +1507,7 @@ rpc_clients() {
 	[ -n "$LAN_DEV" ] || LAN_DEV='br-lan'
 
 	NOW="$(date +%s)"
-	PROBE_DEADLINE=$((NOW + 20))
+	PROBE_DEADLINE=$((NOW + 8))
 	YGG_NET=''
 	config_load network
 	config_foreach select_ygg_network interface
