@@ -135,4 +135,12 @@ rm -f "$TMP/ifindex"
 ACTION=add DEVICENAME=ygg0 UP=false PENDING=true LOG="$LOG" PATH="$STUBS:$PATH" sh "$GUARD"; sleep 1
 [ ! -s "$LOG" ] || fail 'guard acted although the device is gone'
 
+# 6. The guard is written before stage_yggdrasil reloads networking, so a race
+#    during installation heals itself instead of failing stage_wait.
+guard_line="$(grep -n '^install_hotplug_guard$' "$SCRIPT" | cut -d: -f1)"
+ygg_line="$(grep -n '^stage_yggdrasil$' "$SCRIPT" | cut -d: -f1)"
+if [ -z "$guard_line" ] || [ -z "$ygg_line" ] || [ "$guard_line" -ge "$ygg_line" ]; then
+    fail "guard installed after stage_yggdrasil (lines ${guard_line:-?} and ${ygg_line:-?})"
+fi
+
 echo 'deploy-hotplug-guard: ok'

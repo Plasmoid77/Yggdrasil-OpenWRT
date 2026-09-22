@@ -1,5 +1,14 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## Deployer 2.0.3 - the guard is in place before the first network reload
+
+- `install_hotplug_guard` now runs before `stage_yggdrasil`. The stage's own
+  `network reload`/`restart` plays the same race as a cold boot; with the
+  guard written after it, a race during installation left `ygg0` pending and
+  `stage_wait` died with "no node address". Now the guard heals it (+10 s) and
+  the install goes on. The guard text is unchanged, so an installed router
+  needs no rerun. Found in an independent review (Astra).
+
 ## Deployer 2.0.2 - the cold-boot race, handled without touching the package
 
 The stock netifd proto handler sends its link-up update before yggdrasil has

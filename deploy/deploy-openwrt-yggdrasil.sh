@@ -16,7 +16,7 @@
 set -u
 umask 077
 
-VERSION='2.0.2'
+VERSION='2.0.3'
 SELF="${0##*/}"
 # Piped straight from a URL — wget -qO- ... | sh -s -- ... — $0 is the shell, so
 # the banner and the usage text would announce themselves as "sh".
@@ -2141,8 +2141,8 @@ prompt_trusted
 
 stage_preflight
 stage_packages
-stage_yggdrasil
 install_hotplug_guard
+stage_yggdrasil
 stage_wait
 stage_lan
 stage_firewall
