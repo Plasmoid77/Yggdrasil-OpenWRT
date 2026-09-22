@@ -18,7 +18,7 @@ The reason is the netifd restart described below. Installing a protocol handler
 requires one, and doing it while Yggdrasil is already running means restarting
 netifd underneath a live Yggdrasil interface.
 
-### The cold-boot race (fixed by the deployer since 2.0.1)
+### The cold-boot race and the hotplug guard
 
 The stock handler `/lib/netifd/proto/yggdrasil.sh` starts the daemon and sends
 its link-up update to netifd immediately. When the daemon creates the `ygg0`
@@ -36,21 +36,26 @@ the interface at `up:false pending:true` forever: no address or prefix in
 trusted node included — hits the zone-less `handle_reject` and gets a TCP RST
 or ICMPv6 port-unreachable *from the router's own node address*. The router
 looks healthy from the LAN while the whole design is unreachable from outside.
-`ifup ygg0` clears it in one shot. It hit the tested router once during 1.x
-development, did not reproduce in fourteen further reboots, and hit again after
-an unattended reboot on 2026-09-21 while the owner was away.
+Restarting the interface clears it in one shot. It hit the tested router once
+during 1.x development, did not reproduce in fourteen further reboots, and hit
+again after an unattended reboot on 2026-09-21 while the owner was away.
 
-The deployer now inserts a wait into the handler right after the daemon is
-started — up to ten seconds for `/sys/class/net/ygg0` to appear, normally zero —
-so the update reaches netifd once the device exists. If the device is still
-missing after that (the daemon did not start at all — a bad key, a crash), the
-update is sent anyway, as stock does, and a `daemon.warn` line from `ygg0`
-in `logread` says so. The insert is detected by its loop line, so a rerun
-does nothing, and the deployer refuses a handler whose layout it does not
-recognise. `apk upgrade` of `yggdrasil` replaces the file, so re-run the
-deployer after a package upgrade (see "Update deliberately"); `apk fix
-yggdrasil` restores the stock file if the patch ever needs undoing. The race
-is not fixed upstream (`openwrt/packages` master, checked 2026-09-21).
+The package is not touched — a fix inside `/lib/netifd/proto/yggdrasil.sh`
+would be undone silently by the next `apk upgrade`, and the project does not
+send changes upstream. The deployer instead writes a hotplug script of its
+own, `/etc/hotplug.d/net/50-yggdrasil-pending`: when procd reports the `ygg0`
+device appearing (`ACTION=add`), it notes the device's ifindex, waits ten
+seconds in the background — a healthy setup finishes in three — and, if the
+interface is still `pending` and the device is still the same one, restarts it
+with `ubus call network.interface.ygg0 down` and `up` (not `ifup`, which
+first reloads the whole network configuration). A device recreated meanwhile
+means somebody already restarted it, and the script does nothing. If the
+daemon never starts there is no device, no event and no loop. Each restart
+plays the same race again, which a warmed-up system wins; this is recovery by
+retry, not a guarantee. Verified on the router with a deliberately induced
+failure: update sent before the daemon → `Unknown error` → ten seconds later
+`yggdrasil-hotplug: ygg0 still pending … restarting the interface` → `is now
+up` one second after.
 
 Diagnosis in one line when the router answers pings but rejects everything
 over Yggdrasil:
@@ -59,9 +64,8 @@ over Yggdrasil:
 ifstatus ygg0 | jsonfilter -e '@.up' -e '@.pending'; nft list chain inet fw4 input | grep -c ygg0
 ```
 
-`true false 1` is healthy. `false true 0` is this race: `ifup ygg0`, then make
-sure the handler carries the wait (`grep -c '/sys/class/net/' /lib/netifd/proto/yggdrasil.sh`
-prints 2).
+`true false 1` is healthy. `false true 0` is this race; `logread | grep
+yggdrasil-hotplug` shows whether the guard has acted.
 
 Validated end to end on a factory-reset router: uplink, then the modem
 installer and its reboot, then a control reboot to prove the modem alone is
@@ -296,10 +300,9 @@ apk upgrade yggdrasil luci-proto-yggdrasil yggdrasil-jumper
 
 Do not assume every future package keeps the exact same UCI options.
 
-An upgrade of `yggdrasil` restores the stock `/lib/netifd/proto/yggdrasil.sh`
-without the TUN-device wait (see "The cold-boot race"). Re-run the deployer
-afterwards — with all packages present it changes nothing else — or the next
-cold boot may leave `ygg0` pending again.
+The hotplug guard against the cold-boot race lives in
+`/etc/hotplug.d/net/50-yggdrasil-pending`, outside any package, and survives
+upgrades; it is rewritten by a deployer rerun only if its text changed.
 
 ### Moving a 1.x router to 2.0
 
@@ -432,6 +435,8 @@ Inventory `config host` entries may be kept because they are normal OpenWrt devi
 Be careful with static reservations: deleting a `config host` that contains `option ip` also removes that DHCP reservation. `config domain` canonical IPv6 / DNS records are separate and are not removed automatically.
 
 ### Remove the core Yggdrasil LAN setup
+
+Also delete the deployer's hotplug guard, `/etc/hotplug.d/net/50-yggdrasil-pending`.
 
 Because removing the core can destroy remote management reachability, do this only with an alternate management path available.
 

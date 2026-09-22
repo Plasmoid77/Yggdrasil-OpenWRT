@@ -16,7 +16,7 @@
 set -u
 umask 077
 
-VERSION='2.0.1'
+VERSION='2.0.2'
 SELF="${0##*/}"
 # Piped straight from a URL — wget -qO- ... | sh -s -- ... — $0 is the shell, so
 # the banner and the usage text would announce themselves as "sh".
@@ -935,59 +935,50 @@ stage_packages() {
 # later, the update fails ("Command failed: ubus call network.interface
 # notify_proto … (Unknown error)"), and netifd leaves the interface pending
 # forever: no address in ifstatus, no device in the 'ygg' firewall zone, every
-# Yggdrasil packet rejected — the router is unreachable until 'ifup'. Not fixed
-# upstream (openwrt/packages net/yggdrasil, checked 2026-09-21). The handler is
-# a script netifd runs anew on every setup, so a wait for the device, inserted
-# once here, is enough; a package upgrade replaces the file, and a re-run puts
-# the wait back.
-patch_proto_handler() {
-    _f='/lib/netifd/proto/yggdrasil.sh'
-    # shellcheck disable=SC2016  # literal text of the handler, not expansions
-    _anchor='proto_run_command "$config" /usr/sbin/yggdrasil '
-    # shellcheck disable=SC2016
-    _marker='[ ! -d "/sys/class/net/${config}" ]'
-    if [ "$DRY_RUN" -eq 1 ] && [ ! -f "$_f" ]; then
-        info "would insert the TUN-device wait into $_f once installed"
-        return 0
-    fi
-    if grep -qF "$_marker" "$_f"; then
-        ok "proto handler already waits for the TUN device"
-        return 0
-    fi
-    [ "$(grep -cF "$_anchor" "$_f")" = 1 ] \
-        || die "unexpected proto handler layout in $_f — cannot insert the TUN wait"
+# Yggdrasil packet rejected — the router is unreachable until the interface is
+# restarted. The package file is not touched (an upgrade would silently undo
+# it); instead a hotplug script of our own reacts to the TUN device appearing:
+# ten seconds later — a healthy setup finishes in three — an interface still in
+# setup ("pending") is restarted through ubus. The device's ifindex is checked
+# again so a device recreated meanwhile (someone already restarted it) is left
+# alone. Recovery by retry, not a guarantee: each restart plays the same race,
+# which a warmed-up system wins.
+HOTPLUG_FILE='/etc/hotplug.d/net/50-yggdrasil-pending'
+
+hotplug_guard_text() {
+    cat <<EOF
+#!/bin/sh
+# Written by Yggdrasil-OpenWRT (deploy-openwrt-yggdrasil.sh). The stock
+# yggdrasil proto handler can send its link-up update before the TUN device
+# exists (cold boot); netifd then leaves the interface pending forever. Once
+# the device has appeared, restart the interface if that happened.
+[ "\$ACTION" = add ] && [ "\$DEVICENAME" = '$IFACE' ] || exit 0
+ifindex="\$(cat '/sys/class/net/$IFACE/ifindex' 2>/dev/null)" || exit 0
+(
+	sleep 10
+	[ "\$(cat '/sys/class/net/$IFACE/ifindex' 2>/dev/null)" = "\$ifindex" ] || exit 0
+	[ "\$(ifstatus '$IFACE' | jsonfilter -e '@.pending')" = true ] || exit 0
+	logger -t yggdrasil-hotplug "$IFACE still pending 10 s after its TUN device appeared: restarting the interface"
+	ubus call 'network.interface.$IFACE' down && ubus call 'network.interface.$IFACE' up
+) &
+EOF
+}
+
+install_hotplug_guard() {
+    FAILED_STAGE='hotplug guard'
     if [ "$DRY_RUN" -eq 1 ]; then
-        info "would insert the TUN-device wait into $_f"
+        info "would write $HOTPLUG_FILE (restart '$IFACE' if it is still pending 10 s after its TUN appears)"
         return 0
     fi
-    # Tabs, like the rest of the handler; the awk -v string turns \t into tabs.
-    # If the device never shows up the update is sent anyway — the stock
-    # behaviour, now with a log line saying why the interface stayed pending.
-    # shellcheck disable=SC2016
-    _snip='\t# Yggdrasil-OpenWRT: wait for the TUN device before the link-up update.
-\t# On a cold boot yggdrasil creates it a moment after it starts; an update
-\t# sent earlier fails and netifd leaves the interface pending forever.
-\t_i=0
-\twhile [ "$_i" -lt 10 ] && [ ! -d "/sys/class/net/${config}" ]; do
-\t\t_i=$((_i + 1)); sleep 1
-\tdone
-\t[ -d "/sys/class/net/${config}" ] \\
-\t\t|| logger -t "${config}" -p daemon.warn "TUN device ${config} still missing after ${_i}s; the link-up update will fail and the interface stay pending — check the yggdrasil log, then ifup ${config}"'
-    # Written in place (cat >), not copied over: netifd executes the handler,
-    # and a file created under this script's umask 077 would lose the exec bit.
-    if awk -v anchor="$_anchor" -v snip="$_snip" \
-            '{ print } index($0, anchor) { print snip }' "$_f" > "$_f.new" \
-        && sh -n "$_f.new" \
-        && [ "$(grep -cF "$_marker" "$_f.new")" = 1 ] \
-        && cat "$_f.new" > "$_f" \
-        && grep -qF "$_marker" "$_f" \
-        && [ -x "$_f" ]; then
-        rm -f "$_f.new"
-        ok "proto handler now waits for the TUN device (cold-boot race fix)"
-    else
-        rm -f "$_f.new"
-        die "patching $_f failed — restore the stock file with: apk fix yggdrasil"
+    if [ -f "$HOTPLUG_FILE" ] && [ "$(cat "$HOTPLUG_FILE")" = "$(hotplug_guard_text)" ]; then
+        ok "hotplug guard already in place: $HOTPLUG_FILE"
+        return 0
     fi
+    mkdir -p "$(dirname "$HOTPLUG_FILE")"
+    hotplug_guard_text > "$HOTPLUG_FILE" || die "cannot write $HOTPLUG_FILE"
+    chmod 644 "$HOTPLUG_FILE"
+    sh -n "$HOTPLUG_FILE" || die "$HOTPLUG_FILE does not parse"
+    ok "hotplug guard written: $HOTPLUG_FILE"
 }
 
 # ================================================ stage 2: yggdrasil interface
@@ -2145,8 +2136,8 @@ prompt_trusted
 
 stage_preflight
 stage_packages
-patch_proto_handler
 stage_yggdrasil
+install_hotplug_guard
 stage_wait
 stage_lan
 stage_firewall
