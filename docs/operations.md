@@ -55,7 +55,11 @@ plays the same race again, which a warmed-up system wins; this is recovery by
 retry, not a guarantee. Verified on the router with a deliberately induced
 failure: update sent before the daemon → `Unknown error` → ten seconds later
 `yggdrasil-hotplug: ygg0 still pending … restarting the interface` → `is now
-up` one second after.
+up` one second after. And on the second of two validation cold reboots the
+real race happened by itself (`Unknown error` at boot+2 s, TUN created the
+same second, just after the update) and the guard recovered it 17 s later —
+under boot load the ten-second timer and the hotplug queue took longer, which
+is fine.
 
 Diagnosis in one line when the router answers pings but rejects everything
 over Yggdrasil:

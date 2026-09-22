@@ -21,7 +21,9 @@ netifd (`device_claim` on a missing device).
   ifindex guard against stale timers, `pending` is the right predicate.)
 - Verified on the router with an induced failure (update sent before the
   daemon): `Unknown error` → guard restart at +10 s → `is now up` at +11 s;
-  quiet on healthy bring-ups. Test `tests/deploy-hotplug-guard.sh`.
+  quiet on healthy bring-ups. On one of two validation cold reboots the
+  genuine race occurred and the guard recovered the interface (boot+19 s).
+  Test `tests/deploy-hotplug-guard.sh`.
 - Not fixed upstream (`openwrt/packages` master, 2026-09-21); no PR by the
   owner's decision.
 
