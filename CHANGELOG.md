@@ -16,11 +16,12 @@
 
 ## Status 6.4 - a narrower client table; the native column is filled again
 
-- Column order: Hostname, MAC address, Yggdrasil, IPv4, Native IPv6, DNS,
-  State, Persistence. IPv4 and Native IPv6 are collapsed by default; a click
-  on the header opens or closes the whole column, remembered in the browser.
-- Native IPv6 lists global (2000::/3) addresses first, then ULA ones with a
-  small "ULA" label. State and short hostnames no longer wrap; a long name
+- Column order: Hostname, MAC address, Yggdrasil address, IPv4, IPv6, DNS,
+  State, Persistence ("Yggdrasil" and "Native IPv6" are renamed). IPv4 and
+  IPv6 are collapsed by default; a click on the header opens or closes the
+  whole column, remembered in the browser.
+- IPv6 lists global (2000::/3) addresses first, then ULA ones with a small
+  "ULA" label. State and short hostnames no longer wrap; a long name
   (a stock Windows name) may take two lines.
 - The native column is fed from the DHCPv6 leases as well as the neighbour
   table, so hosts that were idle show their addresses again (the current

@@ -76,7 +76,7 @@ function lastError(peer) {
 
 
 /*
- * The IPv4 and Native IPv6 columns can be folded to save width: collapsed until
+ * The IPv4 and IPv6 columns can be folded to save width: collapsed until
  * the viewer opens them by clicking the heading. The choice is a per-browser
  * convenience kept in localStorage when it is available; without it the page
  * simply starts collapsed. lastClients lets a click redraw from the latest data.
@@ -649,9 +649,9 @@ function makeClientTable(clients) {
 	var headers = [
 		_('Hostname'),
 		_('MAC address'),
-		_('Yggdrasil'),
+		_('Yggdrasil address'),
 		columnHeader(_('IPv4'), 'ipv4'),
-		columnHeader(_('Native IPv6'), 'native'),
+		columnHeader(_('IPv6'), 'native'),
 		_('DNS'),
 		_('State'),
 		_('Persistence')
