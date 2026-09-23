@@ -232,10 +232,22 @@ pinned_node_memory() {
     eq "$PINNED 200:aaaa::9" "$(cat "$NODE_CACHE_FILE")"
 }
 
+# the prefixes br-lan carries in the fixtures below: native /64, routed Ygg /64,
+# the stock ULA /60, and an old native /64 still present but deprecated
+lan_addr_fixture() { printf '%s\n' \
+    '11: br-lan: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP qlen 1000' \
+    '    inet6 2a03:d000:1:2::1/64 scope global noprefixroute ' \
+    '       valid_lft forever preferred_lft forever' \
+    '    inet6 300:1111:2222:3333::1/64 scope global noprefixroute ' \
+    '    inet6 fd75:921a:ca44::1/60 scope global noprefixroute ' \
+    '    inet6 2a03:d000:9:9::1/64 scope global deprecated noprefixroute ' \
+    '       valid_lft 3000sec preferred_lft 0sec' \
+    '    inet6 fe80::1/64 scope link '; }
+
 native_addresses() {
     LAN_DEV=br-lan
     LAN_YGG_PREFIX='300:1111:2222:3333:'
-    ip() { printf '%s\n' \
+    ip() { case "$*" in *addr*) lan_addr_fixture; return 0 ;; esac; printf '%s\n' \
         '300:1111:2222:3333::20 dev br-lan lladdr aa:bb:cc:dd:ee:ff REACHABLE' \
         '203:4444:5555:6666::20 dev br-lan lladdr aa:bb:cc:dd:ee:ff REACHABLE' \
         '2a03:d000:1:2:aaaa:bbbb:cccc:dddd dev br-lan lladdr aa:bb:cc:dd:ee:ff STALE' \
@@ -246,6 +258,44 @@ native_addresses() {
     # native and ULA only: no routed-prefix, other 200::/7, link-local, FAILED or other-MAC entries
     eq "$(printf '%s\n' 2a03:d000:1:2:aaaa:bbbb:cccc:dddd fd75:921a:ca44::20)" "$(native_ipv6_for_mac AA:BB:CC:DD:EE:FF)"
     eq '' "$(native_ipv6_for_mac 00:00:00:00:00:01)"
+}
+
+native_current_prefixes() {
+    LAN_DEV=br-lan
+    LAN_YGG_PREFIX='300:1111:2222:3333:'
+    ip() { case "$*" in *addr*) lan_addr_fixture; return 0 ;; esac; printf '%s\n' \
+        '2a03:d000:1:2:aaaa:bbbb:cccc:dddd dev br-lan lladdr aa:bb:cc:dd:ee:ff STALE' \
+        '2a03:d000:1:2::20 dev br-lan lladdr aa:bb:cc:dd:ee:ff REACHABLE' \
+        '2a03:d000:7:aeb2::20 dev br-lan lladdr aa:bb:cc:dd:ee:ff STALE' \
+        '2a03:d000:9:9::20 dev br-lan lladdr aa:bb:cc:dd:ee:ff STALE' \
+        'fd75:921a:ca44::20 dev br-lan lladdr aa:bb:cc:dd:ee:ff STALE' \
+        'fd75:921a:ca44:3:1::5 dev br-lan lladdr aa:bb:cc:dd:ee:ff STALE' \
+        'fd75:921a:ca44:10::5 dev br-lan lladdr aa:bb:cc:dd:ee:ff STALE' \
+        'fd11:2233:4455::7 dev br-lan lladdr aa:bb:cc:dd:ee:ff STALE' \
+        '300:1111:2222:3333::20 dev br-lan lladdr aa:bb:cc:dd:ee:ff REACHABLE'; }
+    # kept: the current native /64 (full and compressed) and the ULA /60 (subnets 0 and 3);
+    # dropped: a renumbered-away prefix, one left only as deprecated, a ULA outside the /60,
+    # an old ULA, and the routed Ygg prefix
+    eq "$(printf '%s\n' 2a03:d000:1:2:aaaa:bbbb:cccc:dddd 2a03:d000:1:2::20 fd75:921a:ca44::20 fd75:921a:ca44:3:1::5)" \
+       "$(native_ipv6_for_mac AA:BB:CC:DD:EE:FF)"
+    # an ip build that prints no trailing blank after the last flag
+    ip() { case "$*" in *addr*) printf '%s\n' '    inet6 2a03:d000:1:2::1/64 scope global' '    inet6 2a03:d000:9:9::1/64 scope global deprecated'; return 0 ;; esac
+           printf '%s\n' '2a03:d000:1:2::20 dev br-lan lladdr aa:bb:cc:dd:ee:ff REACHABLE' '2a03:d000:9:9::20 dev br-lan lladdr aa:bb:cc:dd:ee:ff STALE'; }
+    eq '2a03:d000:1:2::20' "$(native_ipv6_for_mac AA:BB:CC:DD:EE:FF)"
+    # prefix lengths that are not whole nibbles: /61, /62, /63 on the same base
+    nibble_case() { # $1 prefix length, $2 inside, $3 just outside
+        LEN_FIX="$1"; IN_FIX="$2"; OUT_FIX="$3"
+        ip() { case "$*" in *addr*) printf '%s\n' "    inet6 fd75:921a:ca44::1/$LEN_FIX scope global "; return 0 ;; esac
+               printf '%s\n' "$IN_FIX dev br-lan lladdr aa:bb:cc:dd:ee:ff STALE" "$OUT_FIX dev br-lan lladdr aa:bb:cc:dd:ee:ff STALE"; }
+        eq "$IN_FIX" "$(native_ipv6_for_mac AA:BB:CC:DD:EE:FF)"
+    }
+    nibble_case 61 fd75:921a:ca44:7::20 fd75:921a:ca44:8::20
+    nibble_case 62 fd75:921a:ca44:3::20 fd75:921a:ca44:4::20
+    nibble_case 63 fd75:921a:ca44:1::20 fd75:921a:ca44:2::20
+    # no global prefix on br-lan at all: nothing is shown
+    ip() { case "$*" in *addr*) printf '%s\n' '    inet6 fe80::1/64 scope link '; return 0 ;; esac
+           printf '%s\n' '2a03:d000:1:2::20 dev br-lan lladdr aa:bb:cc:dd:ee:ff REACHABLE'; }
+    eq '' "$(native_ipv6_for_mac AA:BB:CC:DD:EE:FF)"
 }
 
 presence() {
@@ -880,6 +930,7 @@ run 'LAN Yggdrasil node addresses correlated by MAC' ygg_node_map
 run 'remembered node addresses live and die with their row' node_memory
 run 'a pinned row keeps its node address across a reboot' pinned_node_memory
 run 'native and ULA addresses per MAC' native_addresses
+run 'native addresses only from the current prefixes' native_current_prefixes
 run 'REACHABLE shortcut, ARP, IPv6 and failed presence' presence
 run 'DHCP lifetime, MAC merge and persistent lease-free rows' identity_lifetime
 run 'dynamic hostnames cannot inherit canonical metadata' canonical_guard

@@ -20,6 +20,18 @@
   the install goes on. The guard text is unchanged, so an installed router
   needs no rerun. Found in an independent review (Astra).
 
+## Status 6.2.3 - the native IPv6 column shows only the prefixes the LAN has now
+
+- After a renumbering odhcpd keeps announcing the old prefix as deprecated
+  (RFC 9096) and the router's neighbour table keeps entries for it long after
+  the clients dropped those addresses, so the page listed the old native
+  prefix next to the current one. `native_ipv6_for_mac` now keeps an address
+  only when it lies in a non-deprecated global prefix that br-lan carries at
+  that moment (compared by expanded address and prefix length, so compressed
+  forms and the ULA /60 match); with no global prefix on br-lan it shows none.
+- Verified on the router's BusyBox awk before release: the six stale
+  addresses of the previous prefix disappear, the current ones stay.
+
 ## Status 6.2.2 - the native IPv6 column no longer admits 200::/7
 
 - `native_ipv6_for_mac` matched `^[23][0-9a-f]*:`, which also takes any

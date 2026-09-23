@@ -641,11 +641,66 @@ neighbor_recently_reachable() {
 # The device's global IPv6 addresses outside the routed prefix - native
 # (2000::/3) and ULA (fc00::/7) - as the kernel neighbour table shows them.
 # Display only: never stored, never used for identity or presence.
+# Native and ULA addresses a MAC has in the neighbour table, limited to the
+# prefixes br-lan carries right now. NDP keeps entries for a prefix the LAN was
+# renumbered away from (odhcpd deprecates it, RFC 9096) long after the clients
+# dropped it, and the page must not show those next to the current prefix.
 native_ipv6_for_mac() {
-	local n6_wanted="$1"
+	local n6_wanted="$1" n6_current
+
+	# current = non-deprecated global prefixes on the LAN device, as addr/len
+	n6_current="$(
+		ip -6 addr show dev "$LAN_DEV" 2>/dev/null |
+			awk '$1 == "inet6" && / scope global( |$)/ && !/ deprecated( |$)/ { print $2 }'
+	)"
+	[ -n "$n6_current" ] || return 0
 
 	ip -6 neigh show dev "$LAN_DEV" 2>/dev/null |
-		awk -v wanted="$(normalize_mac "$n6_wanted")" -v prefix="$LAN_YGG_PREFIX" '
+		awk -v wanted="$(normalize_mac "$n6_wanted")" -v prefix="$LAN_YGG_PREFIX" -v current="$n6_current" '
+		function pad(g) { while (length(g) < 4) g = "0" g; return g }
+		# 32 hex digits for an IPv6 address, "" when it does not parse
+		function hex32(a,    lft, rgt, nl, nr, i, out) {
+			a = tolower(a)
+			if (index(a, "::")) {
+				lft = substr(a, 1, index(a, "::") - 1)
+				rgt = substr(a, index(a, "::") + 2)
+				nl = (lft == "") ? 0 : split(lft, L, ":")
+				nr = (rgt == "") ? 0 : split(rgt, R, ":")
+				if (nl + nr > 7) return ""
+				out = ""
+				for (i = 1; i <= nl; i++) out = out pad(L[i])
+				for (i = 1; i <= 8 - nl - nr; i++) out = out "0000"
+				for (i = 1; i <= nr; i++) out = out pad(R[i])
+			} else {
+				if (split(a, L, ":") != 8) return ""
+				out = ""
+				for (i = 1; i <= 8; i++) out = out pad(L[i])
+			}
+			return (length(out) == 32) ? out : ""
+		}
+		function nib(c) { return index("0123456789abcdef", c) - 1 }
+		# does the expanded address h lie in prefix k (whole nibbles, then the
+		# leading bits of the next nibble for a length such as /61)?
+		function inprefix(h, k,    n, r, d) {
+			n = PN[k]; r = PR[k]
+			if (substr(h, 1, n) != P[k]) return 0
+			if (r == 0) return 1
+			d = 2 ^ (4 - r)
+			return int(nib(substr(h, n + 1, 1)) / d) == int(PB[k] / d)
+		}
+		BEGIN {
+			np = split(current, cur, " ")
+			for (k = 1; k <= np; k++) {
+				split(cur[k], al, "/")
+				h = hex32(al[1])
+				len = al[2] + 0
+				if (h == "" || len < 4 || len > 128)
+					continue
+				PN[k] = int(len / 4); PR[k] = len % 4
+				P[k] = substr(h, 1, PN[k])
+				PB[k] = nib(substr(h, PN[k] + 1, 1))
+			}
+		}
 		{
 			addr = tolower($1)
 			mac = ""
@@ -662,10 +717,14 @@ native_ipv6_for_mac() {
 			if ($NF == "FAILED" || $NF == "INCOMPLETE")
 				next
 			# global unicast 2000::/3 and ULA fc00::/7 only
-			if (addr ~ /^[23][0-9a-f][0-9a-f][0-9a-f]:/ || addr ~ /^f[cd][0-9a-f][0-9a-f]:/) {
-				if (!seen[addr]++)
-					print addr
-			}
+			if (addr !~ /^[23][0-9a-f][0-9a-f][0-9a-f]:/ && addr !~ /^f[cd][0-9a-f][0-9a-f]:/)
+				next
+			h = hex32(addr)
+			inside = 0
+			for (k in P)
+				if (h != "" && inprefix(h, k)) { inside = 1; break }
+			if (inside && !seen[addr]++)
+				print addr
 		}
 	'
 }
