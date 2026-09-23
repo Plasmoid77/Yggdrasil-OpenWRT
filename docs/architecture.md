@@ -8,7 +8,7 @@ context, not an instruction to restore an abandoned approach.
 ## Module boundaries
 
 ```text
-Core:    Yggdrasil -> netifd delegated /64 -> LAN -> odhcpd RA/SLAAC
+Core:    Yggdrasil node /64 -> owned by the LAN (ip6prefix) -> odhcpd RA/SLAAC/DHCPv6
 Status:  DHCP leases + config host -> MAC identity -> NDP/canonical IPv6 -> RPC -> LuCI
 DNS:     config domain -> dnsmasq -> optional trusted remote port 53 -> split DNS
 ```
@@ -49,9 +49,13 @@ an interface still pending ten seconds after its device appeared (operations:
 "The cold-boot race and the hotplug guard").
 
 The current clean-install interface name is `ygg0`; older deployments used
-`ygg`. netifd derives a delegated prefix's class from its providing interface
-name. An LAN `ip6class` list, if any, must admit that class. Setting `ip6class`
-on the Yggdrasil interface does not rename its published class.
+`ygg`. Since deployer 2.1 the LAN owns the routed `/64` itself
+(`network.<lan>.ip6prefix`) and `ygg0` has `delegate '0'`: netifd publishes a
+prefix with its providing interface's name as the class, so the class is now
+the LAN's own (`lan`), and an LAN `ip6class` list, if any, must admit that.
+The point is timing: the prefix is on br-lan and in odhcpd from the first
+second of a boot, not only once `ygg0` is up, so a client that confirms its
+DHCPv6 lease right after a reboot keeps its reserved `::HOSTID`.
 
 ### The overlay (deployer 2.0)
 
@@ -74,10 +78,12 @@ or `ula_prefix`. What it writes on the LAN:
 | Setting | 2.0 |
 | --- | --- |
 | `network.<lan>.ip6assign` | kept; `64` only when absent. netifd falls back to longer lengths down to /64 when the requested length does not fit, so stock `60` takes the routed `/64` whole (measured). After the reload the deployer checks `ifstatus <lan>` for the actual assignment and fails, with rollback, if the prefix did not reach the LAN |
-| `network.<lan>.ip6class` | absent: left alone (no restriction). An operator's own list: kept, the Ygg class appended when missing |
+| `network.<lan>.ip6prefix` | the node's routed `/64` added (2.1): the LAN owns the prefix, so it exists from boot |
+| `network.<ygg0>.delegate` | `0` (2.1): `ygg0` still publishes its prefix (the deployer and status read it) but no longer hands it out |
+| `network.<lan>.ip6class` | absent: left alone (no restriction). An operator's own list: kept, the LAN's own class (`lan`) appended when missing |
 | `dhcp.<lan>.ra` | `server` |
 | `dhcp.<lan>.ra_default` | `2`: a default route is announced even without a native uplink, so a client's reply to a Yggdrasil source has a route on an IPv4-only site. On a dual-stack router this changes nothing while the uplink is up; while it is down, clients keep a default and IPv6-only destinations fail instead of being unreachable up front - Happy Eyeballs is the application's fallback, not the router's |
-| `config host` reservations | `--host` as in 1.9.0; they need the LAN's DHCPv6 server, which stock has. `--host` on a LAN whose operator disabled DHCPv6 (or set `dhcpv6_na=0` / `ra_offlink=1`) is refused in preflight, before anything is written; the deployer does not override those settings |
+| `config host` reservations | `--host` as in 1.9.0, plus `leasetime '2m'` (2.1; an operator's own value is kept): odhcpd renews at half the lifetime, so a reserved address in a prefix that appeared late - a native prefix after an LTE reconnect - reaches the client within about a minute instead of at the stock 45-minute lease's renew; it also bounds that host's DHCPv4 lease. They need the LAN's DHCPv6 server, which stock has. `--host` on a LAN whose operator disabled DHCPv6 (or set `dhcpv6_na=0` / `ra_offlink=1`) is refused in preflight, before anything is written; the deployer does not override those settings |
 
 A reserved address (`option hostid`) lands in **every** prefix the LAN
 advertises - `<native>::10`, `<ula>::10`, `<ygg>::10` - because odhcpd uses one
@@ -176,8 +182,10 @@ reason to silently turn NDP into a permanent inventory.
 ### IPv6 selection
 
 The backend selects the first configured interface with `proto=yggdrasil`,
-reads that interface's delegated prefix matching its class, and falls back to
-its first published prefix. It does not choose an arbitrary global LAN `/64`.
+reads that interface's delegated prefix matching its class, falls back to
+its first published prefix, and - since 2.1, for the time `ygg0` is down and
+publishes nothing - to the `200::/7` entry of the LAN's `ip6prefix`. It does
+not choose an arbitrary global LAN `/64`.
 The v5.1 fix removed the assumption that the interface must be named `ygg`.
 
 For a persistent host, canonical metadata is matched case-insensitively by
@@ -526,6 +534,7 @@ config interface 'ygg0'
     option allocate_listen_addresses '1'
     option jumper_autofill_listen_addresses '1'
     option multipath 'off'
+    option delegate '0'              # the LAN owns the routed /64 (2.1)
 
 config yggdrasil_ygg0_peer
     option address '<CURRENT_PEER_URI>'
@@ -540,6 +549,7 @@ config interface 'lan'
     option proto 'static'
     list ipaddr '<LAN_IPV4/CIDR>'
     option ip6assign '60'          # stock value kept; no ip6class
+    list ip6prefix '<ROUTED_YGG_/64>'  # the node's /64, owned by the LAN (2.1)
 # network.globals.ula_prefix stays as stock generated it.
 
 # /etc/config/dhcp (stock hybrid RA/DHCPv6 kept; the deployer writes ra and ra_default)
@@ -611,6 +621,7 @@ config rule
 | Decision | Reason and consequence |
 | --- | --- |
 | Native netifd/UCI/odhcpd/firewall4 | One owner for routing, prefix advertisement and policy; no container or parallel network manager |
+| LAN owns the routed /64 (2.1) | With the prefix delegated by `ygg0` it reached br-lan only once `ygg0` was up, 20-70 s into a boot; a DHCPv6 client confirming its lease earlier got Not On Link and dropped its reserved `::HOSTID` until its next renew (~22 min). The prefix is deterministic (derived from the node key), so the LAN can own it statically. The native prefix cannot be owned (it changes per LTE session); `--host` gets a 2-minute lease instead so it follows within about a minute. odhcpd sends Reconfigure only to prefix-delegation leases, so there is no push for ordinary clients |
 | Overlay, not replacement (2.0) | The routed /64 is one more prefix beside native IPv6 and the ULA; the LAN's RA/DHCPv6 configuration is the operator's. 1.x replaced the LAN's IPv6 (`ip6class`, no ULA, its own RA mode), which broke native IPv6 on dual-stack uplinks and took Android off the routed prefix in managed mode. The stock hybrid gives DHCPv6-capable clients a reservable stateful address per prefix while every client keeps SLAAC |
 | `ra_default=2` kept (D1) | The one RA setting the overlay needs: replies to Yggdrasil sources need a default route on an IPv4-only site. Route Information Options (RFC 4191) for `200::/7` were rejected: odhcpd derives them only from `unreachable` routes with `ra_default=0`, Linux ignores them by default, Android accepts /48-/64 only |
 | LAN may initiate into Yggdrasil (D5, 2.0) | One explicit stateful rule to `200::/7`, opt-out `--no-lan-forward`. 1.x had no such forwarding, an unweighed default inherited from the remote-access use case. No NAT66: a wrong-source packet fails closed in Yggdrasil instead of being rewritten |

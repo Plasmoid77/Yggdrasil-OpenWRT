@@ -282,18 +282,22 @@ address). The client-side cure is an address-selection label for `200::/7`
 (`ip addrlabel` or `gai.conf`), so overlay addresses are only preferred for
 overlay destinations.
 
-### Reserved `::HOSTID` addresses return only at the client's next DHCPv6 renew
+### Reserved `::HOSTID` addresses after a reboot or a new native prefix
 
-Seen after a router reboot and after a clean reinstall (2026-09-23). A DHCPv6 client (zeonux,
-`dhcpcd`) confirms its previous lease right after the router comes up. At that moment `ygg0`
-and the LTE uplink are not up yet, so only the ULA is on-link: odhcpd answers **Not On Link**,
-the client takes a lease with just `fd…::10` and drops `303:…::10` and the native `::10`. Its
-SLAAC addresses in the routed and native prefixes appear by themselves within a minute or two,
-and odhcpd's lease already lists all three reserved addresses, but the client installs them
-only at its next Renew (T1, about 20 minutes here). Nothing is misconfigured; `zeonux.home.arpa`
-is just unreachable in that window. To shorten it, renew on the client (`dhcpcd -N <if>`;
-`dhcpcd -n` only confirms and does not add addresses) or reconnect it. Note also that every
-PDN re-activation gives the LAN a new native prefix, so native reservations change with it.
+Found 2026-09-23: a DHCPv6 client (zeonux, `dhcpcd`) confirms its previous lease right after
+the router comes up. Up to deployer 2.0 the routed prefix reached br-lan only once `ygg0` was
+up and the native one once LTE was, so odhcpd answered **Not On Link**, the client took a lease
+with just the ULA `::10` and dropped the others until its next Renew - about 22 minutes with the
+stock 45-minute lifetime. (A Confirm covers all addresses at once, so a missing native prefix
+fails it too.)
+
+Deployer 2.1 closes both halves. The LAN owns the routed `/64` (`network.lan.ip6prefix`), so
+the fresh lease the client takes after Not On Link already carries `303:…::10`. The native
+prefix cannot be owned (it changes with every LTE session), so `--host` reservations get
+`leasetime '2m'`: the client renews every minute and picks up the native `::10` about a minute
+after the prefix appears. odhcpd has no push for ordinary clients (it sends Reconfigure only to
+prefix-delegation leases). SLAAC addresses need none of this. By hand: `dhcpcd -N <if>` renews
+at once (`dhcpcd -n` only confirms and adds nothing).
 
 ### Do not use runtime host hints as an inventory repair tool
 

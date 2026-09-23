@@ -346,6 +346,13 @@ dhcp.cfg08.hostid='70'" ;; '-q get') return 1 ;; *) return 0 ;; esac; }
 reset; UCI_LOG=''; HOSTS='padded duid 0004ecbcbfb80ef2996849bca6b0d0a6ffce%a 70'; apply_hosts
 [ -z "$DIED" ] || fail "canonical IAID against a zero-padded UCI value died: $DIED"
 printf '%s' "$UCI_LOG" | grep -qxF 'set dhcp.cfg08.hostid=70' || fail "zero-padded IAID section not recognised: $UCI_LOG"
+# no leasetime of its own (the stub fails every get): the updated section gets the short lease
+printf '%s' "$UCI_LOG" | grep -qxF 'set dhcp.cfg08.leasetime=2m' || fail "updated reservation did not get the short lease: $UCI_LOG"
+# the operator's own leasetime on that section is kept
+CFG08_FIXTURE="$(uci show dhcp)"
+uci() { case "$*" in 'show dhcp') printf '%s\n' "$CFG08_FIXTURE" ;; '-q get dhcp.cfg08.leasetime') echo 12h ;; '-q get '*) return 1 ;; *) return 0 ;; esac; }
+reset; UCI_LOG=''; HOSTS='padded duid 0004ecbcbfb80ef2996849bca6b0d0a6ffce%a 70'; apply_hosts
+printf '%s' "$UCI_LOG" | grep -q 'cfg08.leasetime' && fail "an operator's own leasetime was overwritten: $UCI_LOG"
 printf '%s' "$UCI_LOG" | grep -q 'set dhcp.cfg08.duid=' && fail "an equivalent DUID spelling was rewritten"
 printf '%s' "$UCI_LOG" | grep -q 'ygg_host_padded' && fail "a second section was created beside the zero-padded one"
 # two existing sections that both stand for one combined line: refused, not merged
@@ -405,10 +412,12 @@ echo 'PASS: LAN zone resolution'
 DRY_RUN=1; IFACE='ygg0'; LAN='lan'; YGG_CLASS='ygg0'; YGG_PREFIX='303:170f:3ab2:166e::/64'
 uci() { case "$1 $2" in 'show dhcp') printf '%s\n' "$FIXTURE" ;; '-q get') printf '%s\n' "" ; return 0 ;; *) return 0 ;; esac; }
 wrote() { printf '%s' "$UCI_LOG" | grep -qxF "$1"; }
-# a stock router: only ra / ra_default; everything else untouched
+# a stock router: ra / ra_default, and the LAN owns the routed /64 (ygg0 stops
+# delegating it); everything else untouched
 reset; UCI_LOG=''; CUR_IP6ASSIGN=60; CUR_ULA='fd75:921a:ca44::/48'; CUR_DHCPV6=server; CUR_RA_SLAAC=1; CUR_RA_FLAGS='managed-config other-config '; stage_lan
 [ -z "$DIED" ] || fail "overlay stage on stock died: $DIED"
-for want in 'set dhcp.lan.ra=server' 'set dhcp.lan.ra_default=2'; do
+for want in 'set dhcp.lan.ra=server' 'set dhcp.lan.ra_default=2' \
+            'add_list network.lan.ip6prefix=303:170f:3ab2:166e::/64' 'set network.ygg0.delegate=0'; do
     wrote "$want" || fail "overlay did not write '$want':
 $UCI_LOG"
 done
@@ -416,17 +425,18 @@ for forbidden in 'network.lan.ip6assign' 'ip6class' 'ula_prefix' 'dhcp.lan.dhcpv
     printf '%s' "$UCI_LOG" | grep -q "$forbidden" && fail "overlay on a stock router touched $forbidden:
 $UCI_LOG"
 done
-[ "$(printf '%s' "$UCI_LOG" | grep -c .)" = 2 ] || fail "overlay on stock must write exactly two values:
+[ "$(printf '%s' "$UCI_LOG" | grep -c .)" = 4 ] || fail "overlay on stock must write exactly four values:
 $UCI_LOG"
 # ip6assign only when unset
 reset; UCI_LOG=''; CUR_IP6ASSIGN=''; stage_lan
 wrote 'set network.lan.ip6assign=64' || fail "unset ip6assign not defaulted to 64"
-# an ip6class list is kept and made to admit the class; one that admits it is untouched
+# an ip6class list is kept and made to admit the LAN's own class (the /64 is
+# published with class 'lan' now); one that admits it is untouched
 reset; UCI_LOG=''; CUR_IP6ASSIGN=64; CUR_IP6CLASS='wan6 local'; stage_lan
-wrote 'add_list network.lan.ip6class=ygg0' || fail "custom ip6class did not gain the class:
+wrote 'add_list network.lan.ip6class=lan' || fail "custom ip6class did not gain the class:
 $UCI_LOG"
 printf '%s' "$UCI_LOG" | grep -q 'del network.lan.ip6class' && fail "custom ip6class was deleted"
-reset; UCI_LOG=''; CUR_IP6ASSIGN=64; CUR_IP6CLASS='local ygg0'; stage_lan
+reset; UCI_LOG=''; CUR_IP6ASSIGN=64; CUR_IP6CLASS='local lan'; stage_lan
 printf '%s' "$UCI_LOG" | grep -q 'ip6class' && fail "an admitting ip6class was rewritten:
 $UCI_LOG"
 # reservations are applied (the section-5 uci stub: fixture + missing sections)
@@ -434,6 +444,8 @@ uci() { case "$1 $2" in 'show dhcp') printf '%s\n' "$FIXTURE" ;; '-q get') retur
 reset; UCI_LOG=''; CUR_IP6ASSIGN=60; HOSTS='cam mac aa:bb:cc:dd:ee:70 70'; stage_lan
 [ -z "$DIED" ] || fail "LAN stage with a reservation died: $DIED"
 wrote 'set dhcp.ygg_host_cam.hostid=70' || fail "reservation not applied:
+$UCI_LOG"
+wrote 'set dhcp.ygg_host_cam.leasetime=2m' || fail "new reservation did not get the short lease:
 $UCI_LOG"
 uci() { case "$1 $2" in 'show dhcp') printf '%s\n' "$FIXTURE" ;; '-q get') printf '%s\n' "" ; return 0 ;; *) return 0 ;; esac; }
 echo 'PASS: the LAN stage writes exactly the overlay values'

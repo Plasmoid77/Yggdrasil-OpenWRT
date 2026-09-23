@@ -603,8 +603,10 @@ DNS firewall module
 If any of those change, this is no longer a status-only release and requires a separate network migration plan.
 
 Also test a LAN bridge containing another global `/64`. Runtime IPv6
-enrichment must continue selecting the prefix delegated by the netifd
-Yggdrasil interface, whatever class netifd derived from that interface's name.
+enrichment must continue selecting the routed prefix: the one the netifd
+Yggdrasil interface publishes, whatever class netifd derived from that
+interface's name, or - while that interface is down - the `200::/7` entry of
+the LAN's `ip6prefix` (deployer 2.1).
 Cover an interface NOT named `ygg` (for example `ygg0`): a backend that
 hardcodes `class="ygg"` silently reports no client IPv6 addresses at all.
 

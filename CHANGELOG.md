@@ -1,5 +1,19 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## Deployer 2.1.0 - reserved `::HOSTID` addresses come back right after a reboot
+
+- The LAN now owns the routed Yggdrasil /64 as a static prefix
+  (`list ip6prefix` on the LAN interface, `ip6class` gains the LAN) and
+  `ygg0` stops delegating it (`option delegate '0'`). br-lan gets the prefix
+  as soon as the LAN is up, without waiting for `ygg0`, so a client's
+  DHCPv6 Confirm after a router boot no longer ends in Not On Link.
+- Reservations written by `--host` get `leasetime '2m'` (T1 about a minute).
+  A native `::HOSTID` lost to a new LTE prefix or a late uplink comes back at
+  the next renew, within a minute or two instead of the stock ~22 minutes.
+  A `leasetime` already set on an existing host section is kept.
+- `stage_verify` checks that the LAN owns the /64 and that `ygg0` does not
+  delegate it.
+
 ## Status 6.4 - a narrower client table; the native column is filled again
 
 - Column order: Hostname, MAC address, Yggdrasil, IPv4, Native IPv6, DNS,
