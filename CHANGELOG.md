@@ -1,5 +1,21 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## Status 6.4 - a narrower client table; the native column is filled again
+
+- Column order: Hostname, MAC address, Yggdrasil, IPv4, Native IPv6, DNS,
+  State, Persistence. IPv4 and Native IPv6 are collapsed by default; a click
+  on the header opens or closes the whole column, remembered in the browser.
+- Native IPv6 lists global (2000::/3) addresses first, then ULA ones with a
+  small "ULA" label. State and short hostnames no longer wrap; a long name
+  (a stock Windows name) may take two lines.
+- The native column is fed from the DHCPv6 leases as well as the neighbour
+  table, so hosts that were idle show their addresses again (the current
+  prefix filter of 6.2.3 applies to both).
+- The routed prefix is also read from the LAN's `ip6prefix` (Deployer 2.1),
+  so the table keeps its Yggdrasil column while `ygg0` is down.
+- A refresh replaced only the table inside its wrapper, nesting one more
+  wrapper each time; the whole wrapper is replaced now.
+
 ## Deployer 2.0.4 - one rule lets trusted nodes reach the router: TCP, UDP, ICMP
 
 - `YGG-Trusted-to-Router` now admits `tcp udp icmp` (was `tcp`); fw4 renders

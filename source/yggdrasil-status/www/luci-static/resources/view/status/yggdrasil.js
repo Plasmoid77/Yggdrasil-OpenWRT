@@ -75,6 +75,73 @@ function lastError(peer) {
 }
 
 
+/*
+ * The IPv4 and Native IPv6 columns can be folded to save width: collapsed until
+ * the viewer opens them by clicking the heading. The choice is a per-browser
+ * convenience kept in localStorage when it is available; without it the page
+ * simply starts collapsed. lastClients lets a click redraw from the latest data.
+ */
+var COLLAPSE_KEY = 'yggdrasil-status.columns';
+var collapsed = loadCollapsed();
+var lastClients = [];
+
+function loadCollapsed() {
+	var state = { ipv4: true, native: true };
+
+	try {
+		var saved = JSON.parse(window.localStorage.getItem(COLLAPSE_KEY) || 'null');
+
+		if (saved && typeof saved.ipv4 === 'boolean')
+			state.ipv4 = saved.ipv4;
+		if (saved && typeof saved.native === 'boolean')
+			state.native = saved.native;
+	}
+	catch (e) {}
+
+	return state;
+}
+
+function toggleColumn(key) {
+	collapsed[key] = !collapsed[key];
+
+	try {
+		window.localStorage.setItem(COLLAPSE_KEY, JSON.stringify(collapsed));
+	}
+	catch (e) {}
+
+	replaceClientTable(lastClients);
+}
+
+function columnHeader(label, key) {
+	return E('span', {
+		'style': 'cursor: pointer; user-select: none; white-space: nowrap',
+		'title': collapsed[key] ? _('Show this column') : _('Hide this column'),
+		'click': function() { toggleColumn(key); }
+	}, label + (collapsed[key] ? ' ▸' : ' ▾'));
+}
+
+/*
+ * Short hostnames stay on one line; a long one (a stock Windows name such as
+ * DESKTOP-1A2B3C4) may take two, breaking at a hyphen where it can.
+ */
+function hostnameCell(name) {
+	if (!name)
+		return '—';
+
+	return E('span', {
+		'style': name.length <= 14 ? 'white-space: nowrap' : 'overflow-wrap: anywhere'
+	}, name);
+}
+
+/* A small boxed label before an address ("node", "ULA"); currentColor keeps it
+ * legible in light and dark themes. */
+function addrLabel(text) {
+	return E('span', {
+		'style': 'display: inline-block; font-size: 75%; line-height: 1.3; padding: 0 .3em; margin-right: .4em; border: 1px solid currentColor; border-radius: 3px; opacity: .8'
+	}, text);
+}
+
+
 function makeTable(headers, rows, id, compactColumns, monoColumns) {
 	var attrs = { 'class': 'table' };
 	var compact = compactColumns || [];
@@ -104,7 +171,7 @@ function makeTable(headers, rows, id, compactColumns, monoColumns) {
 
 				return E('td', {
 					'class': 'td',
-					'data-title': headers[i],
+					'data-title': typeof headers[i] === 'string' ? headers[i] : headers[i].textContent,
 					'style': isCompact
 						? 'width: 1%; white-space: nowrap; text-align: center; word-break: normal'
 						: (mono.indexOf(i) !== -1
@@ -125,7 +192,14 @@ function nativeCell(client) {
 	if (!addresses.length)
 		return E('span', { 'title': _('The router has not seen this device use a native or ULA address yet') }, '—');
 
-	return E('div', {}, addresses.map(function(addr) { return E('div', {}, addr); }));
+	/* global unicast first, then the ULA, which stays put when the uplink prefix changes */
+	var isUla = function(addr) { return /^f[cd]/i.test(addr); };
+	var ordered = addresses.filter(function(addr) { return !isUla(addr); })
+		.concat(addresses.filter(isUla));
+
+	return E('div', {}, ordered.map(function(addr) {
+		return E('div', {}, isUla(addr) ? [addrLabel(_('ULA')), addr] : addr);
+	}));
 }
 
 function ipv6Cell(client) {
@@ -209,13 +283,7 @@ function nodeCell(client) {
 			? _('Native Yggdrasil node address; the device is peering now')
 			: _('Last known native Yggdrasil node address; the device is not peering right now')
 	}, addresses.map(function(addr) {
-		return E('div', { 'style': live ? null : 'opacity: .55' }, [
-			/* currentColor keeps the label legible in light and dark themes */
-			E('span', {
-				'style': 'display: inline-block; font-size: 75%; line-height: 1.3; padding: 0 .3em; margin-right: .4em; border: 1px solid currentColor; border-radius: 3px; opacity: .8'
-			}, _('node')),
-			addr
-		]);
+		return E('div', { 'style': live ? null : 'opacity: .55' }, [addrLabel(_('node')), addr]);
 	}));
 }
 
@@ -576,24 +644,32 @@ function persistenceCell(client) {
 
 
 function makeClientTable(clients) {
+	lastClients = clients || [];
+
 	var headers = [
 		_('Hostname'),
-		_('MAC'),
-		_('IPv4'),
+		_('MAC address'),
 		_('Yggdrasil'),
-		_('Native IPv6'),
+		columnHeader(_('IPv4'), 'ipv4'),
+		columnHeader(_('Native IPv6'), 'native'),
 		_('DNS'),
 		_('State'),
 		_('Persistence')
 	];
 
-	var rows = (clients || []).map(function(client) {
+	/* sorted by name here: the first cell is an element, not text */
+	var sorted = (clients || []).slice().sort(function(a, b) {
+		return String(a.hostname || '—').localeCompare(String(b.hostname || '—'));
+	});
+
+	var rows = sorted.map(function(client) {
 		return [
-			client.hostname || '—',
+			hostnameCell(client.hostname),
 			client.mac || '—',
-			client.ipv4 || '—',
 			yggCell(client),
-			nativeCell(client),
+			/* a folded column keeps an empty, narrow cell */
+			collapsed.ipv4 ? E('span') : (client.ipv4 || '—'),
+			collapsed.native ? E('span') : nativeCell(client),
 			client.dns || '—',
 			client.online
 				? E('span', { 'style': 'color: #16a34a; font-weight: 600' }, _('Online'))
@@ -605,12 +681,15 @@ function makeClientTable(clients) {
 		];
 	});
 
-	rows.sort(function(a, b) {
-		return String(a[0]).localeCompare(String(b[0]));
-	});
+	/* State on one line; a folded column is as narrow as its heading; MAC, the
+	 * address columns and DNS in monospace without mid-address wraps */
+	var compact = [6];
+	var mono = [1, 2, 5];
 
-	/* MAC, IPv4, the two address columns and DNS: monospace, no mid-address wraps */
-	return makeTable(headers, rows, 'yggdrasil-lan-clients', null, [1, 2, 3, 4, 5]);
+	(collapsed.ipv4 ? compact : mono).push(3);
+	(collapsed.native ? compact : mono).push(4);
+
+	return makeTable(headers, rows, 'yggdrasil-lan-clients', compact, mono);
 }
 
 
@@ -620,8 +699,12 @@ function replaceClientTable(clients) {
 	if (!oldTable)
 		return;
 
-	var newTable = makeClientTable(clients);
-	oldTable.parentNode.replaceChild(newTable, oldTable);
+	/*
+	 * makeTable returns the scrolling wrapper around the table: replace that
+	 * wrapper, not the table inside it, or every refresh nests one more div.
+	 */
+	var oldWrapper = oldTable.parentNode;
+	oldWrapper.parentNode.replaceChild(makeClientTable(clients), oldWrapper);
 }
 
 

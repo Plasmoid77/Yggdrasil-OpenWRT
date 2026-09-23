@@ -397,6 +397,14 @@ find_lan_ygg_prefix() {
 			head -n 1
 	)"
 
+	# Since deployer 2.1 the LAN owns the routed /64 itself (network.lan.ip6prefix),
+	# so it is known even while ygg0 is down and publishes nothing: take the entry
+	# that lies in 200::/7 (a three-hex-digit first group, 200: to 3ff:).
+	[ -n "$flyp_addr" ] || flyp_addr="$(
+		uci -q get "network.${LAN_NET}.ip6prefix" 2>/dev/null | tr ' ' '\n' |
+			awk '/^[23][0-9a-f][0-9a-f]:/ { print; exit }'
+	)"
+
 	printf '%s\n' "$flyp_addr" |
 		awk '
 			NF {
@@ -548,6 +556,7 @@ collect_dhcpv6_leases() {
 	local cdl_lease cdl_duid cdl_iaid cdl_mac cdl_how cdl_addr cdl_addrs cdl_name
 
 	DHCPV6_LEASES=''
+	DHCPV6_NATIVE_LEASES=''
 	UNATTRIBUTED_LEASE_ADDRS=''
 	[ -n "$LAN_YGG_PREFIX" ] || return 0
 
@@ -575,14 +584,20 @@ collect_dhcpv6_leases() {
 		cdl_mac="${cdl_mac%% *}"
 		for cdl_addr in $cdl_addrs; do
 			cdl_addr="$(lower "$cdl_addr")"
+			# Y: routed-prefix address (the Yggdrasil column); N: native or ULA
+			# address, which feeds the Native column of an idle client that
+			# the neighbour table has no entry for
 			case "$cdl_addr" in
-				"$LAN_YGG_PREFIX"*) printf '%s %s %s %s\n' "$cdl_mac" "$cdl_addr" "$cdl_name" "$cdl_how" ;;
+				"$LAN_YGG_PREFIX"*) printf 'Y %s %s %s %s\n' "$cdl_mac" "$cdl_addr" "$cdl_name" "$cdl_how" ;;
+				*) printf 'N %s %s\n' "$cdl_mac" "$cdl_addr" ;;
 			esac
 		done
 	done <<EOF
 $(ubus call dhcp ipv6leases 2>/dev/null | jsonfilter -e '@.device[*].leases[*]' 2>/dev/null)
 EOF
 )"
+	DHCPV6_NATIVE_LEASES="$(printf '%s\n' "$DHCPV6_LEASES" | awk '$1 == "N" && $2 != "-" { print $2, $3 }')"
+	DHCPV6_LEASES="$(printf '%s\n' "$DHCPV6_LEASES" | awk '$1 == "Y" { sub(/^Y /, ""); print }')"
 	UNATTRIBUTED_LEASE_ADDRS="$(printf '%s\n' "$DHCPV6_LEASES" | awk '$1 == "-" { print $2 }')"
 	DHCPV6_LEASES="$(printf '%s\n' "$DHCPV6_LEASES" | awk '$1 != "-" && NF')"
 }
@@ -655,7 +670,13 @@ native_ipv6_for_mac() {
 	)"
 	[ -n "$n6_current" ] || return 0
 
-	ip -6 neigh show dev "$LAN_DEV" 2>/dev/null |
+	# the router's own lease record first (an idle client has no neighbour
+	# entry), then what the neighbour table observes; same filters for both
+	{
+		[ -n "${DHCPV6_NATIVE_LEASES:-}" ] && printf '%s\n' "$DHCPV6_NATIVE_LEASES" |
+			awk 'NF == 2 { print $2, "dev lease lladdr", $1, "LEASE" }'
+		ip -6 neigh show dev "$LAN_DEV" 2>/dev/null
+	} |
 		awk -v wanted="$(normalize_mac "$n6_wanted")" -v prefix="$LAN_YGG_PREFIX" -v current="$n6_current" '
 		function pad(g) { while (length(g) < 4) g = "0" g; return g }
 		# 32 hex digits for an IPv6 address, "" when it does not parse
