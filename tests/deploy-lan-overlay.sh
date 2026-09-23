@@ -455,4 +455,15 @@ $UCI_LOG"
 printf '%s' "$UCI_LOG" | grep -q 'set firewall.ygg_lan_out' && fail "--no-lan-forward still wrote the rule"
 echo 'PASS: LAN-to-Yggdrasil rule'
 
+# 8. trusted nodes reach the router with TCP, UDP and ICMP through one rule;
+#    it covers DNS, so the separate port-53 rule is gone
+reset; UCI_LOG=''; TRUSTED='200:aaaa::1'; stage_firewall 2>/dev/null
+[ -z "$DIED" ] || fail "firewall stage died: $DIED"
+wrote 'set firewall.ygg_trusted_router.proto=tcp udp icmp' || fail "router rule is not tcp udp icmp:
+$UCI_LOG"
+wrote 'del firewall.ygg_dns' || fail "the separate DNS rule was not removed:
+$UCI_LOG"
+printf '%s' "$UCI_LOG" | grep -q 'set firewall.ygg_dns' && fail "a separate DNS rule was still written"
+echo 'PASS: one trusted-to-router rule, DNS included'
+
 echo 'deploy-lan-overlay: all checks passed'

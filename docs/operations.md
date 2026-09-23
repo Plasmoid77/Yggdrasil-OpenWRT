@@ -409,7 +409,7 @@ Removal is modular too.
 
 ### Remove only Part III DNS-over-Ygg access
 
-Delete the `ygg_dns` firewall rule and, if no longer wanted, the `home.arpa` local-zone directive and `config domain` records used purely for DNS.
+Delete the `home.arpa` local-zone directive and the `config domain` records used purely for DNS. There is no DNS rule of its own to delete since deployer 2.0.4: trusted nodes reach port 53 through `YGG-Trusted-to-Router`, which also serves SSH and LuCI (an `ygg_dns` rule left by an older run can simply be deleted).
 
 Then:
 

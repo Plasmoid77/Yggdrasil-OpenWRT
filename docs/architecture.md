@@ -119,10 +119,11 @@ management path (Yggdrasil to the router, or a console) is for.
 
 A dedicated `ygg` firewall zone is deny-by-default: INPUT REJECT, OUTPUT ACCEPT,
 FORWARD DROP, no NAT66. Explicit trusted source `/128` rules authorize
-forwarding to LAN separately from router INPUT. The tested router rule permits
-TCP from trusted sources; it is not restricted to ports 22/80/443. Restricting
-ports further is optional hardening, not the current default. Trusted DNS
-permits TCP/UDP 53 separately.
+forwarding to LAN separately from router INPUT. The router rule permits TCP,
+UDP and ICMP from trusted sources; it is not restricted to ports 22/80/443, and
+it is also what opens DNS (port 53) to them — there is no separate DNS rule
+since deployer 2.0.4. Restricting ports further is optional hardening, not the
+current default.
 
 LAN hosts may **initiate** connections into Yggdrasil through the router
 (deployer 2.0, on by default): one explicit stateful rule `LAN-to-Yggdrasil`
@@ -600,15 +601,7 @@ config rule
     option name 'YGG-Trusted-to-Router'
     option src 'ygg'
     option family 'ipv6'
-    list proto 'tcp'
-    list src_ip '<TRUSTED_YGG_IPV6>'
-    option target 'ACCEPT'
-
-config rule 'ygg_dns'
-    option name 'Allow-DNS-from-Trusted-Yggdrasil'
-    option src 'ygg'
-    option proto 'tcp udp'
-    option dest_port '53'
+    option proto 'tcp udp icmp'
     list src_ip '<TRUSTED_YGG_IPV6>'
     option target 'ACCEPT'
 ```

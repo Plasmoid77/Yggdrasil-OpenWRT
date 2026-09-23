@@ -1,5 +1,16 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## Deployer 2.0.4 - one rule lets trusted nodes reach the router: TCP, UDP, ICMP
+
+- `YGG-Trusted-to-Router` now admits `tcp udp icmp` (was `tcp`); fw4 renders
+  the ICMP part as `ipv6-icmp`, so trusted nodes can ping the router over
+  Yggdrasil and use any UDP service on it.
+- That rule now carries DNS as well, so stage 6 no longer writes the separate
+  `Allow-DNS-from-Trusted-Yggdrasil` (`ygg_dns`) rule, and stage 5 deletes one
+  left by an earlier run. Two rules fewer in `input_ygg` for the same access.
+- `stage_verify` checks the router rule's protocols and the absence of
+  `ygg_dns` instead of the old rule's port.
+
 ## Deployer 2.0.3 - the guard is in place before the first network reload
 
 - `install_hotplug_guard` now runs before `stage_yggdrasil`. The stage's own

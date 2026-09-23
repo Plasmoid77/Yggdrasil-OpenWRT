@@ -391,7 +391,7 @@ uci set firewall.ygg_trusted_router='rule'
 uci set firewall.ygg_trusted_router.name='YGG-Trusted-to-Router'
 uci set firewall.ygg_trusted_router.src='ygg'
 uci set firewall.ygg_trusted_router.family='ipv6'
-uci set firewall.ygg_trusted_router.proto='tcp'
+uci set firewall.ygg_trusted_router.proto='tcp udp icmp'
 uci set firewall.ygg_trusted_router.target='ACCEPT'
 uci -q delete firewall.ygg_trusted_router.src_ip
 uci add_list firewall.ygg_trusted_router.src_ip='<TRUSTED_YGG_IPV6_1>'
@@ -411,9 +411,9 @@ uci commit firewall
 /etc/init.d/firewall restart
 ```
 
-The trusted-router TCP rule intentionally has no destination-port restriction.
-It is not limited to SSH/LuCI. Keep that policy unless explicitly choosing a
-separate hardening change.
+The trusted-router rule (TCP, UDP, ICMP) intentionally has no destination-port
+restriction. It is not limited to SSH/LuCI; it also carries DNS. Keep that
+policy unless explicitly choosing a separate hardening change.
 
 Before closing the current management path, establish a new SSH session from a
 trusted Ygg client to the router node address.
@@ -479,21 +479,9 @@ uci commit dhcp
 /etc/init.d/dnsmasq restart
 ```
 
-Permit DNS only from the same trusted sources:
-
-```sh
-uci set firewall.ygg_dns='rule'
-uci set firewall.ygg_dns.name='Allow-DNS-from-Trusted-Yggdrasil'
-uci set firewall.ygg_dns.src='ygg'
-uci set firewall.ygg_dns.proto='tcp udp'
-uci set firewall.ygg_dns.dest_port='53'
-uci set firewall.ygg_dns.target='ACCEPT'
-uci -q delete firewall.ygg_dns.src_ip
-uci add_list firewall.ygg_dns.src_ip='<TRUSTED_YGG_IPV6_1>'
-uci add_list firewall.ygg_dns.src_ip='<TRUSTED_YGG_IPV6_2>'
-uci commit firewall
-/etc/init.d/firewall restart
-```
+No separate firewall rule is needed: `YGG-Trusted-to-Router` already admits
+TCP and UDP from the trusted sources, so port 53 is reachable for them and for
+no one else.
 
 ```sh
 dig +short AAAA mydevice.home.arpa @<ROUTER_YGG_IPV6>

@@ -16,7 +16,7 @@
 set -u
 umask 077
 
-VERSION='2.0.3'
+VERSION='2.0.4'
 SELF="${0##*/}"
 # Piped straight from a URL — wget -qO- ... | sh -s -- ... — $0 is the shell, so
 # the banner and the usage text would announce themselves as "sh".
@@ -1581,6 +1581,9 @@ stage_firewall() {
         info "LAN-to-Yggdrasil rule removed (--no-lan-forward): LAN hosts only answer trusted nodes"
     fi
 
+    # Up to 2.0.3 stage_dns opened port 53 with a rule of its own; the router
+    # rule below covers it now (UDP included), so an earlier run's copy goes.
+    uci_del 'firewall.ygg_dns'
     if [ -z "$TRUSTED" ]; then
         warn "no trusted /128 given — removing any previously created allow rules"
         uci_del 'firewall.ygg_trusted_lan'
@@ -1599,10 +1602,10 @@ stage_firewall() {
         uci_set 'firewall.ygg_trusted_router.name' 'YGG-Trusted-to-Router'
         uci_set 'firewall.ygg_trusted_router.src' 'ygg'
         uci_set 'firewall.ygg_trusted_router.family' 'ipv6'
-        uci_set 'firewall.ygg_trusted_router.proto' 'tcp'
+        uci_set 'firewall.ygg_trusted_router.proto' 'tcp udp icmp'
         uci_set 'firewall.ygg_trusted_router.target' 'ACCEPT'
         fw_rule_trusted 'ygg_trusted_router'
-        ok "trusted allow rules written (LAN + router)"
+        ok "trusted allow rules written (LAN + router: TCP, UDP, ICMP — DNS included)"
     fi
 
     if [ "$DRY_RUN" -eq 0 ]; then
@@ -1723,23 +1726,11 @@ ${_h%%=*}.${DNS_DOMAIN} ${_h#*=}"
         info "dnsmasq made authoritative for $DNS_DOMAIN"
     fi
 
+    # Trusted nodes reach port 53 through the router rule of stage_firewall.
     if [ "$DO_FIREWALL" -eq 0 ]; then
         warn "--no-firewall: port 53 not opened, DNS stays LAN-only"
     elif [ -z "$TRUSTED" ]; then
-        CHANGED_FIREWALL=1
-        uci_del 'firewall.ygg_dns'
         warn "no trusted /128: DNS will not be reachable over Yggdrasil"
-    else
-        CHANGED_FIREWALL=1
-        uci_set 'firewall.ygg_dns' 'rule'
-        uci_set 'firewall.ygg_dns.name' 'Allow-DNS-from-Trusted-Yggdrasil'
-        uci_set 'firewall.ygg_dns.src' 'ygg'
-        uci_set 'firewall.ygg_dns.family' 'ipv6'
-        uci_set 'firewall.ygg_dns.proto' 'tcp udp'
-        uci_set 'firewall.ygg_dns.dest_port' '53'
-        uci_set 'firewall.ygg_dns.target' 'ACCEPT'
-        fw_rule_trusted 'ygg_dns'
-        ok "port 53 opened for the trusted addresses only"
     fi
 
     if [ "$DRY_RUN" -eq 0 ]; then
@@ -1755,11 +1746,6 @@ ${_h%%=*}.${DNS_DOMAIN} ${_h#*=}"
             sleep 1
         done
         pidof dnsmasq >/dev/null 2>&1 || die "dnsmasq is not running after restart"
-
-        if [ "$DO_FIREWALL" -eq 1 ]; then
-            uci commit firewall || die "uci commit firewall failed"
-            /etc/init.d/firewall reload >/dev/null 2>&1 || die "firewall reload failed"
-        fi
         ok "DNS module applied"
     fi
 }
@@ -2028,6 +2014,10 @@ HOSTS_EOF
         else
             check 'LAN-to-Yggdrasil rule' ''        "$(uci -q get firewall.ygg_lan_out)"
         fi
+        if [ -n "$TRUSTED" ]; then
+            check 'trusted-to-router rule' 'tcp udp icmp' "$(uci -q get firewall.ygg_trusted_router.proto)"
+        fi
+        check 'no separate DNS rule' '' "$(uci -q get firewall.ygg_dns)"
     fi
 
     if [ "$DO_DNS" -eq 1 ]; then
@@ -2035,9 +2025,6 @@ HOSTS_EOF
         check 'DNS router record' "$NODE_ADDR" "$(uci -q get "dhcp.$_dsec.ip")"
         check 'dnsmasq running'   'yes' \
             "$(pidof dnsmasq >/dev/null 2>&1 && echo yes || echo no)"
-        if [ -n "$TRUSTED" ] && [ "$DO_FIREWALL" -eq 1 ]; then
-            check 'DNS rule port'  '53' "$(uci -q get firewall.ygg_dns.dest_port)"
-        fi
         # Resolve it for real. nslookup output varies between BusyBox builds, so
         # a mismatch is reported as a warning rather than a failed invariant.
         _dres="$(nslookup "${DNS_ROUTER}.${DNS_DOMAIN}" 127.0.0.1 2>/dev/null \
