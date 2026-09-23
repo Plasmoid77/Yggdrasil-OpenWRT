@@ -16,7 +16,7 @@
 set -u
 umask 077
 
-VERSION='2.0.5'
+VERSION='2.0.6'
 SELF="${0##*/}"
 # Piped straight from a URL — wget -qO- ... | sh -s -- ... — $0 is the shell, so
 # the banner and the usage text would announce themselves as "sh".
@@ -1889,7 +1889,7 @@ status_acquire() { # $1 = destination, $2 = optional checkout package directory
 stage_status() {
     [ "$DO_STATUS" -eq 1 ] || { info "skipping status module (--no-status)"; return 0; }
     FAILED_STAGE='LuCI status module'
-    step "Stage 7 - LuCI status module"
+    step "Stage 7 — LuCI status module"
     if [ "$DRY_RUN" -eq 1 ]; then
         if [ -n "$STATUS_PKG" ]; then
             info "would install verified status module from $STATUS_PKG"

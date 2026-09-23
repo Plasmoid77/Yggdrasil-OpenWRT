@@ -28,6 +28,10 @@
   then the addresses of its own Yggdrasil node, each with a small "node" label.
   The backend and its JSON are unchanged.
 
+## Deployer 2.0.6 - cosmetic
+
+- "Stage 7 — LuCI status module" uses the same dash as every other stage.
+
 ## Status 6.2.3 - the native IPv6 column shows only the prefixes the LAN has now
 
 - After a renumbering odhcpd keeps announcing the old prefix as deprecated
