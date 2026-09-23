@@ -16,7 +16,7 @@
 set -u
 umask 077
 
-VERSION='2.0.4'
+VERSION='2.0.5'
 SELF="${0##*/}"
 # Piped straight from a URL — wget -qO- ... | sh -s -- ... — $0 is the shell, so
 # the banner and the usage text would announce themselves as "sh".
@@ -2095,8 +2095,8 @@ HOSTS_EOF
         printf '      http://[%s]/            (LuCI)\n\n' "$NODE_ADDR" >&2
         printf '  %sVerify that now, from a trusted node, before you rely on it.%s\n' \
             "$C_WRN" "$C_RST" >&2
-        printf '  The ygg zone rejects everything else, ICMP included: a failing\n' >&2
-        printf '  ping is expected, a failing ssh is not.\n' >&2
+        printf '  The ygg zone rejects everyone else. Trusted nodes get TCP, UDP and\n' >&2
+        printf '  ICMP: a ping from one of them should answer, and so should ssh.\n' >&2
     else
         printf '  %sNo trusted address was configured.%s\n' "$C_WRN" "$C_RST" >&2
         printf '  The ygg zone is closed, so the router is NOT reachable over\n' >&2

@@ -32,6 +32,12 @@
 - Verified on the router's BusyBox awk before release: the six stale
   addresses of the previous prefix disappear, the current ones stay.
 
+## Deployer 2.0.5 - the closing summary matches the 2.0.4 rule
+
+- The summary still said the ygg zone rejects ICMP from everyone, so "a
+  failing ping is expected"; since 2.0.4 trusted nodes get ICMP too, so it now
+  says a ping from one of them should answer.
+
 ## Status 6.2.2 - the native IPv6 column no longer admits 200::/7
 
 - `native_ipv6_for_mac` matched `^[23][0-9a-f]*:`, which also takes any
