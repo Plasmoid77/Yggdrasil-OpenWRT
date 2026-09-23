@@ -16,7 +16,7 @@
 set -u
 umask 077
 
-VERSION='2.1.0'
+VERSION='2.1.1'
 SELF="${0##*/}"
 # Piped straight from a URL — wget -qO- ... | sh -s -- ... — $0 is the shell, so
 # the banner and the usage text would announce themselves as "sh".
@@ -1438,11 +1438,18 @@ stage_lan() {
     step "Stage 4 — LAN routed /64 beside the existing prefixes"
 
     # dhcp is also the status module's file (Pin/Unpin edit config host under
-    # this lock). Take it before staging anything, so a busy lock means
+    # this lock, and an open status page holds it shared for a few seconds on
+    # every refresh). Take it before staging anything, so a busy lock means
     # "nothing changed yet" rather than a rollback over someone else's edit.
+    # BusyBox flock has no -w, so wait by retrying.
     if have flock && [ "$DRY_RUN" -eq 0 ]; then
         exec 9>>/var/lock/yggdrasil-status-dhcp.lock
-        flock -n 9 || die "another process is editing DHCP configuration (lock busy) — retry in a moment"
+        _tries=0
+        until flock -n 9; do
+            _tries=$((_tries + 1))
+            [ "$_tries" -lt 30 ] || die "another process is editing DHCP configuration (lock busy for 30 s) — retry in a moment"
+            sleep 1
+        done
         if uci -q changes dhcp 2>/dev/null | grep -q .; then
             die "uncommitted UCI changes appeared in 'dhcp' since preflight — commit or revert them first"
         fi

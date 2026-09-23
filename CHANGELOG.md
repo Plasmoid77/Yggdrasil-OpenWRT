@@ -1,5 +1,12 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## Deployer 2.1.1 - an open status page no longer aborts stage 4
+
+- Stage 4 took the DHCP lock with `flock -n` and died at once when it was
+  busy. An open Status → Yggdrasil page holds that lock shared for a few
+  seconds on every refresh, so a run with the page open could fail and roll
+  back. The stage now retries for up to 30 s (BusyBox `flock` has no `-w`).
+
 ## Deployer 2.1.0 - reserved `::HOSTID` addresses come back right after a reboot
 
 - The LAN now owns the routed Yggdrasil /64 as a static prefix
