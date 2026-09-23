@@ -20,6 +20,14 @@
   the install goes on. The guard text is unchanged, so an installed router
   needs no rerun. Found in an independent review (Astra).
 
+## Status 6.3 - one Yggdrasil column for routed and node addresses
+
+- The "Yggdrasil IPv6" (routed prefix) and "Yggdrasil node" columns are merged
+  into one "Yggdrasil" column: the device's routed-prefix addresses first (the
+  DHCPv6 lease or canonical address in bold, stale ones dimmed, as before),
+  then the addresses of its own Yggdrasil node, each with a small "node" label.
+  The backend and its JSON are unchanged.
+
 ## Status 6.2.3 - the native IPv6 column shows only the prefixes the LAN has now
 
 - After a renumbering odhcpd keeps announcing the old prefix as deprecated

@@ -209,8 +209,29 @@ function nodeCell(client) {
 			? _('Native Yggdrasil node address; the device is peering now')
 			: _('Last known native Yggdrasil node address; the device is not peering right now')
 	}, addresses.map(function(addr) {
-		return E('div', { 'style': live ? null : 'opacity: .55' }, addr);
+		return E('div', { 'style': live ? null : 'opacity: .55' }, [
+			/* currentColor keeps the label legible in light and dark themes */
+			E('span', {
+				'style': 'display: inline-block; font-size: 75%; line-height: 1.3; padding: 0 .3em; margin-right: .4em; border: 1px solid currentColor; border-radius: 3px; opacity: .8'
+			}, _('node')),
+			addr
+		]);
 	}));
+}
+
+
+/*
+ * One Yggdrasil column: the addresses a device holds in the router's routed
+ * prefix first, then the addresses of its own node when it runs Yggdrasil
+ * itself. The node lines carry a small "node" label; their 2xx: prefix, next
+ * to the 3xx: of the routed prefix, tells them apart as well.
+ */
+function yggCell(client) {
+	var parts = [ipv6Cell(client), nodeCell(client)].filter(function(part) {
+		return part !== '—';
+	});
+
+	return parts.length ? E('div', {}, parts) : '—';
 }
 
 
@@ -559,9 +580,8 @@ function makeClientTable(clients) {
 		_('Hostname'),
 		_('MAC'),
 		_('IPv4'),
-		_('Yggdrasil IPv6'),
+		_('Yggdrasil'),
 		_('Native IPv6'),
-		_('Yggdrasil node'),
 		_('DNS'),
 		_('State'),
 		_('Persistence')
@@ -572,9 +592,8 @@ function makeClientTable(clients) {
 			client.hostname || '—',
 			client.mac || '—',
 			client.ipv4 || '—',
-			ipv6Cell(client),
+			yggCell(client),
 			nativeCell(client),
-			nodeCell(client),
 			client.dns || '—',
 			client.online
 				? E('span', { 'style': 'color: #16a34a; font-weight: 600' }, _('Online'))
@@ -590,8 +609,8 @@ function makeClientTable(clients) {
 		return String(a[0]).localeCompare(String(b[0]));
 	});
 
-	/* MAC, IPv4, the three address columns and DNS: monospace, no mid-address wraps */
-	return makeTable(headers, rows, 'yggdrasil-lan-clients', null, [1, 2, 3, 4, 5, 6]);
+	/* MAC, IPv4, the two address columns and DNS: monospace, no mid-address wraps */
+	return makeTable(headers, rows, 'yggdrasil-lan-clients', null, [1, 2, 3, 4, 5]);
 }
 
 
