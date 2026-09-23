@@ -242,7 +242,8 @@ Do not "clean up" that line back to the earlier form without testing it on the t
 
 During development, local `home.arpa` records already worked and `dnsmasq` was listening, but direct DNS queries over Yggdrasil timed out.
 
-The missing piece was an INPUT firewall rule for TCP/UDP 53 from the `ygg` zone.
+The missing piece was an INPUT firewall rule for TCP/UDP 53 from the `ygg` zone
+(since deployer 2.0.4 that is `YGG-Trusted-to-Router`, which admits UDP).
 
 Always distinguish:
 
@@ -251,6 +252,35 @@ DNS record exists?
 DNS listener exists?
 firewall permits Ygg -> router:53?
 ```
+
+### IPv4-only sites can stall for a second: carrier DNS64 (known limitation)
+
+Observed on MegaFon LTE (2026-09-22/23). The carrier's IPv6 resolvers do DNS64:
+for an IPv4-only name they synthesise a `64:ff9b::/96` AAAA (TTL 10 s); its IPv4
+resolvers do not. dnsmasq forwards to all four, which answer equally fast, so
+its choice drifts and the synthesised answers come in episodes.
+
+A LAN client then sources `64:ff9b::` traffic from its routed Yggdrasil address:
+RFC 6724 rule 8 prefers it because `0303:` shares more leading bits with
+`0064:` than `2a03:` does. The router has no Internet route for that source and
+answers ICMPv6 unreachable, but `net.ipv6.icmp.ratelimit` (1000 ms) drops some
+of those errors, so a connection waits for its first SYN retransmit (~1 s).
+Happy Eyeballs hides most of it; IPv4 is unaffected. The carrier's NAT64 itself
+works from the native source. An IPv4-only PDN produces the same pattern for
+dual-stack destinations, because the router still announces itself as the IPv6
+default router (`ra_default=2`); expected from the mechanism, not measured.
+
+Accepted as is (owner decision, 2026-09-23): every DNS-side fix tested in an
+isolated dnsmasq had a worse failure mode — `strictorder` hangs all DNS when
+the first resolver is dead; `ignore-address` plus `all-servers` is bypassed over
+TCP and hangs AAAA lookups when the IPv4 resolvers are down; an IPv4-only
+resolver file leaves no DNS at all, including the router's own peer hostnames.
+
+Diagnose with `dig AAAA <IPv4-only name> @192.168.1.1` (a `64:ff9b::` answer)
+and, on a client, `ip -6 route get 64:ff9b::<x>` (the source is the `303:`
+address). The client-side cure is an address-selection label for `200::/7`
+(`ip addrlabel` or `gai.conf`), so overlay addresses are only preferred for
+overlay destinations.
 
 ### Do not use runtime host hints as an inventory repair tool
 
