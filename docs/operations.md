@@ -282,6 +282,19 @@ address). The client-side cure is an address-selection label for `200::/7`
 (`ip addrlabel` or `gai.conf`), so overlay addresses are only preferred for
 overlay destinations.
 
+### Reserved `::HOSTID` addresses return only at the client's next DHCPv6 renew
+
+Seen after a router reboot and after a clean reinstall (2026-09-23). A DHCPv6 client (zeonux,
+`dhcpcd`) confirms its previous lease right after the router comes up. At that moment `ygg0`
+and the LTE uplink are not up yet, so only the ULA is on-link: odhcpd answers **Not On Link**,
+the client takes a lease with just `fd…::10` and drops `303:…::10` and the native `::10`. Its
+SLAAC addresses in the routed and native prefixes appear by themselves within a minute or two,
+and odhcpd's lease already lists all three reserved addresses, but the client installs them
+only at its next Renew (T1, about 20 minutes here). Nothing is misconfigured; `zeonux.home.arpa`
+is just unreachable in that window. To shorten it, renew on the client (`dhcpcd -N <if>`;
+`dhcpcd -n` only confirms and does not add addresses) or reconnect it. Note also that every
+PDN re-activation gives the LAN a new native prefix, so native reservations change with it.
+
 ### Do not use runtime host hints as an inventory repair tool
 
 If rows disappear because the backend was changed to use `getHostHints` as its inventory database, the fix is not to continuously "wake" NDP with pings. Restore the explicit lifetime model instead:
