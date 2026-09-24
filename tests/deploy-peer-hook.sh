@@ -1,10 +1,10 @@
 #!/bin/sh
 # shellcheck disable=SC2034,SC2317,SC2329,SC2016
 # install_peer_hook writes /etc/hotplug.d/iface/70-yggdrasil-peers: when an
-# uplink comes up, the configured peers that are not up are re-added through
-# the admin socket (removepeer + addpeer), which restarts Yggdrasil's attempts
-# at once instead of after its growing pause. The hook runs here against
-# stubbed yggdrasilctl, jsonfilter and UCI helpers.
+# uplink comes up, 'addpeer' is sent for every configured peer, which in
+# yggdrasil-go only kicks an existing peer (an attempt at once if it is backing
+# off, nothing if it is connected). The hook runs here against a stubbed
+# yggdrasilctl and UCI helpers.
 
 set -eu
 
@@ -53,10 +53,6 @@ cat > "$TMP/bin/yggdrasilctl" <<STUB
 #!/bin/sh
 echo "\$*" >> "$TMP/calls"
 STUB
-cat > "$TMP/bin/jsonfilter" <<STUB
-#!/bin/sh
-printf '%s\n' "\${UP_REMOTES:-}"
-STUB
 cat > "$TMP/bin/logger" <<STUB
 #!/bin/sh
 echo "\$*" >> "$TMP/log"
@@ -71,22 +67,19 @@ sed -e "s|\[ -S '/tmp/yggdrasil/ygg0.sock' \]|[ -e '$TMP/run/ygg0.sock.present' 
 grep -q 'sleep 5' "$TMP/hook.t" && fail 'test copy still sleeps'
 grep -q "$TMP/functions.sh" "$TMP/hook.t" || fail 'test copy still loads /lib/functions.sh'
 
-run_hook() { : > "$TMP/calls"; : > "$TMP/log"; PATH="$TMP/bin:$PATH" UP_REMOTES="$1" ACTION="$2" INTERFACE="$3" sh "$TMP/hook.t"; }
+run_hook() { : > "$TMP/calls"; : > "$TMP/log"; PATH="$TMP/bin:$PATH" ACTION="$2" INTERFACE="$3" sh "$TMP/hook.t"; }
 
-# 1. uplink up, a.example up, b and c down: only b and c are re-added, with their full URI
-run_hook 'tls://a.example:1' ifup LTE_Fibocom_860
-grep -q 'a.example' "$TMP/calls" && fail "an established peer was touched: $(cat "$TMP/calls")"
-grep -qF 'removepeer uri=tls://b.example:2?key=abc' "$TMP/calls" || fail "b not removed: $(cat "$TMP/calls")"
-grep -qF 'addpeer uri=tls://b.example:2?key=abc' "$TMP/calls" || fail "b not re-added: $(cat "$TMP/calls")"
-grep -qF 'addpeer uri=wss://c.example:443' "$TMP/calls" || fail "c not re-added: $(cat "$TMP/calls")"
+# 1. uplink up: every configured non-interface peer is woken with its full URI, never removed
+run_hook '' ifup LTE_Fibocom_860
+grep -q 'removepeer' "$TMP/calls" && fail "a peer was removed: $(cat "$TMP/calls")"
+grep -q 'getpeers' "$TMP/calls" && fail 'the hook depends on a getpeers snapshot'
+for u in 'tls://a.example:1' 'tls://b.example:2?key=abc' 'wss://c.example:443'; do
+    grep -qxF -e "-endpoint=unix:///tmp/yggdrasil/ygg0.sock addpeer uri=$u" "$TMP/calls" || fail "$u not woken: $(cat "$TMP/calls")"
+done
 grep -q 'fe80' "$TMP/calls" && fail 'an interface peer was touched'
-[ "$(grep -c '^-endpoint=.* addpeer ' "$TMP/calls")" -eq 2 ] || fail "want two addpeer calls: $(cat "$TMP/calls")"
-echo 'PASS: peers that are down are retried, established and interface peers are not'
-
-# 2. a query string does not hide an established peer (remote is shown without it)
-run_hook "$(printf '%s\n' 'tls://a.example:1' 'tls://b.example:2' 'wss://c.example:443')" ifup wan
-[ ! -s "$TMP/calls" ] || { grep -q 'removepeer' "$TMP/calls" && fail "an established peer was re-added: $(cat "$TMP/calls")"; }
-echo 'PASS: all peers up: nothing to do'
+[ "$(grep -c addpeer "$TMP/calls")" -eq 3 ] || fail "want three addpeer calls: $(cat "$TMP/calls")"
+grep -q 'key=abc' "$TMP/log" 2>/dev/null && fail 'a peer URI (may hold a password) reached the log'
+echo 'PASS: every configured peer is woken with addpeer, none removed, no URI in the log'
 
 # 3. other events and our own interfaces are ignored
 for ev in 'ifdown wan' 'ifupdate wan' 'ifup ygg0' 'ifup lan' 'ifup loopback'; do

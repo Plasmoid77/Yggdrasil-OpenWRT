@@ -1,5 +1,19 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## Deployer 2.5.1 - the peer hook only wakes peers, it never removes one
+
+- 2.5.0 re-added down peers with `removepeer` + `addpeer`, deciding from one
+  `getpeers` snapshot. An independent review (Astra) found that a fast
+  `addpeer` could meet the entry `removepeer` had not yet cleared and be
+  dropped, leaving the peer unconfigured until a restart; a failed snapshot
+  would have removed every peer; and the log carried full URIs, which may
+  hold a password. In yggdrasil-go 0.5.12 `addpeer` on a configured peer
+  only kicks it (an attempt at once if it is backing off, nothing if it is
+  connected), so the hook now just sends `addpeer` for every configured
+  peer, and logs a count.
+- Verified on the router: with all peers up the hook left their uptimes
+  running; four peers blocked for 4.5 minutes were back 7 s after the event.
+
 ## Deployer 2.5.0 - down peers are retried when an uplink comes up
 
 - Replaces 2.4.0's `maxbackoff=1m`: Yggdrasil's own reconnection pauses stay

@@ -16,7 +16,7 @@
 set -u
 umask 077
 
-VERSION='2.5.0'
+VERSION='2.5.1'
 SELF="${0##*/}"
 # Piped straight from a URL — wget -qO- ... | sh -s -- ... — $0 is the shell, so
 # the banner and the usage text would announce themselves as "sh".
@@ -1062,41 +1062,41 @@ install_hotplug_guard() {
 # connect to (doubling up to 1h8m), and it cannot tell that the uplink is back:
 # after an LTE outage the public peers returned 15 minutes after the uplink.
 # The defaults stay; instead a hotplug script reacts to the event. When any
-# other interface comes up, it re-adds (removepeer + addpeer through the admin
-# socket) the configured peers that are not up, which restarts their attempts
-# at once. Established peers are left alone.
+# other interface comes up, it runs 'addpeer' for every configured peer. For a
+# peer that is already configured, yggdrasil-go (0.5.12, links.add) does not
+# add a second one: it only kicks it, so a peer waiting out its backoff tries
+# at once and a connected one is not touched.
 PEER_HOOK='/etc/hotplug.d/iface/70-yggdrasil-peers'
 
 peer_hook_text() {
     sed -e "s|@IFACE@|$IFACE|g" -e "s|@LAN@|$LAN|g" <<'EOF'
 #!/bin/sh
 # Written by Yggdrasil-OpenWRT (deploy-openwrt-yggdrasil.sh). When an uplink
-# comes up, retry at once the '@IFACE@' peers that are not up, instead of
-# waiting out Yggdrasil's growing pause between attempts.
+# comes up, wake the '@IFACE@' peers so that one waiting out Yggdrasil's
+# growing pause between attempts tries at once. 'addpeer' on a configured peer
+# only kicks it; a connected peer is not touched.
 [ "$ACTION" = ifup ] || exit 0
 case "$INTERFACE" in '@IFACE@'|'@LAN@'|loopback) exit 0 ;; esac
-sock='unix:///tmp/yggdrasil/@IFACE@.sock'
 [ -S '/tmp/yggdrasil/@IFACE@.sock' ] || exit 0
 (
 	# one run at a time; let routes and DNS settle first
 	exec 9>>/var/lock/yggdrasil-peers.lock
 	flock -n 9 || exit 0
 	sleep 5
-	up="$(yggdrasilctl -json -endpoint="$sock" getpeers 2>/dev/null |
-		jsonfilter -e '@.peers[@.up=true].remote' 2>/dev/null)"
 	. /lib/functions.sh
-	retry() {
+	n=0
+	wake() {
 		local uri iface
 		config_get uri "$1" address
 		config_get iface "$1" interface
 		[ -n "$uri" ] && [ -z "$iface" ] || return 0
-		printf '%s\n' "$up" | grep -qxF "${uri%%\?*}" && return 0
-		yggdrasilctl -endpoint="$sock" removepeer uri="$uri" >/dev/null 2>&1
-		yggdrasilctl -endpoint="$sock" addpeer uri="$uri" >/dev/null 2>&1 &&
-			logger -t yggdrasil-peers "$INTERFACE up: retrying peer $uri now"
+		yggdrasilctl -endpoint='unix:///tmp/yggdrasil/@IFACE@.sock' addpeer uri="$uri" >/dev/null 2>&1
+		n=$((n + 1))
 	}
 	config_load network
-	config_foreach retry 'yggdrasil_@IFACE@_peer'
+	config_foreach wake 'yggdrasil_@IFACE@_peer'
+	# the count only: a peer URI may carry a password
+	logger -t yggdrasil-peers "$INTERFACE up: woke $n peer(s)"
 ) </dev/null >/dev/null 2>&1 &
 EOF
 }
@@ -1104,7 +1104,7 @@ EOF
 install_peer_hook() {
     FAILED_STAGE='peer hook'
     if [ "$DRY_RUN" -eq 1 ]; then
-        info "would write $PEER_HOOK (retry peers that are down when an uplink comes up)"
+        info "would write $PEER_HOOK (wake the peers when an uplink comes up)"
         return 0
     fi
     if [ -f "$PEER_HOOK" ] && [ "$(cat "$PEER_HOOK")" = "$(peer_hook_text)" ]; then
