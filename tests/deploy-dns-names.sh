@@ -170,7 +170,7 @@ grep -qx 'gen 1' "$TMP/init.log" || fail 'names not rebuilt on rollback'
 BACKUP_DIR="$TMP/bk2"; mkdir -p "$BACKUP_DIR"; : > "$BACKUP_DIR/dns.conf.absent"
 echo 'zone home.arpa' > "$DNS_CONF"; echo '203::1 router.home.arpa' > "$DNS_HOSTS_DIR/yggdrasil-ygg0"
 rollback
-[ ! -e "$DNS_CONF" ] && [ ! -e "$DNS_HOSTS_DIR/yggdrasil-ygg0" ] || fail 'first-run DNS state left after rollback'
+if [ -e "$DNS_CONF" ] || [ -e "$DNS_HOSTS_DIR/yggdrasil-ygg0" ]; then fail 'first-run DNS state left after rollback'; fi
 # stage 6 not reached: DNS files untouched
 CHANGED_DNS=0; echo 'zone x.internal' > "$DNS_CONF"
 rollback
