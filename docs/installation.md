@@ -575,7 +575,8 @@ sudo install -D -m 0644 client/linux/dnsmasq-ygg-zones.conf /etc/dnsmasq.d/ygg-z
 sudoedit /etc/dnsmasq.d/ygg-zones.conf       # one server=/<zone>/<router Ygg address> per router
 grep -q '^conf-dir=/etc/dnsmasq.d/,\*.conf' /etc/dnsmasq.conf \
   || echo 'conf-dir=/etc/dnsmasq.d/,*.conf' | sudo tee -a /etc/dnsmasq.conf
-sudo systemctl enable --now dnsmasq
+sudo systemctl enable dnsmasq
+sudo systemctl restart dnsmasq               # also after every later edit: it rereads its config only on restart
 sudo sed -i "s|^router_dns=.*|router_dns='127.0.0.2'|; s|^zones=.*|zones='home.arpa internal'|" \
   /usr/local/libexec/yggdrasil-split-dns
 sudo /usr/local/libexec/yggdrasil-split-dns apply
