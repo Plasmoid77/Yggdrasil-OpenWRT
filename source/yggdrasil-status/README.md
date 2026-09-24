@@ -59,8 +59,11 @@ Unpin requires explicit confirmation for static reservations and refuses
 shared, duplicate or complex host sections. Pin/Unpin preserves domain records,
 refuses pending DHCP edits and uses locking plus configuration backup/rollback.
 
-The current backend handles one logical `lan` and `home.arpa`; multi-LAN or
-custom status suffixes are not automatically inherited from deployer options.
+The current backend handles one logical `lan`; the DNS suffix is the
+deployer's zone (`/etc/yggdrasil-openwrt/dns.conf`, `home.arpa` without it),
+and the names the deployer generates in `/tmp/hosts/yggdrasil-*` count as
+canonical after operator `config domain` records. Multi-LAN is not inherited
+from deployer options.
 
 ## Versions and full documentation
 

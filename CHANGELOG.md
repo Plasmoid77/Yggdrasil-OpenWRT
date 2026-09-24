@@ -1,5 +1,13 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## Status 6.5 - DNS column in the deployer's zone
+
+- The DNS suffix is the deployer's zone (`/etc/yggdrasil-openwrt/dns.conf`),
+  `home.arpa` without it.
+- The names the deployer generates (`/tmp/hosts/yggdrasil-*`) count as
+  canonical for a matching persistent host, after operator `config domain`
+  records.
+
 ## Deployer 2.2.0 - the routed /64 is delegated again and follows the node key
 
 - 2.1.0 wrote the routed /64 into the LAN (`network.<lan>.ip6prefix`) and set

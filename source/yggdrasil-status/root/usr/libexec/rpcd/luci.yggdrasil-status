@@ -41,6 +41,10 @@
 
 LAN_NET='lan'
 DNS_SUFFIX='home.arpa'
+# Deployer 2.3+ publishes the router's Yggdrasil names as generated hosts
+# files ("<address> <fqdn>") and keeps the zone in its dns.conf.
+DNS_CONF='/etc/yggdrasil-openwrt/dns.conf'
+DNS_HOSTS_DIR='/tmp/hosts'
 LEASE_FILE='/tmp/dhcp.leases'
 DHCP_CONFIG='/etc/config/dhcp'
 PIN_SECTION_PREFIX='ygg_status_'
@@ -328,13 +332,17 @@ EOF
 # Canonical record lookup. A matching config domain is optional.
 find_canonical_domain() {
 	local fcd_host="$1"
-	local fcd_wanted fcd_i fcd_name fcd_ip
+	local fcd_wanted fcd_i fcd_name fcd_ip fcd_zone
 
 	CANONICAL_IPV6=''
 	DNS_ALIAS=''
 
 	[ -n "$fcd_host" ] || return 1
 
+	if [ -r "$DNS_CONF" ]; then
+		fcd_zone="$(awk '$1 == "zone" { print $2; exit }' "$DNS_CONF")"
+		[ -n "$fcd_zone" ] && DNS_SUFFIX="$fcd_zone"
+	fi
 	fcd_wanted="$(lower "$fcd_host").${DNS_SUFFIX}"
 	fcd_i=0
 
@@ -354,6 +362,15 @@ find_canonical_domain() {
 
 		fcd_i=$((fcd_i + 1))
 	done
+
+	# operator records above win; then the names the deployer generates
+	fcd_ip="$(cat "$DNS_HOSTS_DIR"/yggdrasil-* 2>/dev/null |
+		awk -v n="$fcd_wanted" 'tolower($2) == n && $1 ~ /:/ { print $1; exit }')"
+	if [ -n "$fcd_ip" ]; then
+		CANONICAL_IPV6="$fcd_ip"
+		DNS_ALIAS="$fcd_wanted"
+		return 0
+	fi
 
 	return 1
 }
