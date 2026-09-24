@@ -1,5 +1,15 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## Deployer 2.4.0 - public peers come back within a minute of the uplink
+
+- Yggdrasil doubles the pause between reconnection attempts after every
+  failure, up to 1h8m by default. After an LTE modem was replugged on the SPb
+  router the public peers reconnected 15 minutes after the uplink was back.
+  Every `--peer` now gets Yggdrasil's own `maxbackoff=1m` URI option (appended
+  with `?` or `&`); a URI that already sets `maxbackoff` is kept as given.
+- Verified on the router: a peer blocked for 3.5 minutes reconnected 63 s
+  after the block was lifted.
+
 ## Deployer 2.3.0 - DNS names follow the node key; a zone per router
 
 - The router's names are no longer static UCI `config domain` records, which

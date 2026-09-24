@@ -16,7 +16,7 @@
 set -u
 umask 077
 
-VERSION='2.3.0'
+VERSION='2.4.0'
 SELF="${0##*/}"
 # Piped straight from a URL — wget -qO- ... | sh -s -- ... — $0 is the shell, so
 # the banner and the usage text would announce themselves as "sh".
@@ -223,6 +223,20 @@ add_peer() {
     esac
     PEERS="${PEERS}${PEERS:+
 }$_p"
+}
+
+# Yggdrasil doubles the pause between reconnection attempts after each failure,
+# up to 1h8m by default, so peers lost during an uplink outage could come back
+# long after the uplink did (15 minutes after an LTE modem was replugged).
+# Its own per-peer 'maxbackoff' option caps the pause; the deployer sets it
+# unless the URI already carries one.
+PEER_MAXBACKOFF='1m'
+peer_with_maxbackoff() {
+    case "$1" in
+        *'?maxbackoff='*|*'&maxbackoff='*) printf '%s\n' "$1" ;;
+        *'?'*) printf '%s&maxbackoff=%s\n' "$1" "$PEER_MAXBACKOFF" ;;
+        *)     printf '%s?maxbackoff=%s\n' "$1" "$PEER_MAXBACKOFF" ;;
+    esac
 }
 
 add_trusted() {
@@ -1162,6 +1176,7 @@ stage_yggdrasil() {
     _added=0
     printf '%s\n' "$PEERS" | while IFS= read -r _p; do
         [ -n "$_p" ] || continue
+        _p="$(peer_with_maxbackoff "$_p")"
         if printf '%s\n' "$_existing_peers" | grep -qxF "$_p"; then
             info "peer already present, skipping: $_p"
             continue

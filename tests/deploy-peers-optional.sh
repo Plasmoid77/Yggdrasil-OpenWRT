@@ -70,3 +70,15 @@ set -- --peer http://a.example
 eval "$PARSER"
 [ -n "$DIED" ] || { echo 'FAIL: a peer with a bad scheme was accepted' >&2; exit 1; }
 echo 'PASS: given peers are still validated and collected'
+
+# peers get a capped reconnection backoff unless they carry their own
+eval "$(grep '^PEER_MAXBACKOFF=' "$SCRIPT")"
+eval "$(extract_function peer_with_maxbackoff)"
+for pair in 'tls://a.example:1|tls://a.example:1?maxbackoff=1m' \
+            'tls://a.example:1?key=abc|tls://a.example:1?key=abc&maxbackoff=1m' \
+            'tls://a.example:1?maxbackoff=5m|tls://a.example:1?maxbackoff=5m' \
+            'wss://b.example:443/p?x=1&maxbackoff=30s|wss://b.example:443/p?x=1&maxbackoff=30s'; do
+    got="$(peer_with_maxbackoff "${pair%%|*}")"
+    [ "$got" = "${pair#*|}" ] || { echo "FAIL: maxbackoff for ${pair%%|*}: got $got" >&2; exit 1; }
+done
+echo 'PASS: peers get maxbackoff=1m unless they set their own'
