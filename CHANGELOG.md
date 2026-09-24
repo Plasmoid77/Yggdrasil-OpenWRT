@@ -1,5 +1,23 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## Deployer 2.2.0 - the routed /64 is delegated again and follows the node key
+
+- 2.1.0 wrote the routed /64 into the LAN (`network.<lan>.ip6prefix`) and set
+  `delegate '0'` on the Ygg interface. A node key changed later (in LuCI or
+  with uci) left the LAN on the old, unrouted /64. The reboot test showed no
+  gain from it: with `ygg0` delegating the /64 as before 2.1, zeonux had
+  `303:…::10` back at ~63 s after `reboot` (as soon as the router answered)
+  and the native `::10` at ~106 s, the same as with the static prefix. The
+  short lease of `--host` reservations (`leasetime '2m'`, from 2.1.0) is what
+  brings them back quickly, and it stays.
+- `stage_lan` and `stage_verify` are back to the 2.0 prefix handling
+  (`ip6class` admits the Ygg interface's class; no `ip6prefix`/`delegate`).
+- A router that ran 2.1.x keeps the static prefix. To go back by hand:
+  `uci -q delete network.lan.ip6prefix` (only if it holds nothing but the
+  routed /64; otherwise `uci del_list` that entry),
+  `uci -q delete network.ygg0.delegate`, `uci commit network`,
+  `/etc/init.d/network reload`.
+
 ## Status 6.4.1 - no static-prefix fallback
 
 - The routed prefix is taken from the LAN's addresses and the Ygg interface

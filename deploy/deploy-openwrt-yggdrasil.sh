@@ -16,7 +16,7 @@
 set -u
 umask 077
 
-VERSION='2.1.1'
+VERSION='2.2.0'
 SELF="${0##*/}"
 # Piped straight from a URL — wget -qO- ... | sh -s -- ... — $0 is the shell, so
 # the banner and the usage text would announce themselves as "sh".
@@ -41,9 +41,10 @@ CUR_IP6ASSIGN=''; CUR_IP6CLASS=''; CUR_ULA=''; CUR_DHCPV6=''; CUR_RA_SLAAC=''; C
 DO_LAN_FORWARD=1
 HOSTS=''
 # DHCPv6 lifetime for --host reservations. odhcpd renews at half of it, so a
-# reserved address in a prefix that appeared late (after a reboot, or a new
-# native prefix after an LTE reconnect) is on the client within about a minute,
-# not at the stock 45-minute lease's renew. It also bounds their DHCPv4 lease.
+# reserved address in a prefix that appeared late (the Ygg /64 after a reboot,
+# a new native prefix after an LTE reconnect, a new /64 after a key change) is
+# on the client within about a minute, not at the stock 45-minute lease's
+# renew. It also bounds their DHCPv4 lease.
 HOST_LEASETIME='2m'
 DO_JUMPER=1
 DO_LAN=1
@@ -1458,19 +1459,11 @@ stage_lan() {
     CHANGED_NETWORK=1
     CHANGED_DHCP=1
 
-    # The LAN owns the routed /64 itself (network.lan.ip6prefix) instead of
-    # receiving it from ygg0, so br-lan and odhcpd have it from the first
-    # second of a boot: a client's reserved ::HOSTID then comes back at once
-    # rather than at its next DHCPv6 renew. netifd publishes such a prefix with
-    # the interface name as its class. ygg0 stops delegating the same prefix.
-    _class="$LAN"
-    if uci -q get "network.$LAN.ip6prefix" 2>/dev/null | tr ' ' '\n' | grep -qxF "$YGG_PREFIX"; then
-        info "LAN: ip6prefix $YGG_PREFIX already set"
-    else
-        uci_add_list "network.$LAN.ip6prefix" "$YGG_PREFIX"
-        info "LAN: ip6prefix $YGG_PREFIX (the routed /64, owned by the LAN)"
-    fi
-    uci_set "network.$IFACE.delegate" '0'
+    # ip6class must name the class netifd actually publishes for this prefix
+    # (see get_ygg_prefix); hardcoding 'ygg' silently matches nothing. The /64
+    # is delegated by the Ygg interface, not written into the LAN, so it
+    # follows the node key when that changes.
+    _class="${YGG_CLASS:-$IFACE}"
 
     # The assignment length is the operator's (stock 60 carves a delegated
     # prefix for several LANs); netifd falls back to longer lengths down to /64
@@ -1983,12 +1976,10 @@ stage_verify() {
         check 'LAN carries Ygg /64' 'yes'     "$(lan_has_ygg_prefix && echo yes || echo no)"
         _cls="$(uci -q get "network.$LAN.ip6class")"
         case " $_cls " in
-            '  '|*" $LAN "*) _cls_ok='admits' ;;
+            '  '|*" ${YGG_CLASS:-$IFACE} "*) _cls_ok='admits' ;;
             *) _cls_ok="excludes ($_cls)" ;;
         esac
         check 'LAN ip6class'   'admits'   "$_cls_ok"
-        check 'LAN owns the /64' 'yes' "$(uci -q get "network.$LAN.ip6prefix" | tr ' ' '\n' | grep -qxF "$YGG_PREFIX" && echo yes || echo no)"
-        check 'ygg0 delegates'   '0'   "$(uci -q get "network.$IFACE.delegate")"
         check 'RA'             'server'   "$(uci -q get "dhcp.$LAN.ra")"
         check 'RA default'     '2'        "$(uci -q get "dhcp.$LAN.ra_default")"
         check 'odhcpd running' 'yes' "$(pidof odhcpd >/dev/null 2>&1 && echo yes || echo no)"

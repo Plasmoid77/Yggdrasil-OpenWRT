@@ -412,12 +412,10 @@ echo 'PASS: LAN zone resolution'
 DRY_RUN=1; IFACE='ygg0'; LAN='lan'; YGG_CLASS='ygg0'; YGG_PREFIX='303:170f:3ab2:166e::/64'
 uci() { case "$1 $2" in 'show dhcp') printf '%s\n' "$FIXTURE" ;; '-q get') printf '%s\n' "" ; return 0 ;; *) return 0 ;; esac; }
 wrote() { printf '%s' "$UCI_LOG" | grep -qxF "$1"; }
-# a stock router: ra / ra_default, and the LAN owns the routed /64 (ygg0 stops
-# delegating it); everything else untouched
+# a stock router: only ra / ra_default; everything else untouched
 reset; UCI_LOG=''; CUR_IP6ASSIGN=60; CUR_ULA='fd75:921a:ca44::/48'; CUR_DHCPV6=server; CUR_RA_SLAAC=1; CUR_RA_FLAGS='managed-config other-config '; stage_lan
 [ -z "$DIED" ] || fail "overlay stage on stock died: $DIED"
-for want in 'set dhcp.lan.ra=server' 'set dhcp.lan.ra_default=2' \
-            'add_list network.lan.ip6prefix=303:170f:3ab2:166e::/64' 'set network.ygg0.delegate=0'; do
+for want in 'set dhcp.lan.ra=server' 'set dhcp.lan.ra_default=2'; do
     wrote "$want" || fail "overlay did not write '$want':
 $UCI_LOG"
 done
@@ -425,18 +423,17 @@ for forbidden in 'network.lan.ip6assign' 'ip6class' 'ula_prefix' 'dhcp.lan.dhcpv
     printf '%s' "$UCI_LOG" | grep -q "$forbidden" && fail "overlay on a stock router touched $forbidden:
 $UCI_LOG"
 done
-[ "$(printf '%s' "$UCI_LOG" | grep -c .)" = 4 ] || fail "overlay on stock must write exactly four values:
+[ "$(printf '%s' "$UCI_LOG" | grep -c .)" = 2 ] || fail "overlay on stock must write exactly two values:
 $UCI_LOG"
 # ip6assign only when unset
 reset; UCI_LOG=''; CUR_IP6ASSIGN=''; stage_lan
 wrote 'set network.lan.ip6assign=64' || fail "unset ip6assign not defaulted to 64"
-# an ip6class list is kept and made to admit the LAN's own class (the /64 is
-# published with class 'lan' now); one that admits it is untouched
+# an ip6class list is kept and made to admit the class; one that admits it is untouched
 reset; UCI_LOG=''; CUR_IP6ASSIGN=64; CUR_IP6CLASS='wan6 local'; stage_lan
-wrote 'add_list network.lan.ip6class=lan' || fail "custom ip6class did not gain the class:
+wrote 'add_list network.lan.ip6class=ygg0' || fail "custom ip6class did not gain the class:
 $UCI_LOG"
 printf '%s' "$UCI_LOG" | grep -q 'del network.lan.ip6class' && fail "custom ip6class was deleted"
-reset; UCI_LOG=''; CUR_IP6ASSIGN=64; CUR_IP6CLASS='local lan'; stage_lan
+reset; UCI_LOG=''; CUR_IP6ASSIGN=64; CUR_IP6CLASS='local ygg0'; stage_lan
 printf '%s' "$UCI_LOG" | grep -q 'ip6class' && fail "an admitting ip6class was rewritten:
 $UCI_LOG"
 # reservations are applied (the section-5 uci stub: fixture + missing sections)

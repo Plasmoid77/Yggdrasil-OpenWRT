@@ -270,11 +270,13 @@ ifstatus ygg0
 ubus call network.interface.ygg0 status
 ```
 
-The result must include a node address from `200::/7` and the node's routed
-`/64` - note it, the LAN takes it over in the next step:
+The result must include a node address from `200::/7` and a delegated `/64`.
+netifd labels that prefix with the name of the interface that provided it, so
+with the interface named `ygg0` the prefix class is `ygg0`. Confirm it before
+the next step, because the LAN has to ask for that exact class:
 
 ```sh
-ifstatus ygg0 | jsonfilter -e '@["ipv6-prefix"][*].address'
+ifstatus ygg0 | jsonfilter -e '@["ipv6-prefix"][*].class'
 ```
 
 ## 2. Advertise the routed `/64` on LAN
@@ -283,16 +285,12 @@ The routed prefix joins the prefixes the LAN already advertises; the stock
 RA/DHCPv6 configuration (`dhcpv6=server`, `ra_slaac=1`, M+O flags) and the
 stock ULA stay. Two settings are needed: RA on, and a default route announced
 even when the router has no native IPv6 uplink, so a client can answer a
-Yggdrasil source on an IPv4-only site. The LAN owns the routed `/64` itself
-(`ip6prefix`) and `ygg0` stops delegating it, so the prefix is on the LAN from
-the first second of a boot and a client's reserved address survives a reboot.
-The LAN's `ip6assign` (stock `60`) is fine: netifd falls back to `/64` when the
-request does not fit. Do **not** add an `ip6class` list - that is what 1.x did
-to keep native IPv6 off the LAN; if one exists for other reasons, add `lan`.
+Yggdrasil source on an IPv4-only site. The LAN's `ip6assign` (stock `60`) is
+fine: netifd falls back to `/64` when the request does not fit. Do **not**
+add an `ip6class` list - that is what 1.x did to keep native IPv6 off the LAN;
+if one exists for other reasons, add the Yggdrasil class to it.
 
 ```sh
-uci add_list network.lan.ip6prefix='<ROUTED_YGG_/64>'   # the prefix from step 1
-uci set network.ygg0.delegate='0'
 uci -q get network.lan.ip6assign >/dev/null || uci set network.lan.ip6assign='64'
 uci set dhcp.lan.ra='server'
 uci set dhcp.lan.ra_default='2'
@@ -555,9 +553,7 @@ ygg0             -> DNS Domain: ~home.arpa, Default Route: no
 ifstatus ygg0
 ifstatus lan | jsonfilter -e '@["ipv6-prefix-assignment"][*].address'
 ip -6 addr show dev br-lan
-uci -q get network.lan.ip6class                   # empty, or a list that contains lan
-uci -q get network.lan.ip6prefix                  # contains the routed /64
-uci -q get network.ygg0.delegate                  # 0
+uci -q get network.lan.ip6class                   # empty, or a list that contains ygg0
 uci -q get dhcp.lan.ra
 uci -q get dhcp.lan.ra_default
 uci -q get firewall.ygg_lan_out.dest_ip
@@ -571,8 +567,7 @@ Expected invariants:
 ```text
 LAN prefixes  = the 3xx: routed /64 beside the LAN's own (native and/or ULA)
 RA            = server, RA default = 2
-LAN ip6class  = absent, or admits lan
-LAN ip6prefix = contains the routed /64; ygg0 delegate = 0
+LAN ip6class  = absent, or admits ygg0
 Ygg zone      = input REJECT / output ACCEPT / forward DROP
 LAN-to-Yggdrasil rule dest_ip = 200::/7 (absent with --no-lan-forward)
 no NAT66, no unsolicited ygg -> lan traffic beyond the trusted /128s

@@ -282,22 +282,21 @@ address). The client-side cure is an address-selection label for `200::/7`
 (`ip addrlabel` or `gai.conf`), so overlay addresses are only preferred for
 overlay destinations.
 
-### Reserved `::HOSTID` addresses after a reboot or a new native prefix
+### Reserved `::HOSTID` addresses after a reboot or a new prefix
 
 Found 2026-09-23: a DHCPv6 client (zeonux, `dhcpcd`) confirms its previous lease right after
-the router comes up. Up to deployer 2.0 the routed prefix reached br-lan only once `ygg0` was
-up and the native one once LTE was, so odhcpd answered **Not On Link**, the client took a lease
-with just the ULA `::10` and dropped the others until its next Renew - about 22 minutes with the
-stock 45-minute lifetime. (A Confirm covers all addresses at once, so a missing native prefix
-fails it too.)
+the router comes up. At that moment `ygg0` and the LTE uplink are not up yet, so odhcpd answers
+**Not On Link**, the client keeps just the ULA `::10` and drops `303:…::10` and the native
+`::10` until its next Renew - about 22 minutes with the stock 45-minute lifetime. The same
+applies to a new native prefix after a PDN re-activation and to a new /64 after a key change.
 
-Deployer 2.1 closes both halves. The LAN owns the routed `/64` (`network.lan.ip6prefix`), so
-the fresh lease the client takes after Not On Link already carries `303:…::10`. The native
-prefix cannot be owned (it changes with every LTE session), so `--host` reservations get
-`leasetime '2m'`: the client renews every minute and picks up the native `::10` about a minute
-after the prefix appears. odhcpd has no push for ordinary clients (it sends Reconfigure only to
-prefix-delegation leases). SLAAC addresses need none of this. By hand: `dhcpcd -N <if>` renews
-at once (`dhcpcd -n` only confirms and adds nothing).
+Since deployer 2.2 `--host` reservations carry `leasetime '2m'`, so the client renews every
+minute. Measured on the SPb router (2026-09-24, `reboot` to address on zeonux): `303:…::10`
+at ~63 s (as soon as the router answered), the native `::10` on the new LTE prefix at ~106 s.
+Owning the routed /64 statically on the LAN (deployer 2.1) measured the same and was dropped,
+so the /64 keeps following the node key. odhcpd has no push for ordinary clients (it sends
+Reconfigure only to prefix-delegation leases). By hand: `dhcpcd -N <if>` renews at once
+(`dhcpcd -n` only confirms and adds nothing).
 
 ### Do not use runtime host hints as an inventory repair tool
 
