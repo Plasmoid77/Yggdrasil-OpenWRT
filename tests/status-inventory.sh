@@ -317,20 +317,6 @@ native_from_leases() {
     DHCPV6_NATIVE_LEASES=''
 }
 
-ygg_prefix_while_ygg0_down() {
-    # other groups replace it with a stub; this one tests the real function
-    load find_lan_ygg_prefix
-    YGG_NET=ygg0; LAN_NET=lan
-    # ygg0 is down and reports no prefix; the LAN owns the routed /64 (deployer 2.1+)
-    ubus() { echo '{ }'; }
-    uci() { case "$*" in '-q get network.lan.ip6prefix') echo '2a03:d000:1:2::/64 303:170f:3ab2:166e::/64' ;; *) return 1 ;; esac; }
-    eq '303:170f:3ab2:166e:' "$(find_lan_ygg_prefix)"
-    # no routed prefix anywhere: empty
-    uci() { case "$*" in '-q get network.lan.ip6prefix') echo '2a03:d000:1:2::/64' ;; *) return 1 ;; esac; }
-    eq '' "$(find_lan_ygg_prefix)"
-    unset -f ubus uci
-}
-
 presence() {
     LAN_DEV=br-lan
     PROBE_DEADLINE=''; PROBED=1
@@ -965,7 +951,6 @@ run 'a pinned row keeps its node address across a reboot' pinned_node_memory
 run 'native and ULA addresses per MAC' native_addresses
 run 'native addresses only from the current prefixes' native_current_prefixes
 run 'native and ULA lease addresses show for an idle client' native_from_leases
-run 'the routed prefix is found while ygg0 is down' ygg_prefix_while_ygg0_down
 run 'REACHABLE shortcut, ARP, IPv6 and failed presence' presence
 run 'DHCP lifetime, MAC merge and persistent lease-free rows' identity_lifetime
 run 'dynamic hostnames cannot inherit canonical metadata' canonical_guard

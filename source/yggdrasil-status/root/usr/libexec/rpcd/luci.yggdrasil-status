@@ -397,14 +397,6 @@ find_lan_ygg_prefix() {
 			head -n 1
 	)"
 
-	# Since deployer 2.1 the LAN owns the routed /64 itself (network.lan.ip6prefix),
-	# so it is known even while ygg0 is down and publishes nothing: take the entry
-	# that lies in 200::/7 (a three-hex-digit first group, 200: to 3ff:).
-	[ -n "$flyp_addr" ] || flyp_addr="$(
-		uci -q get "network.${LAN_NET}.ip6prefix" 2>/dev/null | tr ' ' '\n' |
-			awk '/^[23][0-9a-f][0-9a-f]:/ { print; exit }'
-	)"
-
 	printf '%s\n' "$flyp_addr" |
 		awk '
 			NF {

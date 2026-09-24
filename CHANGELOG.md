@@ -1,5 +1,12 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## Status 6.4.1 - no static-prefix fallback
+
+- The routed prefix is taken from the LAN's addresses and the Ygg interface
+  only, no longer from `network.<lan>.ip6prefix`: deployer 2.2 no longer
+  writes it, and a stale entry left there after a key change would have been
+  shown as the current prefix.
+
 ## Deployer 2.1.1 - an open status page no longer aborts stage 4
 
 - Stage 4 took the DHCP lock with `flock -n` and died at once when it was
