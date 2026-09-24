@@ -2,10 +2,13 @@
 set -eu
 
 interface='ygg0'
-# The router's Yggdrasil node address and its zone (--dns-domain). The address
-# follows the router's node key: after a key change, update it here.
+# Where the zones below are resolved: the router's Yggdrasil node address (one
+# router; it follows the router's node key, so update it after a key change),
+# or 127.0.0.2 for a local dnsmasq that sends each zone to its own router
+# (several routers, see dnsmasq-ygg-zones.conf).
 router_dns='<ROUTER_YGG_IPV6>'
-zone='home.arpa'
+# The routers' zones (--dns-domain) or a parent of them, space-separated.
+zones='home.arpa'
 
 case "${1:-}" in
   apply)
@@ -17,7 +20,8 @@ case "${1:-}" in
     done
 
     /usr/bin/resolvectl dns "$interface" "$router_dns"
-    /usr/bin/resolvectl domain "$interface" "~$zone"
+    # shellcheck disable=SC2046 # one ~zone argument per zone
+    /usr/bin/resolvectl domain "$interface" $(printf '~%s ' $zones)
     /usr/bin/resolvectl default-route "$interface" no
     ;;
   revert)
