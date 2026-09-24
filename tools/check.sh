@@ -14,7 +14,7 @@ fi
 
 git ls-files | while IFS= read -r file; do
     case "$file" in
-        *.sh|*/luci.yggdrasil-status|*/yggdrasil-split-dns)
+        *.sh|*/luci.yggdrasil-status)
             sh -n "$file"
             busybox ash -n "$file"
             if [ "${SKIP_SHELLCHECK:-0}" != 1 ]; then shellcheck -s sh "$file"; fi ;;

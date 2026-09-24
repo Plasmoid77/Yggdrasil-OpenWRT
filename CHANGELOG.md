@@ -1,5 +1,19 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## Client DNS - one systemd-resolved drop-in instead of the per-link helper (Deployer 2.5.2)
+
+- `client/linux/yggdrasil-split-dns` and its `yggdrasil.service` drop-in set
+  the router's zone on the `ygg0` link. AmneziaVPN 4.8.19 snapshots the links'
+  DNS settings when it connects and restores the snapshot (restarting
+  systemd-resolved) when it reconnects after a network change, so a zone
+  changed later was put back to the old one (seen on the laptop: `~spb.internal`
+  replaced by `~home.arpa`). Replaced by `client/linux/yggdrasil-zones.conf`,
+  a global drop-in (`DNS=` router address or 127.0.0.2, `Domains=~zone`):
+  names kept resolving through Amnezia reconnects and network switches.
+  Trade-off (documented): with no `~.` link other names also reach the router.
+- Deployer 2.5.2: the closing summary names the new file.
+- Upgrade steps for the old helper are in installation section 6.
+
 ## Deployer 2.5.1 - the peer hook only wakes peers, it never removes one
 
 - 2.5.0 re-added down peers with `removepeer` + `addpeer`, deciding from one

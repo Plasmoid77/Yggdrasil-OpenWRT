@@ -497,8 +497,11 @@ dig +tcp +short AAAA mydevice.home.arpa @<ROUTER_YGG_IPV6>
 
 ## 6. Optional Linux split DNS
 
-Only the routers' zones (`home.arpa` by default) should use OpenWrt DNS.
-Internet DNS must remain on the normal Wi-Fi/Ethernet or VPN resolver.
+The routers' zones (`--dns-domain`, `home.arpa` by default) go to the routers
+over Yggdrasil; every other name keeps the client's normal resolver. The
+tested client uses systemd-resolved (v261), with `/etc/resolv.conf` pointing
+at its stub. Preserve the current `/etc/resolv.conf` and check the network
+manager before changing it on a differently managed distribution.
 
 Clone this repository on the Linux client:
 
@@ -507,68 +510,54 @@ git clone https://github.com/Plasmoid77/Yggdrasil-OpenWRT.git
 cd Yggdrasil-OpenWRT
 ```
 
-Set Yggdrasil's interface name in `/etc/yggdrasil.conf`, and do not create a
-persistent NetworkManager TUN profile:
-
-```yaml
-IfName: ygg0
-```
-
-This changes the Linux client's resolver integration. Preserve its current
-`/etc/resolv.conf` and verify compatibility with its existing network manager;
-do not apply the symlink change blindly on a differently managed distribution.
-The tested integration is for a client using systemd-resolved.
-
-Install the supplied lifecycle integration:
+One router: its node address and its zone in a systemd-resolved drop-in.
 
 ```sh
 sudo systemctl enable --now systemd-resolved
 sudo ln -sfn /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
 
-sudo install -D -m 0755 client/linux/yggdrasil-split-dns \
-  /usr/local/libexec/yggdrasil-split-dns
-ROUTER_YGG_IPV6='<ACTUAL_ROUTER_YGG_IPV6>'
-sudo sed -i "s|<ROUTER_YGG_IPV6>|$ROUTER_YGG_IPV6|" \
-  /usr/local/libexec/yggdrasil-split-dns
-
-sudo install -D -m 0644 client/linux/yggdrasil.service.d/split-dns.conf \
-  /etc/systemd/system/yggdrasil.service.d/split-dns.conf
-sudo systemctl daemon-reload
-sudo systemctl restart yggdrasil
+sudo install -D -m 0644 client/linux/yggdrasil-zones.conf /etc/systemd/resolved.conf.d/yggdrasil.conf
+sudoedit /etc/systemd/resolved.conf.d/yggdrasil.conf    # DNS=<router Ygg address>, Domains=~<zone>
+sudo systemctl restart systemd-resolved
 ```
 
 Verify routing, not only the returned addresses:
 
 ```sh
-resolvectl status ygg0
+resolvectl status | sed -n '/^Global/,/^Link/p'
 resolvectl query router.home.arpa
 resolvectl query openai.com
 ```
 
-Expected:
+Expected: the router's names answered with its Yggdrasil addresses, other
+names through the normal Wi-Fi/Ethernet link (or the VPN's).
 
-```text
-router.home.arpa -> link: ygg0
-openai.com       -> normal Wi-Fi/Ethernet link (or the VPN's)
-ygg0             -> DNS Domain: ~home.arpa, Default Route: no
-```
+Why global and not on the `ygg0` link: AmneziaVPN (4.8.19 checked) snapshots
+the links' DNS settings when it connects and restores that snapshot, with a
+restart of systemd-resolved, when it reconnects after a network change. A
+zone set on `ygg0` later was put back to the old one. It leaves the global
+settings alone. The cost: when no link claims `~.` (no VPN), a name outside
+every routing domain is also sent to the global server; the router resolves
+it like any resolver and the first successful answer wins. With the VPN up
+(`~.` on its link) only the zones reach the router.
 
-A router with another zone (`--dns-domain spb.internal`): set
-`zones='internal'` (or `'home.arpa internal'`) in
-`/usr/local/libexec/yggdrasil-split-dns`. systemd-resolved (v261 checked)
-keeps `home.arpa` and `internal` out of DNSSEC validation by itself. A VPN
-client that sets its DNS through systemd-resolved (AmneziaVPN does, `~.` on
-its own link) does not interfere: the more specific zone on `ygg0` wins.
+`home.arpa` and `internal` are built-in DNSSEC negative trust anchors in
+systemd-resolved (v261 checked), so `--dns-domain spb.internal` needs nothing
+extra. The router's node address follows its node key: update `DNS=` after a
+key change.
+
+Upgrading from the earlier per-link helper: `sudo rm
+/etc/systemd/system/yggdrasil.service.d/split-dns.conf
+/usr/local/libexec/yggdrasil-split-dns && sudo systemctl daemon-reload &&
+sudo resolvectl revert ygg0`.
 
 ### Several routers: a local dnsmasq
 
-systemd-resolved sends a link's queries to that link's current server; it
-cannot send one zone to one server and another zone to another server on the
-same link (`ygg0`). A router asked for a zone that is not its own answers
-NXDOMAIN, and resolved does not try the next server. Each router answers only
-its own zone (no forwarding between routers, so none depends on another);
-the per-zone choice is made on the client by a dnsmasq that forwards only
-those zones:
+The DNS servers of one systemd-resolved scope (here the global one) are
+alternatives tried in turn, not a per-zone choice: a router asked for another
+router's zone answers NXDOMAIN, and that answer is final. Each router answers only its own zone (no forwarding between routers,
+so none depends on another); the per-zone choice is made on the client by a
+dnsmasq that forwards only those zones:
 
 ```sh
 sudo install -D -m 0644 client/linux/dnsmasq-ygg-zones.conf /etc/dnsmasq.d/ygg-zones.conf
@@ -577,18 +566,17 @@ grep -q '^conf-dir=/etc/dnsmasq.d/,\*.conf' /etc/dnsmasq.conf \
   || echo 'conf-dir=/etc/dnsmasq.d/,*.conf' | sudo tee -a /etc/dnsmasq.conf
 sudo systemctl enable dnsmasq
 sudo systemctl restart dnsmasq               # also after every later edit: it rereads its config only on restart
-sudo sed -i "s|^router_dns=.*|router_dns='127.0.0.2'|; s|^zones=.*|zones='home.arpa internal'|" \
-  /usr/local/libexec/yggdrasil-split-dns
-sudo /usr/local/libexec/yggdrasil-split-dns apply
+sudoedit /etc/systemd/resolved.conf.d/yggdrasil.conf   # DNS=127.0.0.2, Domains=~spb.internal ~blg.internal
+sudo systemctl restart systemd-resolved
 ```
 
-It listens on 127.0.0.2 only (`bind-interfaces`), next to systemd-resolved's
-127.0.0.53 and any libvirt instance, and has no upstream: names outside the
-zones are never sent to it. A router that is unreachable only makes its own
-zone time out. Checked on a laptop with systemd 261, dnsmasq 2.93 and
-AmneziaVPN up: `home.arpa` answered by the SPb router through the local
-dnsmasq, an unreachable second zone timing out alone, `example.com` through
-the VPN.
+dnsmasq listens on 127.0.0.2 only (`bind-interfaces`), next to
+systemd-resolved's 127.0.0.53 and any libvirt instance, and has no upstream:
+a name outside the zones gets REFUSED there and is answered by the normal
+resolver. A router that is unreachable only makes its own zone time out.
+Checked on a laptop with systemd 261, dnsmasq 2.93 and AmneziaVPN up: the
+SPb router's zone through the local dnsmasq, an unreachable second zone timing
+out alone, internet names through the VPN.
 
 ## Final verification
 
