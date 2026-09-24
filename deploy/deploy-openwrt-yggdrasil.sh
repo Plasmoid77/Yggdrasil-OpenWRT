@@ -16,7 +16,7 @@
 set -u
 umask 077
 
-VERSION='2.4.0'
+VERSION='2.5.0'
 SELF="${0##*/}"
 # Piped straight from a URL — wget -qO- ... | sh -s -- ... — $0 is the shell, so
 # the banner and the usage text would announce themselves as "sh".
@@ -223,20 +223,6 @@ add_peer() {
     esac
     PEERS="${PEERS}${PEERS:+
 }$_p"
-}
-
-# Yggdrasil doubles the pause between reconnection attempts after each failure,
-# up to 1h8m by default, so peers lost during an uplink outage could come back
-# long after the uplink did (15 minutes after an LTE modem was replugged).
-# Its own per-peer 'maxbackoff' option caps the pause; the deployer sets it
-# unless the URI already carries one.
-PEER_MAXBACKOFF='1m'
-peer_with_maxbackoff() {
-    case "$1" in
-        *'?maxbackoff='*|*'&maxbackoff='*) printf '%s\n' "$1" ;;
-        *'?'*) printf '%s&maxbackoff=%s\n' "$1" "$PEER_MAXBACKOFF" ;;
-        *)     printf '%s?maxbackoff=%s\n' "$1" "$PEER_MAXBACKOFF" ;;
-    esac
 }
 
 add_trusted() {
@@ -1072,6 +1058,66 @@ install_hotplug_guard() {
     ok "hotplug guard written: $HOTPLUG_FILE"
 }
 
+# Yggdrasil waits longer and longer between attempts to reach a peer it cannot
+# connect to (doubling up to 1h8m), and it cannot tell that the uplink is back:
+# after an LTE outage the public peers returned 15 minutes after the uplink.
+# The defaults stay; instead a hotplug script reacts to the event. When any
+# other interface comes up, it re-adds (removepeer + addpeer through the admin
+# socket) the configured peers that are not up, which restarts their attempts
+# at once. Established peers are left alone.
+PEER_HOOK='/etc/hotplug.d/iface/70-yggdrasil-peers'
+
+peer_hook_text() {
+    sed -e "s|@IFACE@|$IFACE|g" -e "s|@LAN@|$LAN|g" <<'EOF'
+#!/bin/sh
+# Written by Yggdrasil-OpenWRT (deploy-openwrt-yggdrasil.sh). When an uplink
+# comes up, retry at once the '@IFACE@' peers that are not up, instead of
+# waiting out Yggdrasil's growing pause between attempts.
+[ "$ACTION" = ifup ] || exit 0
+case "$INTERFACE" in '@IFACE@'|'@LAN@'|loopback) exit 0 ;; esac
+sock='unix:///tmp/yggdrasil/@IFACE@.sock'
+[ -S '/tmp/yggdrasil/@IFACE@.sock' ] || exit 0
+(
+	# one run at a time; let routes and DNS settle first
+	exec 9>>/var/lock/yggdrasil-peers.lock
+	flock -n 9 || exit 0
+	sleep 5
+	up="$(yggdrasilctl -json -endpoint="$sock" getpeers 2>/dev/null |
+		jsonfilter -e '@.peers[@.up=true].remote' 2>/dev/null)"
+	. /lib/functions.sh
+	retry() {
+		local uri iface
+		config_get uri "$1" address
+		config_get iface "$1" interface
+		[ -n "$uri" ] && [ -z "$iface" ] || return 0
+		printf '%s\n' "$up" | grep -qxF "${uri%%\?*}" && return 0
+		yggdrasilctl -endpoint="$sock" removepeer uri="$uri" >/dev/null 2>&1
+		yggdrasilctl -endpoint="$sock" addpeer uri="$uri" >/dev/null 2>&1 &&
+			logger -t yggdrasil-peers "$INTERFACE up: retrying peer $uri now"
+	}
+	config_load network
+	config_foreach retry 'yggdrasil_@IFACE@_peer'
+) </dev/null >/dev/null 2>&1 &
+EOF
+}
+
+install_peer_hook() {
+    FAILED_STAGE='peer hook'
+    if [ "$DRY_RUN" -eq 1 ]; then
+        info "would write $PEER_HOOK (retry peers that are down when an uplink comes up)"
+        return 0
+    fi
+    if [ -f "$PEER_HOOK" ] && [ "$(cat "$PEER_HOOK")" = "$(peer_hook_text)" ]; then
+        ok "peer hook already in place: $PEER_HOOK"
+        return 0
+    fi
+    mkdir -p "$(dirname "$PEER_HOOK")"
+    peer_hook_text > "$PEER_HOOK" || die "cannot write $PEER_HOOK"
+    chmod 644 "$PEER_HOOK"
+    sh -n "$PEER_HOOK" || die "$PEER_HOOK does not parse"
+    ok "peer hook written: $PEER_HOOK"
+}
+
 # ================================================ stage 2: yggdrasil interface
 
 gen_private_key() {
@@ -1176,7 +1222,6 @@ stage_yggdrasil() {
     _added=0
     printf '%s\n' "$PEERS" | while IFS= read -r _p; do
         [ -n "$_p" ] || continue
-        _p="$(peer_with_maxbackoff "$_p")"
         if printf '%s\n' "$_existing_peers" | grep -qxF "$_p"; then
             info "peer already present, skipping: $_p"
             continue
@@ -2151,6 +2196,7 @@ stage_verify() {
     printf '\nInvariants:\n' >&2
     check "$IFACE up"          'true'     "$(ifstatus "$IFACE" 2>/dev/null | jsonfilter -e '@.up' 2>/dev/null)"
     check 'node address'       "$NODE_ADDR" "$(get_node_addr)"
+    check 'peer retry hook'    'yes' "$([ -f "$PEER_HOOK" ] && echo yes || echo no)"
 
     if [ "$DO_LAN" -eq 1 ]; then
         # What this run wrote or requires: asserted.
@@ -2331,6 +2377,7 @@ prompt_trusted
 stage_preflight
 stage_packages
 install_hotplug_guard
+install_peer_hook
 stage_yggdrasil
 stage_wait
 stage_lan

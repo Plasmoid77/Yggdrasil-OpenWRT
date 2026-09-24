@@ -1,5 +1,21 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## Deployer 2.5.0 - down peers are retried when an uplink comes up
+
+- Replaces 2.4.0's `maxbackoff=1m`: Yggdrasil's own reconnection pauses stay
+  at their defaults. The cause was not the pause but that Yggdrasil cannot
+  tell the uplink is back. `/etc/hotplug.d/iface/70-yggdrasil-peers` reacts to
+  the event: on every `ifup` of an interface other than the Ygg interface,
+  the LAN and loopback, it re-adds (`removepeer` + `addpeer` through the admin
+  socket) each configured peer that is not up, which starts its attempts at
+  once. Established peers and interface-bound peers are left alone.
+- A rerun writes the peers as given, so the `?maxbackoff=1m` that 2.4.0 added
+  goes away.
+- `stage_verify` checks that the hook is in place.
+- Verified on the SPb router: all four public peers blocked for 4.5 minutes
+  (Yggdrasil's pause had grown to ~4 minutes), block lifted and an `ifup`
+  event raised with `hotplug-call`: all four back within 7 s.
+
 ## Deployer 2.4.0 - public peers come back within a minute of the uplink
 
 - Yggdrasil doubles the pause between reconnection attempts after every

@@ -35,6 +35,8 @@ sh tests/deploy-hotplug-guard.sh
 busybox ash tests/deploy-hotplug-guard.sh
 sh tests/deploy-dns-names.sh
 busybox ash tests/deploy-dns-names.sh
+sh tests/deploy-peer-hook.sh
+busybox ash tests/deploy-peer-hook.sh
 sh tests/status-inventory.sh
 busybox ash tests/status-inventory.sh
 sh tests/status-download.sh
