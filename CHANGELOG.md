@@ -1,5 +1,31 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## Deployer 2.3.0 - DNS names follow the node key; a zone per router
+
+- The router's names are no longer static UCI `config domain` records, which
+  kept the addresses of the key the deployer ran with: a key changed later in
+  LuCI or with uci left `router.<zone>` and every `--host` name on the old
+  addresses. `/etc/yggdrasil-openwrt/dns-hosts` now writes them into
+  dnsmasq's hosts directory (`/tmp/hosts/yggdrasil-<iface>`, where odhcpd keeps
+  its lease names) from the node's current address and routed /64, and sends
+  dnsmasq SIGHUP. `/etc/hotplug.d/iface/60-yggdrasil-dns` runs it on every
+  ifup, ifupdate and ifdown of the Ygg interface. Nothing is written to flash
+  at run time. A rerun drops the old `ygg_dns_*`/`ygg_rsv_*` records.
+- `--dns-domain` sets this router's zone: `home.arpa` (default), one per site
+  such as `spb.home.arpa`, or a name under `.internal`; anything else is
+  accepted with a warning. Names are validated (LDH labels, at least two in
+  the zone, no clash between `--dns-router`, `--dns-host` and `--host`). On a
+  zone change the previous zone stops being answered locally; `home.arpa`
+  always stays local. Routers do not forward each other's zones.
+- Fixed: `lower_str` used `tr '[:upper:]' '[:lower:]'`, which the router's
+  BusyBox `tr` does not support ("router" became "rolter").
+- Verified on the SPb router: migration from the static records, a key change
+  with uci (names moved within 15 s), ifdown (names gone), zone change to
+  `spb.home.arpa` and back, and a reboot (names present at boot).
+- A Linux client's split DNS still names the router's node address: update
+  it after a key change. `client/linux/yggdrasil-split-dns` takes the zone as
+  a variable now.
+
 ## Status 6.5 - DNS column in the deployer's zone
 
 - The DNS suffix is the deployer's zone (`/etc/yggdrasil-openwrt/dns.conf`),

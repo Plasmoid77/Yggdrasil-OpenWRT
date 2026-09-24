@@ -2,7 +2,10 @@
 set -eu
 
 interface='ygg0'
+# The router's Yggdrasil node address and its zone (--dns-domain). The address
+# follows the router's node key: after a key change, update it here.
 router_dns='<ROUTER_YGG_IPV6>'
+zone='home.arpa'
 
 case "${1:-}" in
   apply)
@@ -14,7 +17,7 @@ case "${1:-}" in
     done
 
     /usr/bin/resolvectl dns "$interface" "$router_dns"
-    /usr/bin/resolvectl domain "$interface" '~home.arpa'
+    /usr/bin/resolvectl domain "$interface" "~$zone"
     /usr/bin/resolvectl default-route "$interface" no
     ;;
   revert)

@@ -10,7 +10,7 @@ context, not an instruction to restore an abandoned approach.
 ```text
 Core:    Yggdrasil -> netifd delegated /64 -> LAN -> odhcpd RA/SLAAC
 Status:  DHCP leases + config host -> MAC identity -> NDP/canonical IPv6 -> RPC -> LuCI
-DNS:     config domain -> dnsmasq -> optional trusted remote port 53 -> split DNS
+DNS:     ygg0 address/prefix -> generated /tmp/hosts file (+ config domain) -> dnsmasq -> trusted port 53 -> split DNS
 ```
 
 Core routing does not depend on status, DNS or Jumper. Status does not require
@@ -158,6 +158,7 @@ operator's LAN settings are reported, never asserted; leases are information
 | Kernel `ip -6 neigh` | Observed IPv6 enrichment matched by MAC; ties a bound DHCPv6 lease to a MAC when no `config host` or DUID does | Runtime only; never creates persistence or extends row lifetime; never an authorisation |
 | Established Yggdrasil peer link | Native node address of a LAN device running its own daemon | Remembered for exactly the lifetime of the row it belongs to, in that row's own storage class; never creates a row or extends one |
 | `config domain` | Optional canonical IPv6 and DNS name | Persistent metadata for an existing persistent identity |
+| `/tmp/hosts/yggdrasil-<iface>` (deployer 2.3+) | Generated names `<router>.<zone>`, `<--host>.<zone>`, `<--dns-host>.<zone>` with the node's current addresses; canonical IPv6 for a matching persistent identity after operator `config domain` records | Rebuilt by a hotplug hook on every ifup/ifupdate/ifdown of the Ygg interface; follows a node key changed by hand; tmpfs only |
 | Recent reachability / active probes | Online/Offline | A presence result, independent of identity lifetime |
 
 Merge by normalized MAC, not IP. Emit each MAC once. For a matching persistent
@@ -622,8 +623,10 @@ config rule
 | Remembered routed addresses discarded on a prefix change | A routed address is only meaningful under the prefix it was formed from; showing one from a retired prefix is worse than showing nothing |
 | MAC-centric identity | Changing IP/privacy addresses do not create separate device identities; randomized MACs still do |
 | NDP enrichment, not `getHostHints` authority | Neighbor churn must not erase persistent identities or preserve expired guests |
-| Native `config domain` | Shared canonical address/DNS metadata without custom `option ygg_ipv6`, a new UCI inventory file, generated hosts file or resolver |
+| Native `config domain` | Shared canonical address/DNS metadata for operator records without custom `option ygg_ipv6`, a new UCI inventory file or resolver (the deployer's own key-derived names are generated since 2.3, below) |
 | `home.arpa` rather than `.lan` | RFC 8375 reserves a locally served home namespace |
+| Generated names, not static records (2.3) | The router's names derive from the node key (node address, routed /64 + `hostid`). Static `config domain` records kept the addresses of the key the deployer ran with; a key changed in LuCI left them stale. `/etc/yggdrasil-openwrt/dns-hosts` writes them into dnsmasq's hosts directory (as odhcpd does for its leases) and sends SIGHUP; a hook on the Ygg interface runs it. Nothing is written to flash at run time |
+| One zone per router, no forwarding between routers | `--dns-domain` (default `home.arpa`; per site e.g. `spb.home.arpa`, or a name under `.internal`) is answered locally, and `home.arpa` always stays local. Routers do not forward each other's zones, so none depends on another; a client that needs several routers' zones needs a resolver of its own that routes each zone to its router |
 | On-page RPC polling | Operational dashboard, not permanent monitoring or traffic accounting |
 | Stable-first selection | Stop displaying/probing historical privacy addresses when a canonical or observed EUI-64 exists; preserve privacy-only behavior |
 | Explicit trusted sources | Route existence is separate from authorization; no unsolicited inbound reaches the LAN beyond the named /128s |
@@ -646,8 +649,8 @@ unrelated client changes outside the OpenWrt core.
 ## Limitations and scope
 
 There is one logical status LAN (`LAN_NET='lan'`, device from UCI, fallback
-`br-lan`) and a fixed status DNS suffix `home.arpa`. Deployer `--lan` and
-`--dns-domain` do not automatically reconfigure these backend constants.
+`br-lan`). Deployer `--lan` does not reconfigure it. The status DNS suffix is
+the deployer's zone (`/etc/yggdrasil-openwrt/dns.conf`), `home.arpa` without it.
 Multi-LAN/VLAN, multiple Ygg interfaces or several delegated prefixes need an
 explicit selection/lifetime policy, not an unreviewed loop over interfaces.
 

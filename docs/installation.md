@@ -137,9 +137,15 @@ Read [startup precautions and recovery](operations.md#startup-precautions)
 for the recorded rare pending-interface race, Wi-Fi bootstrap and detached
 execution. Do not assume every SSH path survives the restart.
 
-One run covers all three parts, section 5 included: it writes
-`router.home.arpa` for the router, `--dns-host NAME=ADDR` for anything else, and
-opens port 53 to the trusted addresses only. `--no-dns` skips that part, the way
+One run covers all three parts, section 5 included: it publishes
+`router.<zone>` for the router, `<name>.<zone>` for every `--host` reservation
+and `--dns-host NAME=ADDR` for anything else, and opens port 53 to the trusted
+addresses only. The zone is `--dns-domain` (default `home.arpa`; one per site,
+e.g. `spb.home.arpa`, or a name under `.internal`). The names are generated
+from the node's current address and routed /64 into `/tmp/hosts` on every
+ifup of the Ygg interface, so they follow a node key changed later in LuCI; a
+Linux client's split DNS still names the router's address and needs updating
+after such a change. `--no-dns` skips that part, the way
 `--no-lan`, `--no-firewall` and `--no-status` skip theirs. Only the client side
 of section 6 stays manual — the script runs on the router and cannot reach the
 client.
