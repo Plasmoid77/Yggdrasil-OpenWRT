@@ -37,7 +37,7 @@ package installation. Do not run it merely to update documentation or LuCI.
 | Core | Routed Ygg `/64` overlaid on the LAN's own IPv6, DHCPv6 reservations, trusted-source firewall policy, LAN-to-Yggdrasil egress | [Standalone router deployer](deploy/deploy-openwrt-yggdrasil.sh) |
 | Status | DHCP-lifetime inventory, persistent pins and safe Pin/Unpin | [LuCI/rpcd source](source/yggdrasil-status/) |
 | DNS | Optional names and trusted DNS access over Ygg | Native dnsmasq configuration in the deployer |
-| Linux client | Route the router's zone to it (systemd-resolved; a local dnsmasq for several routers) | [resolved drop-in and dnsmasq example](client/linux/) |
+| Linux client | Route only `home.arpa` to the router | [Client helper and systemd drop-in](client/linux/) |
 
 Core routing works without status or DNS. The automated **default** deploy
 includes both; `--no-status` and `--no-dns` opt out. Architectural optionality

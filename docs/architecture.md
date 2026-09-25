@@ -640,13 +640,10 @@ config rule
 | Restart netifd after new proto packages | Reload alone did not register the new handler in the recorded hardware test |
 | `list server '/home.arpa/'` | Avoid the observed invalid joined dnsmasq `list local` output |
 
-DNS names do not require replacing client-wide DNS. The Linux reference is a
-systemd-resolved drop-in with the router's address and its zone as a global
-route-only domain (`client/linux/yggdrasil-zones.conf`): a per-link setting on
-`ygg0` was undone by AmneziaVPN, which restores the links' DNS state after a
-reconnect. With no `~.` link (no VPN) other names also reach the router, which
-resolves them. Several routers: a local dnsmasq forwards each zone to its
-router. Resolver order in resolv.conf is failover, not suffix routing. A persistent NetworkManager TUN profile may
+DNS names do not require replacing client-wide DNS. The Linux reference uses
+systemd-resolved route-only `~home.arpa` with a fixed Ygg `IfName: ygg0` and a
+service drop-in after the interface exists. Resolver order in resolv.conf is
+failover, not suffix routing. A persistent NetworkManager TUN profile may
 occupy the desired TUN before Yggdrasil. Keep Android's normal DNS stack and
 unrelated client changes outside the OpenWrt core.
 

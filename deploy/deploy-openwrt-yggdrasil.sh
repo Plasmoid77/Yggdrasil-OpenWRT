@@ -16,7 +16,7 @@
 set -u
 umask 077
 
-VERSION='2.5.2'
+VERSION='2.5.3'
 SELF="${0##*/}"
 # Piped straight from a URL — wget -qO- ... | sh -s -- ... — $0 is the shell, so
 # the banner and the usage text would announce themselves as "sh".
@@ -2359,7 +2359,7 @@ HOSTS_EOF
         printf '  resolver for %s at the address above. That is suffix\n' "$DNS_DOMAIN" >&2
         printf '  routing, not a second entry in resolv.conf: resolver order\n' >&2
         printf '  is failover, which is not the same thing.\n' >&2
-        printf '  client/linux/yggdrasil-zones.conf does it for systemd-resolved.\n' >&2
+        printf '  client/linux/yggdrasil-split-dns does it for systemd-resolved.\n' >&2
         printf '  Then: %shttp://%s.%s/%s\n' \
             "$C_BLD" "$DNS_ROUTER" "$DNS_DOMAIN" "$C_RST" >&2
     fi

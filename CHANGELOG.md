@@ -1,5 +1,19 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## Client DNS - back to the per-link helper (Deployer 2.5.3)
+
+- The global drop-in of 2.5.2 is withdrawn: a global systemd-resolved server
+  also receives every name outside the routing domains when no link claims
+  `~.` (no VPN), so all DNS would depend on the router. The owner's rule: only
+  the routers' zones go to the routers.
+- Back to `client/linux/yggdrasil-split-dns` (zones on `ygg0`, not a default
+  route). The AmneziaVPN problem was a zone changed while it was connected:
+  it restores the link domains it saw at connect time. Tested on the laptop:
+  with the zone applied while the VPN was down and then connected, two
+  disconnect/connect cycles kept `~spb.internal`. Section 6 says to change the
+  zone with the VPN disconnected.
+- Deployer 2.5.3 names the helper again in its closing summary.
+
 ## Client DNS - one systemd-resolved drop-in instead of the per-link helper (Deployer 2.5.2)
 
 - `client/linux/yggdrasil-split-dns` and its `yggdrasil.service` drop-in set
