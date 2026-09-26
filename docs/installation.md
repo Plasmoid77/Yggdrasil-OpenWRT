@@ -564,8 +564,9 @@ its own link) does not interfere: the more specific zone on `ygg0` wins. But
 AmneziaVPN (4.8.19 checked) snapshots the links' routing domains when it
 connects and restores that snapshot when it disconnects or reconnects. Change
 `zones` or `router_dns` with the VPN disconnected: disconnect, run
-`sudo /usr/local/libexec/yggdrasil-split-dns apply`, connect. Changed while it
-is connected, the old zone comes back at its next reconnect. (A global
+`sudo /usr/local/libexec/yggdrasil-split-dns apply`, check `resolvectl domain
+ygg0`, then connect. Changed while it is connected (or connected again before
+the apply finished), the old zone comes back at its next reconnect. (A global
 `resolved.conf` setting would be immune, but a global server also receives
 every name outside the routing domains when no VPN claims `~.`, which makes
 all DNS depend on the router.)
