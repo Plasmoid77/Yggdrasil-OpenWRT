@@ -37,6 +37,8 @@ sh tests/deploy-dns-names.sh
 busybox ash tests/deploy-dns-names.sh
 sh tests/deploy-peer-hook.sh
 busybox ash tests/deploy-peer-hook.sh
+sh tests/deploy-keep-edge.sh
+busybox ash tests/deploy-keep-edge.sh
 sh tests/status-inventory.sh
 busybox ash tests/status-inventory.sh
 sh tests/status-download.sh

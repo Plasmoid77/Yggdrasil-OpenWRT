@@ -1,5 +1,25 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## Deployer 2.6.0 - own files survive a sysupgrade; `--ygg-edge`
+
+- Every run lists the deployer's own files outside `/etc/config` in
+  `/etc/sysupgrade.conf`: the hotplug guard, the peer hook and, with the DNS
+  module, the names' hook and `/etc/yggdrasil-openwrt`. Before, a sysupgrade
+  kept the configuration but dropped them. `stage_verify` checks the list.
+- `--ygg-edge` (flag `ygg-edge`) installs the newest Yggdrasil build from this
+  project's releases instead of the feed's; `--ygg-pkg PATH` (`[ygg-pkg]`) the
+  same from a local file. SHA-256 checked, `apk add --allow-untrusted`, the
+  node restarted onto the new binary when the binary changed (compared by
+  hash: a new package revision can report the same version). A failed
+  attempt leaves nothing in /tmp. Default unchanged: the feed's Yggdrasil.
+  Reviewed by Astra (the hash comparison and the cleanup came from it).
+- Fixed: the peer check and the closing peer list parsed `yggdrasilctl
+  getPeers`'s table, which 0.5.14 draws with box characters ("no established
+  peer links" although all were up). Both read the JSON now.
+- Verified on the SPb router: 0.5.14 fetched from the release and verified,
+  the four paths in `sysupgrade -l`, a rerun adds nothing, 27/27 checks; a
+  package with a wrong checksum refused with nothing installed or left behind.
+
 ## Client DNS - back to the per-link helper (Deployer 2.5.3)
 
 - The global drop-in of 2.5.2 is withdrawn: a global systemd-resolved server

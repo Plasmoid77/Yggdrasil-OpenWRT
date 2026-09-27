@@ -106,6 +106,8 @@ bmc=duid:<HEX>%<IAID>=21  # by DUID (and IAID) alone
 v5.4
 [status-pkg]            # as --status-pkg
 /root/yggdrasil-status.tar.gz
+[ygg-pkg]               # as --ygg-pkg (or the flag ygg-edge below)
+/root/yggdrasil-0.5.14-r1_aarch64_cortex-a53.apk
 
 [flags]                 # the switches, one per line
 no-jumper
@@ -212,6 +214,31 @@ is attached only to that one fixed lookup and never to a release download, which
 redirects to a different host. The token reaches `wget` as a process argument
 and is visible in `/proc/<pid>/cmdline` while the request runs, so use it on CI
 or a single-user host rather than a shared router.
+
+### Yggdrasil version: the feed's or this project's build
+
+By default Yggdrasil comes from the OpenWrt package feed (25.12: 0.5.12).
+`--ygg-edge` installs the newest build published in this project's releases
+instead (`yggdrasil-*` tags, one `.apk` per package architecture, built with the
+official OpenWrt SDK, see each release's notes): it picks the newest asset for
+the router's `DISTRIB_ARCH`, checks it against the `.sha256` published beside it
+and installs it with `apk add --allow-untrusted`, since the build key is not one
+the router knows. The checksum carries the same limit as the status module's:
+it travels in the same release. `--ygg-pkg PATH` does the same from a local file
+(`PATH.sha256` required), for a router that cannot reach GitHub. A running node
+is restarted onto the new binary when the version changed. A later run without
+the switch keeps the installed build: apk does not downgrade to the feed's
+older version. Going back to the feed's build means asking apk for that
+version explicitly (not exercised here yet).
+
+### Surviving a sysupgrade
+
+`/etc/config` survives a sysupgrade; the deployer's own files elsewhere do not
+by themselves. Every run lists them in `/etc/sysupgrade.conf` (the hotplug
+guard, the peer hook, and with the DNS module `/etc/hotplug.d/iface/60-yggdrasil-dns`
+and `/etc/yggdrasil-openwrt`); `sysupgrade -l` shows them. Packages installed
+by hand are not carried into a new image: the status module and a
+`--ygg-edge` build come back with a rerun of the deployer.
 
 For offline or custom builds, use `--status-pkg PATH` and provide the generated
 single-entry `PATH.sha256` beside it. Both must be readable. Missing, malformed

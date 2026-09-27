@@ -16,7 +16,7 @@
 set -u
 umask 077
 
-VERSION='2.5.3'
+VERSION='2.6.0'
 SELF="${0##*/}"
 # Piped straight from a URL — wget -qO- ... | sh -s -- ... — $0 is the shell, so
 # the banner and the usage text would announce themselves as "sh".
@@ -71,6 +71,12 @@ STATUS_REPO='Plasmoid77/Yggdrasil-OpenWRT'
 STATUS_API="https://api.github.com/repos/$STATUS_REPO/releases/latest"
 STATUS_RELEASE_BASE="https://github.com/$STATUS_REPO/releases/download"
 STATUS_BASE=''
+# Yggdrasil comes from the OpenWrt feed by default. --ygg-edge installs the
+# newest build published in this project's releases instead (tags yggdrasil-*,
+# one .apk per architecture); --ygg-pkg the same from a local file.
+YGG_EDGE=0
+YGG_PKG=''
+YGG_RELEASES_API="https://api.github.com/repos/$STATUS_REPO/releases?per_page=30"
 PRIVATE_KEY_FILE=''
 CONFIG_KEY=''
 CONFIG_KEY_SRC=''
@@ -183,6 +189,10 @@ Scope:
   --status-pkg PATH     Install a local tarball; PATH.sha256 is required
   --status-version VER  Install this status release (e.g. v5.2) instead of the
                         newest published one
+  --ygg-edge            Install the newest Yggdrasil build from this project's
+                        releases (newer than the OpenWrt feed) instead of the
+                        feed's; checked against its published SHA-256
+  --ygg-pkg PATH        The same from a local .apk; PATH.sha256 is required
 
 Behaviour:
   -n, --dry-run         Print what would change; touch nothing
@@ -200,8 +210,9 @@ comment, blank lines are ignored. Unknown sections are an error. Sections:
   [dns-hosts]       NAME=ADDR lines            (as --dns-host)
   [hosts]           NAME=MAC=HOSTID lines etc. (as --host)
   [status-pkg] [status-version]                (as --status-pkg, --status-version)
+  [ygg-pkg]         a local Yggdrasil .apk     (as --ygg-pkg)
   [flags]           one per line: no-jumper no-multicast no-lan no-firewall
-                    no-status dns no-dns no-lan-forward
+                    no-status dns no-dns no-lan-forward ygg-edge
                                                (as the switches of the same name)
 Keep the file mode 600 when it holds the key. --dry-run, --yes and --wait
 describe the run, not the node, and stay on the command line.
@@ -436,7 +447,7 @@ read_config() {
                 _cf_section="${_cf_section%\]}"
                 _cf_section="$(printf '%s' "$_cf_section" | tr -d ' \t')"
                 case "$_cf_section" in
-                    peers|trusted|private-key|iface|lan|dns-domain|dns-router|dns-hosts|hosts|status-pkg|status-version|flags) : ;;
+                    peers|trusted|private-key|iface|lan|dns-domain|dns-router|dns-hosts|hosts|status-pkg|status-version|ygg-pkg|flags) : ;;
                     *) die "unknown section [$_cf_section] in $_cf" ;;
                 esac
                 continue ;;
@@ -451,6 +462,7 @@ read_config() {
             dns-domain)     DNS_DOMAIN="$_cf_line" ;;
             dns-router)     DNS_ROUTER="$_cf_line" ;;
             status-pkg)     STATUS_PKG="$_cf_line" ;;
+            ygg-pkg)        YGG_PKG="$_cf_line" ;;
             status-version)
                 status_valid_version "$_cf_line" || die "invalid status version '$_cf_line' in $_cf (expected vMAJOR.MINOR[.PATCH])"
                 STATUS_VERSION="$_cf_line" ;;
@@ -464,6 +476,7 @@ read_config() {
                     dns)          DO_DNS=1 ;;
                     no-dns)       DO_DNS=0 ;;
                     no-lan-forward) DO_LAN_FORWARD=0 ;;
+                    ygg-edge)     YGG_EDGE=1 ;;
                     dhcpv6|slaac) die "flag '$_cf_line' in [flags] of $_cf is from 1.x: 2.0 keeps the LAN's stock RA/DHCPv6 configuration — delete the line" ;;
                     *) die "unknown flag '$_cf_line' in [flags] of $_cf" ;;
                 esac ;;
@@ -514,6 +527,8 @@ while [ $# -gt 0 ]; do
             die "$_old is from 1.x: 2.0 keeps the LAN's stock RA/DHCPv6 configuration — drop the switch" ;;
         --host)        [ $# -ge 2 ] || die "--host needs a value";        add_host "$2";     shift 2 ;;
         --status-pkg)  [ $# -ge 2 ] || die "--status-pkg needs a value";  STATUS_PKG="$2";  shift 2 ;;
+        --ygg-pkg)     [ $# -ge 2 ] || die "--ygg-pkg needs a value";     YGG_PKG="$2";     shift 2 ;;
+        --ygg-edge)    YGG_EDGE=1;         shift ;;
         --status-version)
             [ $# -ge 2 ] || die "--status-version needs a value"
             status_valid_version "$2" || die "invalid status version '$2' (expected vMAJOR.MINOR[.PATCH])"
@@ -929,6 +944,86 @@ stage_preflight() {
 }
 
 # =========================================================== stage 1: packages
+
+# The newest Yggdrasil build for this router's architecture among this
+# project's releases: the first asset of the newest yggdrasil-* release named
+# yggdrasil-<version>_<arch>.apk. Only a URL of exactly that shape under this
+# repository's download path is accepted, so a release cannot steer the
+# download elsewhere.
+# The package architecture (aarch64_cortex-a53), not apk --print-arch (aarch64).
+pkg_arch() {
+    sed -n "s/^DISTRIB_ARCH='\([^']*\)'$/\1/p" /etc/openwrt_release 2>/dev/null
+}
+
+ygg_edge_url() {
+    yeu_arch="$(pkg_arch)"
+    [ -n "$yeu_arch" ] || return 1
+    yeu_auth=''
+    [ -n "${GITHUB_TOKEN:-}" ] && yeu_auth="Authorization: Bearer ${GITHUB_TOKEN}"
+    yeu_tmp="$(mktemp "${TMPDIR:-/tmp}/ygg-releases.XXXXXX")" || return 1
+    status_fetch "$YGG_RELEASES_API" "$yeu_tmp" "$yeu_auth" || { rm -f "$yeu_tmp"; return 1; }
+    for yeu_u in $(jsonfilter -i "$yeu_tmp" -e '@[*].assets[*].browser_download_url' 2>/dev/null); do
+        case "$yeu_u" in *[!A-Za-z0-9._/:+-]*) continue ;; esac
+        case "$yeu_u" in
+            "$STATUS_RELEASE_BASE"/yggdrasil-*/yggdrasil-*_"$yeu_arch".apk)
+                rm -f "$yeu_tmp"
+                printf '%s\n' "$yeu_u"
+                return 0 ;;
+        esac
+    done
+    rm -f "$yeu_tmp"
+    return 1
+}
+
+ygg_installed_version() {
+    yggdrasil -version 2>/dev/null | sed -n 's/^Build version: *//p'
+}
+
+# --ygg-edge / --ygg-pkg: replace the feed's yggdrasil with this project's own
+# build. It is signed with a throwaway OpenWrt SDK key, so apk is told
+# --allow-untrusted, but only after the bytes have matched the SHA-256 that is
+# published beside it (the same trust as the status module). A later run
+# without the switch keeps it: apk does not downgrade to the older feed version.
+# A running daemon keeps its old binary until its interface restarts.
+install_ygg_build() {
+    [ -n "$YGG_PKG" ] || [ "$YGG_EDGE" -eq 1 ] || return 0
+    FAILED_STAGE='Yggdrasil build'
+    if [ "$DRY_RUN" -eq 1 ]; then
+        info "would install this project's Yggdrasil build (${YGG_PKG:-newest release})"
+        return 0
+    fi
+    # the binary itself: a new package revision may report the same version
+    iyb_bin="$(command -v yggdrasil 2>/dev/null)"
+    iyb_old="$([ -n "$iyb_bin" ] && sha256sum "$iyb_bin" 2>/dev/null | cut -d' ' -f1)"
+    iyb_dir="$(mktemp -d "${TMPDIR:-/tmp}/ygg-build.XXXXXX")" || die "cannot create a temporary directory"
+    # /tmp is RAM: no downloaded package stays behind, whatever happens
+    iyb_fail() { rm -rf "$iyb_dir"; die "$@"; }
+    if [ -n "$YGG_PKG" ]; then
+        [ -r "$YGG_PKG" ] || iyb_fail "cannot read $YGG_PKG"
+        iyb_file="$iyb_dir/${YGG_PKG##*/}"
+        iyb_sum="$(status_expected_digest "$YGG_PKG.sha256")" || iyb_fail "--ygg-pkg needs $YGG_PKG.sha256"
+        cp "$YGG_PKG" "$iyb_file" || iyb_fail "cannot copy $YGG_PKG"
+    else
+        iyb_url="$(ygg_edge_url)" \
+            || iyb_fail "no Yggdrasil build for $(pkg_arch) in the $STATUS_REPO releases (or GitHub unreachable) - run without --ygg-edge, or copy the .apk and .sha256 here and use --ygg-pkg"
+        info "downloading $iyb_url"
+        iyb_file="$iyb_dir/${iyb_url##*/}"
+        if ! status_fetch "$iyb_url" "$iyb_file" || ! status_fetch "$iyb_url.sha256" "$iyb_file.sha256"; then
+            iyb_fail "download failed - copy the .apk and .sha256 here and use --ygg-pkg"
+        fi
+        iyb_sum="$(status_expected_digest "$iyb_file.sha256")" || iyb_fail "published checksum unusable"
+    fi
+    status_verify "$iyb_file" "$iyb_sum" || iyb_fail "Yggdrasil package not verified - nothing installed"
+    apk add --allow-untrusted "$iyb_file" >/dev/null 2>&1 || iyb_fail "apk could not install $iyb_file"
+    rm -rf "$iyb_dir"
+    iyb_new="$(sha256sum "$(command -v yggdrasil)" 2>/dev/null | cut -d' ' -f1)"
+    ok "yggdrasil $(ygg_installed_version) installed from this project's build"
+    if [ -n "$iyb_old" ] && [ "$iyb_old" != "$iyb_new" ] \
+        && [ "$(ifstatus "$IFACE" 2>/dev/null | jsonfilter -e '@.up' 2>/dev/null)" = true ]; then
+        ifup "$IFACE"
+        info "restarted '$IFACE' on the new binary"
+    fi
+}
 
 stage_packages() {
     FAILED_STAGE='packages'
@@ -1349,8 +1444,9 @@ stage_wait() {
     YGG_SOCK="unix:///tmp/yggdrasil/${IFACE}.sock"
     _up=0
     if have yggdrasilctl && [ -S "/tmp/yggdrasil/${IFACE}.sock" ]; then
-        _up="$(yggdrasilctl -endpoint="$YGG_SOCK" getPeers 2>/dev/null \
-               | awk 'NR>1 && $2=="Up"' | wc -l | tr -d ' ')"
+        # JSON, not the table: 0.5.14 draws the table with box characters
+        _up="$(yggdrasilctl -json -endpoint="$YGG_SOCK" getpeers 2>/dev/null \
+               | jsonfilter -e '@.peers[@.up=true].remote' 2>/dev/null | wc -l | tr -d ' ')"
         [ -z "$_up" ] && _up=0
     fi
     if [ "$_up" -gt 0 ]; then
@@ -2077,7 +2173,7 @@ status_verify() { # $1 = tarball, $2 = required SHA-256
     sv_result="$(sha256sum "$1" 2>/dev/null)" || { warn "cannot hash status package"; return 1; }
     sv_got="${sv_result%% *}"
     [ "$sv_expected" = "$sv_got" ] || {
-        warn "status module checksum mismatch - refusing to install"
+        warn "checksum mismatch - refusing to install"
         warn "  expected $sv_expected"
         warn "  got      $sv_got"
         return 1
@@ -2197,6 +2293,10 @@ stage_verify() {
     check "$IFACE up"          'true'     "$(ifstatus "$IFACE" 2>/dev/null | jsonfilter -e '@.up' 2>/dev/null)"
     check 'node address'       "$NODE_ADDR" "$(get_node_addr)"
     check 'peer retry hook'    'yes' "$([ -f "$PEER_HOOK" ] && echo yes || echo no)"
+    _kept='yes'
+    for _k in $(keep_list); do grep -qxF "$_k" "$SYSUPGRADE_CONF" 2>/dev/null || _kept="no ($_k)"; done
+    check 'kept by sysupgrade'  'yes' "$_kept"
+    info "yggdrasil $(ygg_installed_version)"
 
     if [ "$DO_LAN" -eq 1 ]; then
         # What this run wrote or requires: asserted.
@@ -2286,8 +2386,8 @@ HOSTS_EOF
 
     if [ -S "/tmp/yggdrasil/${IFACE}.sock" ]; then
         printf '\nPeers:\n' >&2
-        yggdrasilctl -endpoint="unix:///tmp/yggdrasil/${IFACE}.sock" getPeers 2>/dev/null \
-            | awk 'NR==1 || $2=="Up" {printf "  %s %s %s\n", $1, $2, $3}' >&2
+        yggdrasilctl -json -endpoint="unix:///tmp/yggdrasil/${IFACE}.sock" getpeers 2>/dev/null \
+            | jsonfilter -e '@.peers[@.up=true].remote' 2>/dev/null | sed 's/^/  Up  /' >&2
     fi
 
     printf '\nLAN state:\n' >&2
@@ -2368,6 +2468,34 @@ HOSTS_EOF
     printf '%s%s%s\n' "$C_OK" "$RULE" "$C_RST" >&2
 }
 
+# ============================================================ sysupgrade keep
+
+# /etc/config survives a sysupgrade; files of our own elsewhere in /etc do not,
+# unless they are listed in /etc/sysupgrade.conf (the place OpenWrt provides for
+# that; /lib/upgrade/keep.d belongs to packages). Without these lines a
+# sysupgrade, attended or manual, keeps the configuration but drops the hooks
+# and the DNS names' generator.
+SYSUPGRADE_CONF='/etc/sysupgrade.conf'
+
+keep_list() {
+    printf '%s\n' "$HOTPLUG_FILE" "$PEER_HOOK"
+    [ "$DO_DNS" -eq 1 ] && printf '%s\n' "$DNS_HOOK" "$DNS_DIR"
+    return 0
+}
+
+keep_on_sysupgrade() {
+    FAILED_STAGE='sysupgrade keep list'
+    for _k in $(keep_list); do
+        grep -qxF "$_k" "$SYSUPGRADE_CONF" 2>/dev/null && continue
+        if [ "$DRY_RUN" -eq 1 ]; then
+            info "would add $_k to $SYSUPGRADE_CONF"
+        else
+            printf '%s\n' "$_k" >> "$SYSUPGRADE_CONF" || die "cannot write $SYSUPGRADE_CONF"
+            info "kept on sysupgrade: $_k"
+        fi
+    done
+}
+
 # ------------------------------------------------------------------- main ---
 
 banner "$SELF $VERSION — routed Yggdrasil /64 for OpenWrt"
@@ -2376,6 +2504,7 @@ prompt_trusted
 
 stage_preflight
 stage_packages
+install_ygg_build
 install_hotplug_guard
 install_peer_hook
 stage_yggdrasil
@@ -2384,6 +2513,7 @@ stage_lan
 stage_firewall
 stage_dns
 stage_status
+keep_on_sysupgrade
 stage_verify
 
 exit "$RC_OK"
