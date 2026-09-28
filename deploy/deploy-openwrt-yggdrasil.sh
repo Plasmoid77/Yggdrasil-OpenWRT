@@ -2634,8 +2634,9 @@ restore_run() {
     [ -r "$RESTORE_CONF" ] || die "--restore needs $RESTORE_CONF (written by a full run)"
     IFACE="$(restore_conf_get iface)"; LAN="$(restore_conf_get lan)"
     DO_JUMPER="$(restore_conf_get jumper)"; DO_STATUS="$(restore_conf_get status)"
-    [ -n "$IFACE" ] && [ -n "$LAN" ] && [ -n "$DO_JUMPER" ] && [ -n "$DO_STATUS" ] \
-        || die "$RESTORE_CONF is incomplete"
+    if [ -z "$IFACE" ] || [ -z "$LAN" ] || [ -z "$DO_JUMPER" ] || [ -z "$DO_STATUS" ]; then
+        die "$RESTORE_CONF is incomplete"
+    fi
     step "Restore after a sysupgrade"
     stage_packages
     # an optional package the feed no longer has is dropped from the list, so
