@@ -1,5 +1,12 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## Status 6.5.1 - the installer names the version it installed
+
+- `install.sh` announced "Yggdrasil Status v5 installed" whatever it
+  installed (a string left from v5). It now takes the version from the
+  release archive's directory (`yggdrasil-status-<version>`) and prints none
+  when run from a checkout. No change to the page or the backend.
+
 ## Deployer 2.7.0 - packages come back by themselves after a sysupgrade
 
 - A sysupgrade keeps the configuration and (since 2.6) our hooks, but not

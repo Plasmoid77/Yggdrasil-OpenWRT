@@ -113,7 +113,10 @@ RESULT="$(ubus call luci.yggdrasil-status clients 2>/dev/null)" || rollback
 [ -n "$RESULT" ] || rollback
 
 printf '%s\n' '============================================================'
-printf '%s\n' ' Yggdrasil Status v5 installed'
+# a release archive unpacks into yggdrasil-status-<version>; a checkout has no version
+VERSION_LABEL="${BASE##*/yggdrasil-status-}"
+case "$VERSION_LABEL" in */*|'') VERSION_LABEL='' ;; *) VERSION_LABEL=" $VERSION_LABEL" ;; esac
+printf '%s\n' " Yggdrasil Status${VERSION_LABEL} installed"
 printf '%s\n' '============================================================'
 printf 'Backup: %s\n' "$BACKUP"
 printf '%s\n' ''
