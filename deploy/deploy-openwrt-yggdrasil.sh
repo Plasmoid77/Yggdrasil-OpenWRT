@@ -16,7 +16,7 @@
 set -u
 umask 077
 
-VERSION='2.6.0'
+VERSION='2.7.0'
 SELF="${0##*/}"
 # Piped straight from a URL — wget -qO- ... | sh -s -- ... — $0 is the shell, so
 # the banner and the usage text would announce themselves as "sh".
@@ -77,6 +77,8 @@ STATUS_BASE=''
 YGG_EDGE=0
 YGG_PKG=''
 YGG_RELEASES_API="https://api.github.com/repos/$STATUS_REPO/releases?per_page=30"
+DEPLOYER_URL="https://raw.githubusercontent.com/$STATUS_REPO/main/deploy/deploy-openwrt-yggdrasil.sh"
+RESTORE=0
 PRIVATE_KEY_FILE=''
 CONFIG_KEY=''
 CONFIG_KEY_SRC=''
@@ -193,6 +195,9 @@ Scope:
                         releases (newer than the OpenWrt feed) instead of the
                         feed's; checked against its published SHA-256
   --ygg-pkg PATH        The same from a local .apk; PATH.sha256 is required
+  --restore             Only put back what a sysupgrade removed (packages, this
+                        project's Yggdrasil build, the status module), as
+                        recorded by the last run; run by the restore hook
 
 Behaviour:
   -n, --dry-run         Print what would change; touch nothing
@@ -529,6 +534,7 @@ while [ $# -gt 0 ]; do
         --status-pkg)  [ $# -ge 2 ] || die "--status-pkg needs a value";  STATUS_PKG="$2";  shift 2 ;;
         --ygg-pkg)     [ $# -ge 2 ] || die "--ygg-pkg needs a value";     YGG_PKG="$2";     shift 2 ;;
         --ygg-edge)    YGG_EDGE=1;         shift ;;
+        --restore)     RESTORE=1; ASSUME_YES=1; shift ;;
         --status-version)
             [ $# -ge 2 ] || die "--status-version needs a value"
             status_valid_version "$2" || die "invalid status version '$2' (expected vMAJOR.MINOR[.PATCH])"
@@ -1046,6 +1052,8 @@ stage_packages() {
     fi
 
     info "installing:$_missing"
+    _had_proto=0
+    [ -f /lib/netifd/proto/yggdrasil.sh ] && _had_proto=1
     if [ "$DRY_RUN" -eq 1 ]; then
         printf '    would run: apk update\n' >&2
         printf '    would run: apk add%s\n' "$_missing" >&2
@@ -1083,7 +1091,9 @@ stage_packages() {
     # every interface for a few seconds, and doing it while nothing has been
     # written yet means a connection lost at that moment leaves the router exactly
     # as it was found, and re-running the script simply continues.
-    if [ -n "$_missing" ] && [ "$DRY_RUN" -eq 0 ]; then
+    # Only when the handler is new: an optional package that failed must not
+    # cost a restart on every attempt (the restore hook would loop on it).
+    if [ "$_had_proto" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
         info "restarting netifd so it picks up the freshly installed proto handler"
         info "  (interfaces drop for a few seconds; nothing has been changed yet)"
         /etc/init.d/network restart >/dev/null 2>&1 || die "network restart failed"
@@ -2478,8 +2488,8 @@ HOSTS_EOF
 SYSUPGRADE_CONF='/etc/sysupgrade.conf'
 
 keep_list() {
-    printf '%s\n' "$HOTPLUG_FILE" "$PEER_HOOK"
-    [ "$DO_DNS" -eq 1 ] && printf '%s\n' "$DNS_HOOK" "$DNS_DIR"
+    printf '%s\n' "$HOTPLUG_FILE" "$PEER_HOOK" "$RESTORE_HOOK" "$DNS_DIR"
+    [ "$DO_DNS" -eq 1 ] && printf '%s\n' "$DNS_HOOK"
     return 0
 }
 
@@ -2496,7 +2506,175 @@ keep_on_sysupgrade() {
     done
 }
 
+# =============================================================== restore
+
+# A sysupgrade keeps /etc/config and the files listed in /etc/sysupgrade.conf,
+# but not packages installed by hand: an attended sysupgrade rebuilds the image
+# with the feed packages (so the Yggdrasil build of --ygg-edge falls back to the
+# feed's) and without the status module, which is not a package; a stock image
+# has none of them. The deployer therefore leaves behind in $DNS_DIR a copy of
+# itself and what this run chose (restore.conf), and a hook that, whenever an
+# uplink comes up, checks in a moment whether all of it is still there and
+# otherwise runs this copy with --restore. The uplink coming up is the moment
+# the downloads can work, so nothing has to wait for the network.
+RESTORE_CONF="$DNS_DIR/restore.conf"
+RESTORE_COPY="$DNS_DIR/deploy.sh"
+RESTORE_HOOK='/etc/hotplug.d/iface/80-yggdrasil-restore'
+STATUS_VIEW='/www/luci-static/resources/view/status/yggdrasil.js'
+
+ygg_binary_hash() {
+    _yb="$(command -v yggdrasil 2>/dev/null)" || return 0
+    sha256sum "$_yb" 2>/dev/null | cut -d' ' -f1
+}
+
+restore_conf_get() { # $1 = key
+    awk -v k="$1" '$1 == k { print $2; exit }' "$RESTORE_CONF" 2>/dev/null
+}
+
+restore_hook_text() {
+    sed -e "s|@IFACE@|$IFACE|g" -e "s|@LAN@|$LAN|g" -e "s|@CONF@|$RESTORE_CONF|g" \
+        -e "s|@COPY@|$RESTORE_COPY|g" -e "s|@VIEW@|$STATUS_VIEW|g" <<'EOF'
+#!/bin/sh
+# Written by Yggdrasil-OpenWRT (deploy-openwrt-yggdrasil.sh). A sysupgrade keeps
+# the configuration but not packages installed by hand. When an uplink comes
+# up, check that what the last deployer run installed is still there, and put
+# back what is missing with its saved copy (--restore). Quiet when complete.
+[ "$ACTION" = ifup ] || exit 0
+case "$INTERFACE" in '@IFACE@'|'@LAN@'|loopback) exit 0 ;; esac
+[ -r '@CONF@' ] && [ -r '@COPY@' ] || exit 0
+(
+	exec 9>>/var/lock/yggdrasil-restore.lock
+	flock -n 9 || exit 0
+	get() { awk -v k="$1" '$1 == k { print $2; exit }' '@CONF@'; }
+	need=''
+	for p in $(get packages | tr ',' ' '); do apk info -e "$p" >/dev/null 2>&1 || need=1; done
+	[ "$(get status)" = 1 ] && [ ! -f '@VIEW@' ] && need=1
+	h="$(get edge_hash)"
+	if [ -n "$h" ]; then
+		b="$(command -v yggdrasil)"
+		[ -n "$b" ] && [ "$(sha256sum "$b" | cut -d' ' -f1)" = "$h" ] || need=1
+	fi
+	[ -n "$need" ] || exit 0
+	logger -t yggdrasil-restore "$INTERFACE up: restoring what a sysupgrade removed"
+	sleep 10
+	sh '@COPY@' --restore > /tmp/yggdrasil-restore.log 2>&1 \
+		&& logger -t yggdrasil-restore 'restored' \
+		|| logger -t yggdrasil-restore 'restore incomplete, see /tmp/yggdrasil-restore.log; retried at the next uplink'
+) </dev/null >/dev/null 2>&1 &
+EOF
+}
+
+# No copy of this very run: settings of an earlier run must not act on its
+# behalf, so the restore machinery goes and a sysupgrade needs a manual rerun.
+restore_disable() {
+    rm -f "$RESTORE_COPY" "$RESTORE_CONF" "$RESTORE_HOOK"
+    warn "$1: restore hook removed, rerun the deployer after a sysupgrade"
+}
+
+# Record this run's choices and keep a copy of this script for --restore.
+install_restore() {
+    FAILED_STAGE='restore hook'
+    if [ "$DRY_RUN" -eq 1 ]; then
+        info "would write $RESTORE_CONF, $RESTORE_COPY and $RESTORE_HOOK"
+        return 0
+    fi
+    mkdir -p "$DNS_DIR"
+    # the copy: this file, or when it was piped in, the same script from main
+    if [ -f "$0" ] && grep -q "^VERSION='$VERSION'$" "$0" 2>/dev/null; then
+        cp "$0" "$RESTORE_COPY.new"
+    else
+        # only the very version that is running now, never another revision
+        if ! status_fetch "$DEPLOYER_URL" "$RESTORE_COPY.new" \
+            || ! grep -q "^VERSION='$VERSION'$" "$RESTORE_COPY.new" 2>/dev/null; then
+            rm -f "$RESTORE_COPY.new"
+            restore_disable "no copy of deployer $VERSION for the restore hook (piped run; download failed or main has moved on)"
+            return 0
+        fi
+    fi
+    if ! sh -n "$RESTORE_COPY.new" 2>/dev/null || ! mv -f "$RESTORE_COPY.new" "$RESTORE_COPY"; then
+        rm -f "$RESTORE_COPY.new"
+        restore_disable "the deployer copy does not parse"
+        return 0
+    fi
+    chmod 600 "$RESTORE_COPY"
+    # The edge build is remembered by its binary: set by --ygg-edge/--ygg-pkg,
+    # kept by a later run without them while that binary is still installed.
+    # edge_src: 'release' can be fetched again, 'local' (--ygg-pkg) cannot
+    _eh=''; _es=''
+    if [ -n "$YGG_PKG" ]; then
+        _eh="$(ygg_binary_hash)"; _es='local'
+    elif [ "$YGG_EDGE" -eq 1 ]; then
+        _eh="$(ygg_binary_hash)"; _es='release'
+    elif [ "$(restore_conf_get edge_hash)" = "$(ygg_binary_hash)" ]; then
+        _eh="$(restore_conf_get edge_hash)"; _es="$(restore_conf_get edge_src)"
+    fi
+    # status_src: newest release, a pinned version, or a local build (not refetchable)
+    _ss='newest'
+    [ -n "$STATUS_VERSION" ] && _ss="$STATUS_VERSION"
+    [ -n "$STATUS_PKG" ] && _ss='local'
+    _pk='yggdrasil,luci-proto-yggdrasil'
+    [ "$DO_JUMPER" -eq 1 ] && _pk="$_pk,yggdrasil-jumper"
+    [ "$DO_STATUS" -eq 1 ] && _pk="$_pk,iputils-arping"
+    {
+        printf '# Written by Yggdrasil-OpenWRT (deploy-openwrt-yggdrasil.sh): what %s --restore puts back.\n' "$RESTORE_COPY"
+        printf 'iface %s\nlan %s\npackages %s\njumper %s\nstatus %s\nstatus_src %s\nedge_hash %s\nedge_src %s\n' \
+            "$IFACE" "$LAN" "$_pk" "$DO_JUMPER" "$DO_STATUS" "$_ss" "$_eh" "$_es"
+    } > "$RESTORE_CONF" || die "cannot write $RESTORE_CONF"
+    if [ ! -f "$RESTORE_HOOK" ] || [ "$(cat "$RESTORE_HOOK")" != "$(restore_hook_text)" ]; then
+        restore_hook_text > "$RESTORE_HOOK" || die "cannot write $RESTORE_HOOK"
+        chmod 644 "$RESTORE_HOOK"
+        sh -n "$RESTORE_HOOK" || die "$RESTORE_HOOK does not parse"
+    fi
+    ok "restore hook in place: packages and the status module come back after a sysupgrade"
+}
+
+# --restore: only the package side, with the choices of the last full run.
+# Fails (for the hook's log and its retry) when something is still missing.
+restore_run() {
+    [ -r "$RESTORE_CONF" ] || die "--restore needs $RESTORE_CONF (written by a full run)"
+    IFACE="$(restore_conf_get iface)"; LAN="$(restore_conf_get lan)"
+    DO_JUMPER="$(restore_conf_get jumper)"; DO_STATUS="$(restore_conf_get status)"
+    [ -n "$IFACE" ] && [ -n "$LAN" ] && [ -n "$DO_JUMPER" ] && [ -n "$DO_STATUS" ] \
+        || die "$RESTORE_CONF is incomplete"
+    step "Restore after a sysupgrade"
+    stage_packages
+    # an optional package the feed no longer has is dropped from the list, so
+    # the hook does not come back for it on every uplink
+    [ "$DRY_RUN" -eq 1 ] || sed -i "s|^packages .*|packages yggdrasil,luci-proto-yggdrasil$([ "$DO_JUMPER" -eq 1 ] && apk info -e yggdrasil-jumper >/dev/null 2>&1 && printf ',yggdrasil-jumper')$(apk info -e iputils-arping >/dev/null 2>&1 && printf ',iputils-arping')|" "$RESTORE_CONF"
+    _eh="$(restore_conf_get edge_hash)"
+    if [ -n "$_eh" ] && [ "$(ygg_binary_hash)" != "$_eh" ]; then
+        if [ "$(restore_conf_get edge_src)" = local ]; then
+            # a --ygg-pkg build cannot be fetched again: keep the feed's
+            warn "the local Yggdrasil build (--ygg-pkg) is gone; keeping the feed's - rerun with --ygg-pkg to put it back"
+            [ "$DRY_RUN" -eq 1 ] || sed -i 's|^edge_hash .*|edge_hash |; s|^edge_src .*|edge_src |' "$RESTORE_CONF"
+        else
+            YGG_EDGE=1
+            install_ygg_build
+            [ "$DRY_RUN" -eq 1 ] || sed -i "s|^edge_hash .*|edge_hash $(ygg_binary_hash)|" "$RESTORE_CONF"
+        fi
+    fi
+    if [ "$DO_STATUS" -eq 1 ] && [ ! -f "$STATUS_VIEW" ]; then
+        case "$(restore_conf_get status_src)" in
+            local)
+                # cannot be fetched again: say so once, then stop asking for it
+                warn "the status module was a local build (--status-pkg); rerun with it to put it back"
+                [ "$DRY_RUN" -eq 1 ] || sed -i 's|^status .*|status 0|' "$RESTORE_CONF"
+                return 1 ;;
+            newest|'') : ;;
+            *) STATUS_VERSION="$(restore_conf_get status_src)" ;;
+        esac
+        stage_status
+        [ "$DRY_RUN" -eq 1 ] || [ -f "$STATUS_VIEW" ] || { warn "status module not restored"; return 1; }
+    fi
+    ok "restore done"
+}
+
 # ------------------------------------------------------------------- main ---
+
+if [ "$RESTORE" -eq 1 ]; then
+    restore_run || exit 1
+    exit "$RC_OK"
+fi
 
 banner "$SELF $VERSION — routed Yggdrasil /64 for OpenWrt"
 prompt_trusted
@@ -2513,6 +2691,7 @@ stage_lan
 stage_firewall
 stage_dns
 stage_status
+install_restore
 keep_on_sysupgrade
 stage_verify
 

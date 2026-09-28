@@ -1,5 +1,31 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## Deployer 2.7.0 - packages come back by themselves after a sysupgrade
+
+- A sysupgrade keeps the configuration and (since 2.6) our hooks, but not
+  packages installed by hand. Each run now keeps a copy of the deployer and
+  its choices (`/etc/yggdrasil-openwrt/deploy.sh`, `restore.conf`: packages,
+  status module, the `--ygg-edge` build by its binary hash), and a hook,
+  `/etc/hotplug.d/iface/80-yggdrasil-restore`, checks on every uplink `ifup`
+  whether all of it is there. If not, it runs the copy with the new
+  `--restore`, which only installs (feed packages, the build, the status
+  module) and changes no configuration. Retried at the next uplink if it fails.
+- An independent review (Astra) shaped the details: netifd is restarted only
+  when the Yggdrasil proto handler was actually missing (an unavailable
+  optional package would otherwise restart the network on every uplink, and
+  is dropped from the list); a piped run saves only a copy of this very
+  version, and without one the restore machinery is removed rather than left
+  with an earlier run's settings; a pinned `--status-version` is restored as
+  pinned, local builds (`--status-pkg`, `--ygg-pkg`) are reported once and not
+  replaced by public releases; `--restore --dry-run` installs nothing; the
+  hook logs "restored" only when the status module is really back.
+- Verified on the SPb router: status view removed and Yggdrasil downgraded to
+  the feed's 0.5.12 (what an attended sysupgrade leaves); one uplink event
+  later the hook put back 0.5.14 (ygg0 restarted, peers up) and status 6.5,
+  in 30 s, without a network restart; a second event stayed quiet; a dry run
+  of `--restore` installed nothing. Not exercised: a stock image, where the Yggdrasil packages
+  themselves are missing and netifd is restarted as on a first deployment.
+
 ## Deployer 2.6.0 - own files survive a sysupgrade; `--ygg-edge`
 
 - Every run lists the deployer's own files outside `/etc/config` in

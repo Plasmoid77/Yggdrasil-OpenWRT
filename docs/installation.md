@@ -228,17 +228,32 @@ it travels in the same release. `--ygg-pkg PATH` does the same from a local file
 (`PATH.sha256` required), for a router that cannot reach GitHub. A running node
 is restarted onto the new binary when the version changed. A later run without
 the switch keeps the installed build: apk does not downgrade to the feed's
-older version. Going back to the feed's build means asking apk for that
-version explicitly (not exercised here yet).
+older version. Back to the feed's build: `apk update && apk add
+yggdrasil=<feed version>` (e.g. `0.5.12-r1`), then `ifup ygg0`, and rerun the
+deployer without `--ygg-edge` so the restore hook stops bringing the build back.
 
 ### Surviving a sysupgrade
 
 `/etc/config` survives a sysupgrade; the deployer's own files elsewhere do not
 by themselves. Every run lists them in `/etc/sysupgrade.conf` (the hotplug
-guard, the peer hook, and with the DNS module `/etc/hotplug.d/iface/60-yggdrasil-dns`
-and `/etc/yggdrasil-openwrt`); `sysupgrade -l` shows them. Packages installed
-by hand are not carried into a new image: the status module and a
-`--ygg-edge` build come back with a rerun of the deployer.
+guard, the peer and restore hooks, `/etc/yggdrasil-openwrt`, and with the DNS
+module `/etc/hotplug.d/iface/60-yggdrasil-dns`); `sysupgrade -l` shows them.
+
+Packages installed by hand are not carried into a new image: an attended
+sysupgrade rebuilds it with the feed packages (so a `--ygg-edge` build falls
+back to the feed's Yggdrasil) and without the status module, which is not a
+package; a stock image has none of them. Each run therefore keeps a copy of the
+deployer and its choices in `/etc/yggdrasil-openwrt` (`deploy.sh`,
+`restore.conf`), and `/etc/hotplug.d/iface/80-yggdrasil-restore` checks on every
+uplink `ifup` whether the packages, the build and the status module are still
+there. When something is missing it runs the copy with `--restore`, which only
+installs (feed packages, the build, the status module) and touches no
+configuration; the log is `/tmp/yggdrasil-restore.log`, and a failed attempt is
+retried at the next uplink. So after a sysupgrade everything comes back by
+itself as soon as the router is online. After a stock image the packages are
+installed first and netifd is restarted to load the Yggdrasil protocol (the
+same as a first deployment). A router whose uplink itself needs packages from
+outside the official feeds (a modem stack) has to get those back first.
 
 For offline or custom builds, use `--status-pkg PATH` and provide the generated
 single-entry `PATH.sha256` beside it. Both must be readable. Missing, malformed
