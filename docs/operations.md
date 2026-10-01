@@ -158,7 +158,7 @@ in `ip -6 neigh`. On a long-running router this included many historical
 privacy IIDs. Polling also probed those entries, which could keep the NDP set
 busy even after a client had stopped using the addresses.
 
-The current v5-family implementation uses stable-first selection: a canonical `config domain` wins; otherwise an
+The current implementation uses stable-first selection: a canonical `config domain` wins; otherwise an
 observed modified EUI-64 wins; privacy-only clients retain all observed
 addresses. Nothing is persisted, and no address is assigned to or removed from
 the client.
@@ -180,7 +180,7 @@ the client formed itself.
 
 ### A client shows no reserved address
 
-Three causes, in order of likelihood:
+Four causes, in order of likelihood:
 
 1. It has no DHCPv6 client. Android has none by policy; some IoT and smart-TV
    stacks neither. Such a device takes SLAAC addresses from the routed prefix
@@ -326,7 +326,7 @@ Do not regenerate the Yggdrasil keypair during an ordinary update unless you int
 
 ### Back up the optional status module
 
-If Part II is installed:
+If the status module is installed:
 
 ```sh
 tar -czf /root/yggdrasil-status-backup.tar.gz \
@@ -351,19 +351,36 @@ apk upgrade yggdrasil luci-proto-yggdrasil yggdrasil-jumper
 
 Do not assume every future package keeps the exact same UCI options.
 
-The hotplug guard against the cold-boot race lives in
-`/etc/hotplug.d/net/50-yggdrasil-pending`, outside any package, and survives
-upgrades; it is rewritten by a deployer rerun only if its text changed.
+On a router installed with `--ygg-edge` (or `--ygg-pkg`), upgrading
+`yggdrasil` from the feed replaces this project's build, and the restore hook
+below treats the changed binary as lost and puts the project build back at the
+next uplink. To move to the feed's build for good, rerun the deployer without
+`--ygg-edge` afterwards (see
+[installation](installation.md#yggdrasil-version-the-feeds-or-this-projects-build)).
 
-### Moving a 1.x router to 2.0
+The deployer's own files live outside any package, survive package upgrades and
+are listed in `/etc/sysupgrade.conf`; a rerun rewrites one only if its text
+changed:
 
-Reinstall: reset to stock, bring the uplink back, run 2.0 with the same
-settings file minus the `dhcpv6`/`slaac` flags and with the old private key
-(`--private-key-file`). The node address, the routed /64, reservations and
-trusted access come back from those inputs; there is no in-place migration.
-The deployer never removes a `hostid`; omitting a `--host` line on a rerun
+| File | Runs on | Does | Log |
+| --- | --- | --- | --- |
+| `/etc/hotplug.d/net/50-yggdrasil-pending` | the TUN device's `add` | restarts the Ygg interface if it is still pending 10 s later (cold-boot race), at most 5 times per boot | `logread -e yggdrasil-hotplug` |
+| `/etc/hotplug.d/iface/60-yggdrasil-dns` | `ifup`/`ifupdate`/`ifdown` of the Ygg interface | regenerates the names in `/tmp/hosts/yggdrasil-<iface>` (DNS module) | - |
+| `/etc/hotplug.d/iface/70-yggdrasil-peers` | `ifup` of any other interface (an uplink) | sends `addpeer` for every configured peer, so backed-off peers retry at once | `logread -e yggdrasil-peers` |
+| `/etc/hotplug.d/iface/80-yggdrasil-restore` | `ifup` of an uplink | after a sysupgrade, reinstalls missing packages, the project build and the status module with `/etc/yggdrasil-openwrt/deploy.sh --restore` | `logread -e yggdrasil-restore`, `/tmp/yggdrasil-restore.log` |
+
+`/etc/yggdrasil-openwrt` holds `dns.conf` and the `dns-hosts` generator (DNS
+module), and `deploy.sh` with `restore.conf` (restore hook). A deployer piped
+from a URL keeps a copy only if `main` still carries its version; otherwise
+the restore hook is removed with a warning.
+
+### Retiring a reservation
+
+The deployer never removes a `hostid`: omitting a `--host` line on a rerun
 drops its name and keeps its `hostid`. To retire a reservation for good:
 `uci delete dhcp.<section>.hostid; uci commit dhcp; /etc/init.d/odhcpd reload`.
+A router deployed with 1.x is reinstalled, not migrated: see
+[installation](installation.md#a-router-deployed-with-1x).
 
 ### LAN hosts and Yggdrasil
 
@@ -389,7 +406,7 @@ ubus call dhcp ipv6leases      # the stateful addresses the router handed out (o
 fw4 print
 ```
 
-If Part II is installed:
+If the status module is installed:
 
 ```sh
 ubus -v list luci.yggdrasil-status
@@ -398,10 +415,10 @@ ubus call luci.yggdrasil-status clients
 
 Confirm that `clients`, `pin` and `unpin` are all present before relying on the management buttons in LuCI.
 
-If Part III is installed:
+If the DNS module is installed:
 
 ```sh
-nslookup <HOST>.home.arpa <ROUTER_YGG_IPV6>
+nslookup <HOST>.<zone> <ROUTER_YGG_IPV6>
 ```
 
 Then test actual remote access to a permitted LAN service.
@@ -451,35 +468,50 @@ timer.
 
 ## Removing the setup
 
-Removal is modular too.
+Removal is modular too. On a router the deployer installed, take the restore
+hook out of the picture first: it reinstalls missing packages and the status
+module at the next uplink.
 
-### Remove only Part III DNS-over-Ygg access
+### Remove only the DNS module
 
-Delete the `home.arpa` local-zone directive and the `config domain` records used purely for DNS. There is no DNS rule of its own to delete since deployer 2.0.4: trusted nodes reach port 53 through `YGG-Trusted-to-Router`, which also serves SSH and LuCI (an `ygg_dns` rule left by an older run can simply be deleted).
-
-Then:
+The names are generated, not stored in UCI. Remove the generator, its
+settings and its hook, stop answering the zone, and give later deployer runs
+`--no-dns` (or `no-dns` in `[flags]`), which leaves the module alone instead
+of setting it up again:
 
 ```sh
-uci commit firewall
+rm -f /etc/hotplug.d/iface/60-yggdrasil-dns \
+      /etc/yggdrasil-openwrt/dns.conf /etc/yggdrasil-openwrt/dns-hosts \
+      /tmp/hosts/yggdrasil-*
+sed -i '\|^/etc/hotplug.d/iface/60-yggdrasil-dns$|d' /etc/sysupgrade.conf
+uci del_list dhcp.@dnsmasq[0].server='/<zone>/'
 uci commit dhcp
-/etc/init.d/firewall restart
 /etc/init.d/dnsmasq restart
 ```
 
-If Part II still uses the same `config domain` records as canonical addresses, keep those records.
+`/home.arpa/` may stay in that list: RFC 8375 keeps the name local anyway.
+There is no DNS rule of its own to delete since deployer 2.0.4: trusted nodes
+reach port 53 through `YGG-Trusted-to-Router`, which also serves SSH and LuCI
+(an `ygg_dns` rule left by an older run can simply be deleted). A record set
+by hand as a `config domain` is the operator's and is not touched.
 
-### Remove only Part II status UI
+### Remove only the status module
 
 ```sh
-rm -f /usr/libexec/rpcd/luci.yggdrasil-status
-rm -f /usr/share/rpcd/acl.d/yggdrasil-status.json
-rm -f /usr/share/luci/menu.d/yggdrasil-status.json
-rm -f /www/luci-static/resources/view/status/yggdrasil.js
+sed -i 's/^status .*/status 0/; s/,iputils-arping//' /etc/yggdrasil-openwrt/restore.conf 2>/dev/null
+rm -f /usr/libexec/rpcd/luci.yggdrasil-status \
+      /usr/share/rpcd/acl.d/yggdrasil-status.json \
+      /usr/share/luci/menu.d/yggdrasil-status.json \
+      /www/luci-static/resources/view/status/yggdrasil.js \
+      /etc/yggdrasil-status-nodes /etc/yggdrasil-status-lan \
+      /tmp/yggdrasil-status-nodes /tmp/yggdrasil-status-lan
 rm -f /tmp/luci-indexcache
 /etc/init.d/rpcd restart
 ```
 
-You may then remove `iputils-arping` if nothing else needs it.
+The first line tells the restore hook the module is gone on purpose; later
+deployer runs need `--no-status`. You may then remove `iputils-arping` if
+nothing else needs it.
 
 Inventory `config host` entries may be kept because they are normal OpenWrt device/DHCP configuration. Removing the LuCI module itself does not delete them. If you do not want dashboard-created pins to remain, use `Unpin` before removing the module or remove the corresponding `config host` records manually.
 
@@ -487,19 +519,49 @@ Be careful with static reservations: deleting a `config host` that contains `opt
 
 ### Remove the core Yggdrasil LAN setup
 
-Also delete the deployer's hotplug guard, `/etc/hotplug.d/net/50-yggdrasil-pending`.
+Because removing the core can destroy remote management reachability, do this
+only with an alternate management path available.
 
-Because removing the core can destroy remote management reachability, do this only with an alternate management path available.
+Delete the deployer's own files first - the restore hook would otherwise put
+the packages back at the next uplink - and their lines in
+`/etc/sysupgrade.conf`:
 
-Remove the explicit Yggdrasil firewall rules and zone, restore the LAN IPv6 policy you actually want, and only then remove Yggdrasil packages.
+```sh
+rm -f /etc/hotplug.d/iface/80-yggdrasil-restore \
+      /etc/hotplug.d/iface/70-yggdrasil-peers \
+      /etc/hotplug.d/iface/60-yggdrasil-dns \
+      /etc/hotplug.d/net/50-yggdrasil-pending \
+      /tmp/hosts/yggdrasil-*
+rm -rf /etc/yggdrasil-openwrt
+sed -i '\|yggdrasil|d' /etc/sysupgrade.conf
+```
 
-Example package removal after configuration cleanup:
+Then remove the explicit Yggdrasil firewall rules (`ygg_trusted_lan`,
+`ygg_trusted_router`, `ygg_lan_out`) and zone (`ygg`), the DNS module's
+`server '/<zone>/'` entries, restore the LAN IPv6 policy you actually want, and
+only then remove the Yggdrasil packages:
 
 ```sh
 apk del yggdrasil-jumper luci-proto-yggdrasil yggdrasil
 ```
 
-Do not blindly delete IPv6 settings without deciding what prefix/RA design replaces the Yggdrasil profile.
+Do not blindly delete IPv6 settings without deciding what prefix/RA design
+replaces the Yggdrasil profile.
+
+### Remove the Linux client's split DNS
+
+```sh
+sudo /usr/local/libexec/yggdrasil-split-dns revert
+sudo rm -f /etc/systemd/system/yggdrasil.service.d/split-dns.conf \
+           /usr/local/libexec/yggdrasil-split-dns
+sudo systemctl daemon-reload
+```
+
+With the local dnsmasq for several routers, also remove
+`/etc/dnsmasq.d/ygg-zones.conf` (and the `conf-dir` line the installation added
+to `/etc/dnsmasq.conf` if nothing else uses it), then restart or disable
+`dnsmasq.service`. With AmneziaVPN, do this while it is disconnected (see
+[installation](installation.md)).
 
 ---
 

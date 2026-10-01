@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'New status version, e.g. v5.2 or v5.2.0 (never reuse a tag)'
+        description: 'New status version, e.g. v6.6 or v6.5.3 (never reuse a tag)'
         required: true
         type: string
       revision:
@@ -67,10 +67,10 @@ jobs:
             "Status-module candidate $VERSION from commit $REVISION." \
             '' \
             'Host checks passed. Review the package and complete the relevant OpenWrt integration tests before publishing this draft.' \
-            'This workflow does not claim hardware validation, publish automatically, or update the deployer pin.' \
+            'This workflow does not claim hardware validation or publish automatically; the deployer installs a release once it is published as latest.' \
             > "$RUNNER_TEMP/release-notes.md"
           gh release create "$tag" "dist/yggdrasil-status-$VERSION.tar.gz" \
             "dist/yggdrasil-status-$VERSION.tar.gz.sha256" \
             --verify-tag --title "Yggdrasil Status $VERSION" \
             --notes-file "$RUNNER_TEMP/release-notes.md" --draft --latest=false
-          echo "Draft $tag created; review before publishing. Deployer pin is unchanged." >> "$GITHUB_STEP_SUMMARY"
+          echo "Draft $tag created; review before publishing." >> "$GITHUB_STEP_SUMMARY"

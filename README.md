@@ -23,12 +23,13 @@ manual setup, verification and the optional Linux split-DNS client.
 The supported profile targets **OpenWrt 25.12+ with apk**, netifd, odhcpd,
 dnsmasq and firewall4; the status module also needs rpcd and LuCI. The recorded
 hardware baseline is OpenWrt 25.12.5, not a claim that every router has been
-tested. See [validation and limitations](docs/development.md).
+tested. See [validation and limitations](docs/development.md#automated-coverage-and-remaining-manual-work).
 
 Before deployment, have working Internet access, a correct clock, a backup
-and an alternate management path. The installer changes LAN IPv6 policy,
-removes the generated ULA in this profile, and may restart netifd after
-package installation. Do not run it merely to update documentation or LuCI.
+and an alternate management path. The installer adds the routed `/64` to the
+LAN beside its native prefix and ULA (both stay), makes the router the LAN's
+RA server and default router, and may restart netifd after package
+installation. Do not run it merely to update documentation or LuCI.
 
 ## Components
 
@@ -37,7 +38,7 @@ package installation. Do not run it merely to update documentation or LuCI.
 | Core | Routed Ygg `/64` overlaid on the LAN's own IPv6, DHCPv6 reservations, trusted-source firewall policy, LAN-to-Yggdrasil egress | [Standalone router deployer](deploy/deploy-openwrt-yggdrasil.sh) |
 | Status | DHCP-lifetime inventory, persistent pins and safe Pin/Unpin | [LuCI/rpcd source](source/yggdrasil-status/) |
 | DNS | Optional names and trusted DNS access over Ygg | Native dnsmasq configuration in the deployer |
-| Linux client | Route only `home.arpa` to the router | [Client helper and systemd drop-in](client/linux/) |
+| Linux client | Route only the routers' zones (`home.arpa` by default) to the router | [Client helper and systemd drop-in](client/linux/) |
 
 Core routing works without status or DNS. The automated **default** deploy
 includes both; `--no-status` and `--no-dns` opt out. Architectural optionality
@@ -79,8 +80,9 @@ installer on a development workstation.
 
 `source/` is the editable implementation. GitHub Releases distribute versioned
 status packages. `packages/` is a frozen compatibility cache for existing raw
-URLs, not the destination for new builds. The deployer pins a release and its
-SHA-256; development and release-candidate archives are built from source.
+URLs, not the destination for new builds. The deployer installs the newest
+published release and checks it against the SHA-256 published beside it;
+development and release-candidate archives are built from source.
 
 Guide and implementation by Plasmoid (Neuroslopped).
 [Sources and acknowledgements](docs/architecture.md#sources-and-acknowledgements).

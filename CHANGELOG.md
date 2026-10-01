@@ -45,6 +45,27 @@ no router run yet.
   and a current `--status-version` example. Comments that pointed at the old
   pointer files or described static DNS records are rewritten.
 
+## Docs - brought in line with the code (repository review)
+
+- README: the installer keeps the ULA (it never removed it in 2.x), follows
+  the newest status release instead of pinning one, and routes the routers'
+  zones, not only `home.arpa`; the "validation" link has a target again.
+- AGENTS.md invariant 1 no longer refers to the removed `--dhcpv6` switch.
+- operations.md: a table of the deployer's own hooks and files; removal
+  steps that take the restore hook out first (it would reinstall what was
+  removed), delete hooks 50/60/70/80 and `/etc/yggdrasil-openwrt`, and cover
+  the generated DNS names, the status module's address memories and the Linux
+  client; `--ygg-edge` versus `apk upgrade yggdrasil`; "Part II/III" replaced
+  by module names; the 1.x procedure kept in one place (installation.md).
+- installation.md: what `--no-dns` and the other skips leave in place, that a
+  rerun applies its whole description (zone, hosts), the restore hook of a
+  piped run, `status-vX.Y[.Z]` tags, and hand-written DNS records versus the
+  generated names.
+- architecture.md, development.md, the package README and the release
+  workflow: current versions and columns, IPv6-only rows, the Unpin and
+  `dhcpv6_served` rules as implemented, test coverage as it is, and no more
+  "deployer pin" or "installer banner says v5".
+
 ## Status 6.5.3 (not released yet) - polish from the repository review
 
 - Pin and Unpin could answer "busy" for up to ~20 s after a page refresh:
