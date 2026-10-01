@@ -49,7 +49,15 @@ busybox ash tests/status-download.sh
 # GNU tools: run the shell tests once more with those applets first on PATH.
 APPLETS="$(mktemp -d)"
 trap 'rm -rf "$APPLETS"' EXIT HUP INT TERM
-for applet in awk sed tr grep cut head tail date sort uniq wc; do
+applets='sed tr grep cut head tail date sort uniq wc'
+# OpenWrt builds BusyBox awk with math (^, exp); some distribution builds,
+# Ubuntu's among them, do not and would fail where the router works.
+if busybox awk 'BEGIN { exit !(2 ^ 3 == 8) }' 2>/dev/null; then
+    applets="awk $applets"
+else
+    echo 'NOTE: this BusyBox awk has no math support; the applet pass keeps the host awk.' >&2
+fi
+for applet in $applets; do
     printf '#!/bin/sh\nexec busybox %s "$@"\n' "$applet" > "$APPLETS/$applet"
     chmod +x "$APPLETS/$applet"
 done

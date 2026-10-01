@@ -18,9 +18,11 @@ no router run yet.
 - The trusted rules fail closed: their `src_ip` list is deleted before it is
   rewritten, and a failed write is now fatal (the rollback restores the
   firewall) instead of leaving an ACCEPT rule without a source restriction.
-- Stage 6 takes the DHCP lock and rechecks for uncommitted `dhcp` changes
-  before it stages anything, as stage 4 does; a Pin/Unpin edit in between can
-  no longer be committed by the deployer.
+- The DHCP lock the status module's Pin/Unpin use is now held from stage 4
+  until stage 6 has committed `dhcp` (stage 6 took none, and stage 4 let go
+  before stage 6 began): no Pin/Unpin edit can be committed by the deployer
+  or overwritten by its rollback. An open status page waits for the lock
+  meanwhile.
 - A failed write of `restore.conf`, the restore hook or `/etc/sysupgrade.conf`
   (a full overlay) at the very end no longer rolls back a deployment that is
   already in place: the restore machinery is removed with a warning, as when

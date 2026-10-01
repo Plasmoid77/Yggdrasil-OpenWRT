@@ -96,6 +96,7 @@ CHANGED_NETWORK=0
 CHANGED_DHCP=0
 CHANGED_FIREWALL=0
 CHANGED_DNS=0
+DHCP_LOCKED=0
 
 # Colour only on a real terminal, so a redirected log stays plain text.
 if [ -t 2 ] && [ -z "${NO_COLOR:-}" ]; then
@@ -1755,11 +1756,14 @@ lan_has_ygg_prefix() {
 
 # dhcp is also the status module's file (Pin/Unpin edit config host under
 # this lock, and an open status page holds it shared for a few seconds on
-# every refresh). A stage takes it before staging anything in dhcp, so a busy
-# lock means "nothing changed yet" rather than a rollback over someone else's
-# edit, and releases it (exec 9>&-) once its commit is done.
-# BusyBox flock has no -w, so wait by retrying.
+# every refresh). The first stage that edits dhcp takes it before staging
+# anything, so a busy lock means "nothing changed yet" rather than a rollback
+# over someone else's edit, and it is held until the last dhcp commit of the
+# run: no other writer can get in between, so a rollback never restores the
+# file over a change it did not make. BusyBox flock has no -w, so wait by
+# retrying.
 dhcp_lock() {
+    [ "$DHCP_LOCKED" -eq 0 ] || return 0
     if ! have flock || [ "$DRY_RUN" -eq 1 ]; then return 0; fi
     exec 9>>/var/lock/yggdrasil-status-dhcp.lock
     _tries=0
@@ -1768,9 +1772,16 @@ dhcp_lock() {
         [ "$_tries" -lt 30 ] || die "another process is editing DHCP configuration (lock busy for 30 s) — retry in a moment"
         sleep 1
     done
+    DHCP_LOCKED=1
     if uci -q changes dhcp 2>/dev/null | grep -q .; then
         die "uncommitted UCI changes appeared in 'dhcp' since preflight — commit or revert them first"
     fi
+}
+
+dhcp_unlock() {
+    [ "$DHCP_LOCKED" -eq 1 ] || return 0
+    exec 9>&-
+    DHCP_LOCKED=0
 }
 
 stage_lan() {
@@ -1824,7 +1835,8 @@ stage_lan() {
     if [ "$DRY_RUN" -eq 0 ]; then
         uci commit network || die "uci commit network failed"
         uci commit dhcp    || die "uci commit dhcp failed"
-        have flock && exec 9>&-
+        # stage 6 edits dhcp too: the lock stays until its commit
+        [ "$DO_DNS" -eq 1 ] || dhcp_unlock
         /etc/init.d/network reload >/dev/null 2>&1 || die "network reload failed"
         # reload (SIGHUP) re-reads the configuration but keeps the bound DHCPv6
         # leases; a restart would drop every lease from the router's record
@@ -2180,7 +2192,7 @@ stage_dns() {
 
     if [ "$DRY_RUN" -eq 0 ]; then
         uci commit dhcp || die "uci commit dhcp failed"
-        have flock && exec 9>&-
+        dhcp_unlock
         /etc/init.d/dnsmasq restart >/dev/null 2>&1 || die "dnsmasq restart failed"
 
         # A dnsmasq that cannot parse its config exits without a word, taking

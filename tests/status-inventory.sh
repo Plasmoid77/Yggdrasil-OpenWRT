@@ -886,14 +886,24 @@ background_probes_release_lock() {
     LAN_DEV=br-lan
     LAN_YGG_PREFIX='303:170f:3ab2:166e:'
     ip() { printf '    inet6 303:170f:3ab2:166e::1/64 scope global\n'; }
-    ping() { sleep 2; }
+    # the probe announces itself, so the check runs while it is in flight -
+    # after the child had every chance to drop fd 9, not before
+    STARTED="$TMP/probe-started"
+    ping() { : > "$STARTED"; sleep 2; }
     for bpl_helper in discover_lan_addresses probe_unattributed_leases; do
+        rm -f "$STARTED"
         exec 9>>"$LOCK"
         flock -s 9
         DISCOVERY_WANTED=1
         UNATTRIBUTED_LEASE_ADDRS='303:170f:3ab2:166e::40'
         "$bpl_helper"
         exec 9>&-
+        bpl_tries=0
+        until [ -f "$STARTED" ]; do
+            bpl_tries=$((bpl_tries + 1))
+            [ "$bpl_tries" -lt 50 ] || fail "$bpl_helper: background probe never started"
+            sleep 0.1
+        done
         flock -n -x "$LOCK" true || fail "$bpl_helper left the DHCP lock held by its background child"
         wait
     done
