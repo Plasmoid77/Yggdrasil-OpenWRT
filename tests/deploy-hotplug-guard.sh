@@ -20,7 +20,7 @@ extract_function() {
         found && /^}$/ { exit }
     ' "$SCRIPT"
 }
-for f in hotplug_guard_text install_hotplug_guard; do
+for f in put_file hotplug_guard_text install_hotplug_guard; do
     body="$(extract_function "$f")"
     [ -n "$body" ] || { echo "FAIL: function $f not found in deployer" >&2; exit 1; }
     eval "$body"

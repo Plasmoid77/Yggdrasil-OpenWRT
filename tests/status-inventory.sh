@@ -29,7 +29,7 @@ for fn in lower normalize_mac valid_mac valid_hostname valid_ipv4 first_ipv4 \
     collect_host_duids collect_host_duid host_mac_for_duid mac_seen_on_lan mac_for_lease collect_dhcpv6_leases probe_unattributed_leases dhcpv6_lease_for_mac dhcpv6_lease_match_for_mac \
     norm_hostid valid_hostid collect_taken_hostids collect_taken_hostid lease_duid_for_mac emit_dynamic_leases6 \
     iid_to_addr find_active_lease6_by_mac \
-    host_section_has_extra_options load_ygg_prefix emit_client rpc_pin rpc_unpin; do load "$fn"; done
+    host_section_has_extra_options load_ygg_prefix host_flags lease_fields emit_client rpc_pin rpc_unpin; do load "$fn"; done
 
 # The production constants point at /tmp and /etc. Default every memory into
 # the sandbox so no group can touch a real path by forgetting to override one.

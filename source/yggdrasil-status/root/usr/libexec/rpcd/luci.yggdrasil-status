@@ -173,6 +173,27 @@ acquire_dhcp_lock() {
 }
 
 
+# What a row needs to know about the config host of a MAC, as HF_* (all
+# defaults when there is none, and then the status is 1): HF_PERSISTENT,
+# HF_NAME, HF_IPV4 (static reservation), HF_MANAGED (written by Pin),
+# HF_SHARED (several MACs), HF_COMPLEX, HF_AMBIGUOUS (several sections),
+# HF_RESERVED6 (an explicit hostid).
+host_flags() {
+	HF_PERSISTENT=0; HF_NAME=''; HF_IPV4=''; HF_MANAGED=0
+	HF_SHARED=0; HF_COMPLEX=0; HF_AMBIGUOUS=0; HF_RESERVED6=0
+	find_host_by_mac "$1" || return 1
+	HF_PERSISTENT=1
+	HF_NAME="$FOUND_HOST_NAME"
+	HF_IPV4="$FOUND_HOST_STATIC_IPV4"
+	HF_MANAGED="$FOUND_HOST_MANAGED"
+	[ "$FOUND_HOST_MAC_COUNT" -le 1 ] || HF_SHARED=1
+	HF_COMPLEX="$FOUND_HOST_COMPLEX"
+	HF_AMBIGUOUS="$FOUND_HOST_AMBIGUOUS"
+	[ -z "${FOUND_HOST_HOSTID:-}" ] || HF_RESERVED6=1
+	return 0
+}
+
+
 # Return success when a config host contains options beyond the small set that
 # this page can safely reason about. Such sections are still shown as
 # persistent, but automatic Unpin is disabled so tags, DUID/hostid settings or
@@ -579,8 +600,23 @@ mac_for_lease() {
 # address - probe_unattributed_leases does, once per call, so the next call
 # can attribute it. odhcpd is the router's own record of what it handed out,
 # so a lease outranks every observed address.
+# The fields of one ubus lease object that both lease readers need: LF_DUID
+# (lower-case hex), LF_IAID (hex, as odhcpd's config takes it - ubus prints a
+# signed decimal) and LF_ADDRS. Fails for a lease that is not bound: odhcpd
+# lists the offers it made beside the leases clients took.
+lease_fields() {
+	printf '%s' "$1" | jsonfilter -e '@.flags[*]' 2>/dev/null | grep -qx 'bound' || return 1
+	LF_DUID="$(printf '%s' "$1" | jsonfilter -e '@.duid' 2>/dev/null | tr 'A-F' 'a-f')"
+	LF_IAID="$(printf '%s' "$1" | jsonfilter -e '@.iaid' 2>/dev/null)"
+	case "$LF_IAID" in
+		''|*[!0-9-]*) LF_IAID='' ;;
+		*) LF_IAID="$(printf '%x' $(( LF_IAID & 0xffffffff )))" ;;
+	esac
+	LF_ADDRS="$(printf '%s' "$1" | jsonfilter -e '@["ipv6-addr"][*].address' 2>/dev/null | tr '\n' ' ')"
+}
+
 collect_dhcpv6_leases() {
-	local cdl_lease cdl_duid cdl_iaid cdl_mac cdl_how cdl_addr cdl_addrs cdl_name
+	local cdl_lease cdl_mac cdl_how cdl_addr cdl_addrs cdl_name
 
 	DHCPV6_LEASES=''
 	DHCPV6_NATIVE_LEASES=''
@@ -589,21 +625,12 @@ collect_dhcpv6_leases() {
 
 	DHCPV6_LEASES="$(while IFS= read -r cdl_lease; do
 		[ -n "$cdl_lease" ] || continue
-		# odhcpd lists offers it made beside leases clients took; only a
-		# bound one is an address the client actually holds
-		printf '%s' "$cdl_lease" | jsonfilter -e '@.flags[*]' 2>/dev/null | grep -qx 'bound' || continue
-		cdl_duid="$(printf '%s' "$cdl_lease" | jsonfilter -e '@.duid' 2>/dev/null | tr 'A-F' 'a-f')"
-		# ubus prints the IAID as a signed decimal; odhcpd's config wants hex
-		cdl_iaid="$(printf '%s' "$cdl_lease" | jsonfilter -e '@.iaid' 2>/dev/null)"
-		case "$cdl_iaid" in
-			''|*[!0-9-]*) cdl_iaid='' ;;
-			*) cdl_iaid="$(printf '%x' $(( cdl_iaid & 0xffffffff )))" ;;
-		esac
+		lease_fields "$cdl_lease" || continue
+		cdl_addrs="$LF_ADDRS"
 		cdl_name="$(printf '%s' "$cdl_lease" | jsonfilter -e '@.hostname' 2>/dev/null | tr -d ' ')"
 		valid_hostname "$cdl_name" || cdl_name='-'
-		cdl_addrs="$(printf '%s' "$cdl_lease" | jsonfilter -e '@["ipv6-addr"][*].address' 2>/dev/null | tr '\n' ' ')"
 		# shellcheck disable=SC2086
-		cdl_mac="$(mac_for_lease "$cdl_duid" "$cdl_iaid" $cdl_addrs)"
+		cdl_mac="$(mac_for_lease "$LF_DUID" "$LF_IAID" $cdl_addrs)"
 		# an unattributed lease is kept as "- <addr> - none" for the probe
 		# below and filtered out of the table right after this loop
 		[ -n "$cdl_mac" ] || cdl_mac='- none'
@@ -1509,7 +1536,7 @@ emit_client() {
 # lifetime. No extra history is kept.
 emit_dynamic_leases() {
 	local ed_expiry ed_mac ed_ipv4 ed_hostname ed_clientid ed_rest
-	local ed_name ed_persistent ed_static_ipv4 ed_managed ed_shared ed_complex ed_ambiguous ed_reserved6
+	local ed_name
 
 	[ -r "$LEASE_FILE" ] || return 0
 
@@ -1523,28 +1550,12 @@ emit_dynamic_leases() {
 
 		ed_name="$ed_hostname"
 		[ "$ed_name" = '*' ] && ed_name=''
-		ed_persistent=0
-		ed_static_ipv4=''
-		ed_managed=0
-		ed_shared=0
-		ed_complex=0
-		ed_ambiguous=0
-
-		ed_reserved6=0
-
-		if find_host_by_mac "$ed_mac"; then
-			ed_persistent=1
-			[ -n "$FOUND_HOST_NAME" ] && ed_name="$FOUND_HOST_NAME"
-			ed_static_ipv4="$FOUND_HOST_STATIC_IPV4"
-			ed_managed="$FOUND_HOST_MANAGED"
-			[ "$FOUND_HOST_MAC_COUNT" -gt 1 ] && ed_shared=1
-			ed_complex="$FOUND_HOST_COMPLEX"
-			ed_ambiguous="$FOUND_HOST_AMBIGUOUS"
-			[ -n "$ed_static_ipv4" ] && ed_ipv4="$ed_static_ipv4"
-			[ -n "${FOUND_HOST_HOSTID:-}" ] && ed_reserved6=1
+		if host_flags "$ed_mac"; then
+			[ -n "$HF_NAME" ] && ed_name="$HF_NAME"
+			[ -n "$HF_IPV4" ] && ed_ipv4="$HF_IPV4"
 		fi
 
-		emit_client "$ed_name" "$ed_mac" "$ed_ipv4" "$ed_persistent" "$ed_expiry" "$ed_static_ipv4" "$ed_managed" "$ed_shared" "$ed_complex" "$ed_ambiguous" "$ed_reserved6"
+		emit_client "$ed_name" "$ed_mac" "$ed_ipv4" "$HF_PERSISTENT" "$ed_expiry" "$HF_IPV4" "$HF_MANAGED" "$HF_SHARED" "$HF_COMPLEX" "$HF_AMBIGUOUS" "$HF_RESERVED6"
 	done < "$LEASE_FILE"
 }
 
@@ -1556,7 +1567,7 @@ emit_dynamic_leases() {
 # invisible until it takes a DHCPv4 lease or is reserved. The row lives as long
 # as odhcpd lists the lease as bound.
 emit_dynamic_leases6() {
-	local el_mac el_addr el_name el_how el_persistent el_static_ipv4 el_managed el_shared el_complex el_ambiguous el_reserved6
+	local el_mac el_addr el_name el_how
 
 	[ -n "${DHCPV6_LEASES:-}" ] || return 0
 
@@ -1568,26 +1579,11 @@ emit_dynamic_leases6() {
 		mac_was_emitted "$el_mac" && continue
 
 		[ "$el_name" != '-' ] || el_name=''
-		el_persistent=0
-		el_static_ipv4=''
-		el_managed=0
-		el_shared=0
-		el_complex=0
-		el_ambiguous=0
-		el_reserved6=0
-
-		if find_host_by_mac "$el_mac"; then
-			el_persistent=1
-			[ -n "$FOUND_HOST_NAME" ] && el_name="$FOUND_HOST_NAME"
-			el_static_ipv4="$FOUND_HOST_STATIC_IPV4"
-			el_managed="$FOUND_HOST_MANAGED"
-			[ "$FOUND_HOST_MAC_COUNT" -gt 1 ] && el_shared=1
-			el_complex="$FOUND_HOST_COMPLEX"
-			el_ambiguous="$FOUND_HOST_AMBIGUOUS"
-			[ -n "${FOUND_HOST_HOSTID:-}" ] && el_reserved6=1
+		if host_flags "$el_mac" && [ -n "$HF_NAME" ]; then
+			el_name="$HF_NAME"
 		fi
 
-		emit_client "$el_name" "$el_mac" "$el_static_ipv4" "$el_persistent" "" "$el_static_ipv4" "$el_managed" "$el_shared" "$el_complex" "$el_ambiguous" "$el_reserved6"
+		emit_client "$el_name" "$el_mac" "$HF_IPV4" "$HF_PERSISTENT" "" "$HF_IPV4" "$HF_MANAGED" "$HF_SHARED" "$HF_COMPLEX" "$HF_AMBIGUOUS" "$HF_RESERVED6"
 	done <<EOF
 $DHCPV6_LEASES
 EOF
@@ -1596,7 +1592,7 @@ EOF
 # Persistent rows without an active DHCP lease. They stay visible as Offline.
 emit_persistent_host() {
 	local eph_section="$1"
-	local eph_macs eph_mac eph_name eph_ipv4 eph_managed eph_shared eph_complex eph_ambiguous eph_reserved6
+	local eph_macs eph_mac
 
 	config_get eph_macs "$eph_section" mac
 	[ -n "$eph_macs" ] || return 0
@@ -1607,19 +1603,9 @@ emit_persistent_host() {
 
 		# Re-resolve by MAC so duplicate sections and section safety metadata are
 		# computed consistently even for persistent hosts without a live lease.
-		find_host_by_mac "$eph_mac" || continue
+		host_flags "$eph_mac" || continue
 
-		eph_name="$FOUND_HOST_NAME"
-		eph_ipv4="$FOUND_HOST_STATIC_IPV4"
-		eph_managed="$FOUND_HOST_MANAGED"
-		eph_shared=0
-		[ "$FOUND_HOST_MAC_COUNT" -gt 1 ] && eph_shared=1
-		eph_complex="$FOUND_HOST_COMPLEX"
-		eph_ambiguous="$FOUND_HOST_AMBIGUOUS"
-		eph_reserved6=0
-		[ -n "${FOUND_HOST_HOSTID:-}" ] && eph_reserved6=1
-
-		emit_client "$eph_name" "$eph_mac" "$eph_ipv4" 1 "" "$eph_ipv4" "$eph_managed" "$eph_shared" "$eph_complex" "$eph_ambiguous" "$eph_reserved6"
+		emit_client "$HF_NAME" "$eph_mac" "$HF_IPV4" 1 "" "$HF_IPV4" "$HF_MANAGED" "$HF_SHARED" "$HF_COMPLEX" "$HF_AMBIGUOUS" "$HF_RESERVED6"
 	done
 }
 
@@ -1848,30 +1834,19 @@ collect_taken_hostid() {
 # a pin records the lease the row shows. Read from odhcpd at the moment of
 # the pin. The caller collects HOST_DUID_MACS first.
 lease_duid_for_mac() {
-	local ldm_wanted ldm_lease ldm_addrs ldm_mac ldm_duid ldm_iaid ldm_iaid_hex
+	local ldm_wanted ldm_lease ldm_mac
 	ldm_wanted="$(normalize_mac "$1")"
 
 	# heredoc-fed loop, not a pipeline: return must leave the function
 	while IFS= read -r ldm_lease; do
 		[ -n "$ldm_lease" ] || continue
-		printf '%s' "$ldm_lease" | jsonfilter -e '@.flags[*]' 2>/dev/null | grep -qx 'bound' || continue
-		ldm_duid="$(printf '%s' "$ldm_lease" | jsonfilter -e '@.duid' 2>/dev/null | tr 'A-F' 'a-f')"
-		ldm_iaid="$(printf '%s' "$ldm_lease" | jsonfilter -e '@.iaid' 2>/dev/null)"
-		case "$ldm_iaid" in
-			''|*[!0-9-]*) ldm_iaid_hex='' ;;
-			*) ldm_iaid_hex="$(printf '%x' $(( ldm_iaid & 0xffffffff )))" ;;
-		esac
-		ldm_addrs="$(printf '%s' "$ldm_lease" | jsonfilter -e '@["ipv6-addr"][*].address' 2>/dev/null | tr '\n' ' ')"
+		lease_fields "$ldm_lease" || continue
 		# a DUID is written to flash on this: the neighbour branch counts
 		# only with a kernel-confirmed (REACHABLE) entry, never a stale one
 		# shellcheck disable=SC2086
-		ldm_mac="$(MFL_FRESH_ONLY=1 mac_for_lease "$ldm_duid" "$ldm_iaid_hex" $ldm_addrs)"
+		ldm_mac="$(MFL_FRESH_ONLY=1 mac_for_lease "$LF_DUID" "$LF_IAID" $LF_ADDRS)"
 		[ "${ldm_mac%% *}" = "$ldm_wanted" ] || continue
-		if [ -n "$ldm_iaid_hex" ]; then
-			printf '%s%%%s\n' "$ldm_duid" "$ldm_iaid_hex"
-		else
-			printf '%s\n' "$ldm_duid"
-		fi
+		printf '%s%s\n' "$LF_DUID" "${LF_IAID:+%$LF_IAID}"
 		return 0
 	done <<LEASES_EOF
 $(ubus call dhcp ipv6leases 2>/dev/null | jsonfilter -e '@.device[*].leases[*]' 2>/dev/null)

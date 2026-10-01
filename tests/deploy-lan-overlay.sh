@@ -28,7 +28,7 @@ extract_function() {
 eval "$(sed -n '/^set -u$/,/^VERSION=/p' "$SCRIPT" | sed '/^set -u$/d')"
 eval "$(sed -n '/^# -* defaults -*$/,/^usage() {$/p' "$SCRIPT" | sed '$d')"
 for f in peer_shown add_peer add_trusted add_dns_host lower_str is_mac norm_duid norm_duid_opt duid_in_key mac_in_key norm_hostid add_host status_valid_version read_config \
-         inspect_lan lan_has_ygg_prefix lan_zone reserved_addr implicit_hostid existing_hosts section_is_client section_in_hosts hosts_name_id report_implicit_hosts apply_hosts dhcp_lock dhcp_unlock stage_lan fw_rule_trusted stage_firewall; do
+         inspect_lan lan_has_ygg_prefix lan_zone addr_awk reserved_addr implicit_hostid existing_hosts section_is_client section_in_hosts hosts_name_id report_implicit_hosts apply_hosts dhcp_lock dhcp_unlock stage_lan fw_rule_trusted stage_firewall; do
     body="$(extract_function "$f")"
     [ -n "$body" ] || { echo "FAIL: function $f not found in deployer" >&2; exit 1; }
     eval "$body"
