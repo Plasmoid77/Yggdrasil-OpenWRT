@@ -1,5 +1,18 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## Deployer 2.7.1 - reservations can be reshuffled in one run
+
+- Moving a reservation to another adapter (the old section takes a new
+  suffix, another client takes its old one) was refused: suffixes were
+  checked against the existing sections, not against what the run leaves
+  behind, and the new client's section id (from its name) was still held by
+  the old section. Suffixes are now judged on the final state - a section
+  some `--host` line takes over ends with that line's suffix - and a new
+  reservation whose id belongs to a section another line takes over gets the
+  next free id (`ygg_host_<name>_2`). Sections keep their ids and options;
+  an id held by anything else is still refused. Found on the SPb router
+  (laptop moved from a USB dock to the onboard port); review by Astra.
+
 ## Status 6.5.2 - the LAN table fits again with folded columns
 
 - Since the zones moved from `home.arpa` to names like `spb.internal`, the

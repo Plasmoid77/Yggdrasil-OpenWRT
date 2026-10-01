@@ -16,7 +16,7 @@
 set -u
 umask 077
 
-VERSION='2.7.0'
+VERSION='2.7.1'
 SELF="${0##*/}"
 # Piped straight from a URL — wget -qO- ... | sh -s -- ... — $0 is the shell, so
 # the banner and the usage text would announce themselves as "sh".
@@ -1567,18 +1567,45 @@ EH_EOF
     return 0
 }
 
+# Is an existing section (MAC list $1, DUID list $2) taken over by any --host
+# line of this run? Its suffix is then the one that line asks for.
+section_in_hosts() {
+    while IFS=' ' read -r _sih_n _sih_kt _sih_k _sih_id; do
+        [ -n "$_sih_n" ] || continue
+        section_is_client "$1" "$2" "$_sih_kt" "$_sih_k" && return 0
+    done <<SIH_EOF
+$HOSTS
+SIH_EOF
+    return 1
+}
+
+# Is $1 (dhcp.<id>) the section id some --host line of this run derives from
+# its name?
+hosts_name_id() {
+    while IFS=' ' read -r _hni_n _hni_rest; do
+        [ -n "$_hni_n" ] || continue
+        [ "dhcp.ygg_host_$(printf '%s' "$_hni_n" | tr -c 'A-Za-z0-9' '_')" = "$1" ] && return 0
+    done <<HNI_EOF
+$HOSTS
+HNI_EOF
+    return 1
+}
+
 apply_hosts() {
     [ -n "$HOSTS" ] || return 0
     _eh="$(existing_hosts)"
 
     # Every suffix odhcpd will hand out from this prefix, ours and the ones the
-    # existing sections already imply, must be distinct.
+    # existing sections already imply, must be distinct - judged on the state
+    # this run leaves behind, so a reshuffle (one section moves to a new suffix,
+    # another client takes its old one) is not refused halfway.
     while IFS=' ' read -r _hn _hkt _hk _hid; do
         [ -n "$_hn" ] || continue
         while IFS='|' read -r _es _ehid _eip _emac _eduid _eextra; do
             [ -n "$_es" ] || continue
-            # the section this reservation will update may hold its own suffix
-            section_is_client "$_emac" "$_eduid" "$_hkt" "$_hk" && continue
+            # a section some line updates ends with that line's suffix, and
+            # the parser already keeps the lines' suffixes apart
+            section_in_hosts "$_emac" "$_eduid" && continue
             if [ -n "$_ehid" ]; then
                 [ "$_ehid" = 'ignore' ] && continue
                 _eid="$(norm_hostid "$_ehid")"; _why="hostid $_ehid"
@@ -1630,10 +1657,28 @@ EH_EOF
             _es="dhcp.ygg_host_$(printf '%s' "$_hn" | tr -c 'A-Za-z0-9' '_')"
             # The section id is derived from the name. If it already exists it
             # belongs to a different client (this one matched nothing above),
-            # and 'uci set' would quietly turn it into this reservation.
+            # and 'uci set' would quietly turn it into this reservation. When
+            # another line of this run takes that section over (a reshuffle),
+            # it keeps its id and this one gets the next free id; later runs
+            # find it by MAC/DUID, not by id.
             if uci -q get "$_es" >/dev/null 2>&1; then
-                die "--host $_hn: section ${_es#dhcp.} already exists ($(uci -q get "$_es")) — rename the reservation or remove that section"
-            else
+                _ehm="$(printf '%s\n' "$_eh" | awk -F'|' -v id="$_es" '$1 == id { print $4; exit }')"
+                _ehd="$(printf '%s\n' "$_eh" | awk -F'|' -v id="$_es" '$1 == id { print $5; exit }')"
+                if [ "$(uci -q get "$_es")" = 'host' ] && section_in_hosts "$_ehm" "$_ehd"; then
+                    _n=2
+                    # free in UCI, not created in this run, and not the
+                    # name-derived id of another line (thinkpad-2 -> _2)
+                    while uci -q get "${_es}_$_n" >/dev/null 2>&1 \
+                        || case "$_touched" in *" ${_es}_$_n "*) true ;; *) false ;; esac \
+                        || hosts_name_id "${_es}_$_n"; do
+                        _n=$((_n + 1))
+                    done
+                    _es="${_es}_$_n"
+                else
+                    die "--host $_hn: section ${_es#dhcp.} already exists ($(uci -q get "$_es")) — rename the reservation or remove that section"
+                fi
+            fi
+            if ! uci -q get "$_es" >/dev/null 2>&1; then
                 uci_set "$_es" 'host'
                 uci_set "$_es.name" "$_hn"
                 if [ "$_hkt" = 'mac+duid' ]; then

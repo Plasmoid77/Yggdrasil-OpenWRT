@@ -28,7 +28,7 @@ extract_function() {
 eval "$(sed -n '/^set -u$/,/^VERSION=/p' "$SCRIPT" | sed '/^set -u$/d')"
 eval "$(sed -n '/^# -* defaults -*$/,/^usage() {$/p' "$SCRIPT" | sed '$d')"
 for f in add_peer add_trusted add_dns_host lower_str is_mac norm_duid norm_duid_opt duid_in_key mac_in_key norm_hostid add_host status_valid_version read_config \
-         inspect_lan lan_has_ygg_prefix lan_zone reserved_addr implicit_hostid existing_hosts section_is_client report_implicit_hosts apply_hosts stage_lan fw_rule_trusted stage_firewall; do
+         inspect_lan lan_has_ygg_prefix lan_zone reserved_addr implicit_hostid existing_hosts section_is_client section_in_hosts hosts_name_id report_implicit_hosts apply_hosts stage_lan fw_rule_trusted stage_firewall; do
     body="$(extract_function "$f")"
     [ -n "$body" ] || { echo "FAIL: function $f not found in deployer" >&2; exit 1; }
     eval "$body"
@@ -386,6 +386,77 @@ dhcp.cfg05.duid='00010001deadbeefaabbccddee30'" ;; '-q get') return 1 ;; *) retu
 reset; UCI_LOG=''; HOSTS='p mac aa:bb:cc:dd:ee:30 81
 q duid 00010001deadbeefaabbccddee30 82'; apply_hosts
 printf '%s' "$DIED" | grep -q 'already updated for another --host line' || fail "one section updated twice: $DIED"
+# a reshuffle in one run: the old section (dock MAC, machine-wide DUID, ::20)
+# becomes thinkpad-dock ::22 while the onboard port takes ::20. Suffixes are
+# judged on the final state, in any line order; the old section keeps its id
+# and the new one gets the next free id instead of dying on its name.
+LAPD=0004ecbcbfb80ef2996849bca6b0d0a6ffce
+RESHUFFLE_FIXTURE="dhcp.ygg_host_thinkpad=host
+dhcp.ygg_host_thinkpad.name='thinkpad'
+dhcp.ygg_host_thinkpad.mac='3c:e1:a1:41:52:d0'
+dhcp.ygg_host_thinkpad.duid='$LAPD'
+dhcp.ygg_host_thinkpad.hostid='20'
+dhcp.ygg_host_thinkpad.leasetime='2m'
+dhcp.ygg_host_thinkpad_wifi=host
+dhcp.ygg_host_thinkpad_wifi.name='thinkpad-wifi'
+dhcp.ygg_host_thinkpad_wifi.mac='14:4f:8a:8d:19:77'
+dhcp.ygg_host_thinkpad_wifi.hostid='21'
+dhcp.ygg_host_thinkpad_wifi.leasetime='2m'"
+uci() { case "$1 $2" in 'show dhcp') printf '%s\n' "$RESHUFFLE_FIXTURE" ;; '-q get') case "$3" in dhcp.ygg_host_thinkpad|dhcp.ygg_host_thinkpad_wifi) echo host ;; *.leasetime) echo 2m ;; *) return 1 ;; esac ;; *) return 0 ;; esac; }
+L1="thinkpad mac+duid 8c:16:45:a1:ad:cf+$LAPD%667b932a 20"
+L2="thinkpad-dock mac+duid 3c:e1:a1:41:52:d0+$LAPD%206de1ca 22"
+L3="thinkpad-wifi mac+duid 14:4f:8a:8d:19:77+$LAPD%d259864f 21"
+for order in "$L1
+$L2
+$L3" "$L3
+$L2
+$L1"; do
+    reset; UCI_LOG=''; HOSTS="$order"; apply_hosts
+    [ -z "$DIED" ] || fail "reservation reshuffle died: $DIED"
+    for want in 'set dhcp.ygg_host_thinkpad.name=thinkpad-dock' "set dhcp.ygg_host_thinkpad.duid=$LAPD%206de1ca" \
+        'set dhcp.ygg_host_thinkpad.hostid=22' 'set dhcp.ygg_host_thinkpad_2=host' 'set dhcp.ygg_host_thinkpad_2.name=thinkpad' \
+        'set dhcp.ygg_host_thinkpad_2.mac=8c:16:45:a1:ad:cf' "set dhcp.ygg_host_thinkpad_2.duid=$LAPD%667b932a" \
+        'set dhcp.ygg_host_thinkpad_2.hostid=20' "set dhcp.ygg_host_thinkpad_wifi.duid=$LAPD%d259864f"; do
+        printf '%s' "$UCI_LOG" | grep -qxF "$want" || fail "reshuffle did not write '$want': $UCI_LOG"
+    done
+done
+# the free id skips one another line of the run derives from its own name
+L4="thinkpad-2 mac aa:bb:cc:dd:ee:71 23"
+for order in "$L1
+$L2
+$L4" "$L4
+$L2
+$L1"; do
+    reset; UCI_LOG=''; HOSTS="$order"; apply_hosts
+    [ -z "$DIED" ] || fail "reshuffle beside a name-derived _2 id died: $DIED"
+    printf '%s' "$UCI_LOG" | grep -qxF 'set dhcp.ygg_host_thinkpad_2.name=thinkpad-2' || fail "thinkpad-2 lost its own id: $UCI_LOG"
+    printf '%s' "$UCI_LOG" | grep -qxF 'set dhcp.ygg_host_thinkpad_3.mac=8c:16:45:a1:ad:cf' || fail "moved reservation did not take the next free id: $UCI_LOG"
+done
+# rerun on the result: every line finds its own section, nothing new
+RESHUFFLE_FIXTURE="dhcp.ygg_host_thinkpad=host
+dhcp.ygg_host_thinkpad.name='thinkpad-dock'
+dhcp.ygg_host_thinkpad.mac='3c:e1:a1:41:52:d0'
+dhcp.ygg_host_thinkpad.duid='$LAPD%206de1ca'
+dhcp.ygg_host_thinkpad.hostid='22'
+dhcp.ygg_host_thinkpad_2=host
+dhcp.ygg_host_thinkpad_2.name='thinkpad'
+dhcp.ygg_host_thinkpad_2.mac='8c:16:45:a1:ad:cf'
+dhcp.ygg_host_thinkpad_2.duid='$LAPD%667b932a'
+dhcp.ygg_host_thinkpad_2.hostid='20'
+dhcp.ygg_host_thinkpad_wifi=host
+dhcp.ygg_host_thinkpad_wifi.name='thinkpad-wifi'
+dhcp.ygg_host_thinkpad_wifi.mac='14:4f:8a:8d:19:77'
+dhcp.ygg_host_thinkpad_wifi.duid='$LAPD%d259864f'
+dhcp.ygg_host_thinkpad_wifi.hostid='21'"
+uci() { case "$1 $2" in 'show dhcp') printf '%s\n' "$RESHUFFLE_FIXTURE" ;; '-q get') case "$3" in dhcp.ygg_host_thinkpad|dhcp.ygg_host_thinkpad_2|dhcp.ygg_host_thinkpad_wifi) echo host ;; *.leasetime) echo 2m ;; *) return 1 ;; esac ;; *) return 0 ;; esac; }
+reset; UCI_LOG=''; HOSTS="$L1
+$L2
+$L3"; apply_hosts
+[ -z "$DIED" ] || fail "rerun after a reshuffle died: $DIED"
+printf '%s' "$UCI_LOG" | grep -qE '=host$' && fail "rerun after a reshuffle created a section: $UCI_LOG"
+# a suffix held by a section no line takes over still collides
+reset; UCI_LOG=''; HOSTS='other mac aa:bb:cc:dd:ee:77 20'; apply_hosts
+printf '%s' "$DIED" | grep -q 'already taken by ygg_host_thinkpad_2' || fail "suffix of an untouched section was ignored: $DIED"
 uci() { case "$1 $2" in 'show dhcp') printf '%s\n' "$FIXTURE" ;; '-q get') return 1 ;; *) return 0 ;; esac; }
 # implicit reservations are reported even without any --host
 reset; INFOD=''; report_implicit_hosts
