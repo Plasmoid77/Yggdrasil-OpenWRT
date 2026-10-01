@@ -1,5 +1,50 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## Deployer 2.7.2 - fixes from the repository review
+
+Found by the review of the whole repository (Codex and three independent
+audits); every item was confirmed against the code first. Host-tested only,
+no router run yet.
+
+- `--status-version` and `[status-version]` never worked: the option loop
+  runs at the top of the script and called `status_valid_version`, which was
+  defined two thousand lines further down, so every value was refused as
+  "invalid". The tests had extracted the function first and could not see
+  it. The function now sits above the loop, and `tests/deploy-cli.sh` runs
+  the real script with real options under both shells.
+- A `--dns-host` name given twice (two addresses for one name, as the help
+  says) was refused as a duplicate. Only a clash between the router name,
+  `--dns-host` names and `--host` names is an error now.
+- The trusted rules fail closed: their `src_ip` list is deleted before it is
+  rewritten, and a failed write is now fatal (the rollback restores the
+  firewall) instead of leaving an ACCEPT rule without a source restriction.
+- Stage 6 takes the DHCP lock and rechecks for uncommitted `dhcp` changes
+  before it stages anything, as stage 4 does; a Pin/Unpin edit in between can
+  no longer be committed by the deployer.
+- A failed write of `restore.conf`, the restore hook or `/etc/sysupgrade.conf`
+  (a full overlay) at the very end no longer rolls back a deployment that is
+  already in place: the restore machinery is removed with a warning, as when
+  no deployer copy can be kept. A `sysupgrade.conf` without a final newline no
+  longer swallows the first line we add.
+- Declining the "replace the existing identity?" prompt no longer sends the
+  rollback reloading an untouched network; the rollback reloads only the
+  services whose configuration it restored, and odhcpd by `reload`.
+- The configuration backup (it holds the node key) is written only once the
+  uncommitted-changes check and the confirmation have passed, so refused runs
+  no longer leave copies on flash; the unused `*.uciexport` copies are gone.
+- Peer URIs are shown without their query (`?password=`) and `user:pass@`
+  part in every message; a repeated `--peer` is kept once.
+- `--no-multicast` now also removes the multicast section of an earlier run.
+- `--iface`/`--lan` must be UCI names and `--wait` a number; `--peers-file`
+  lines are trimmed like `[peers]` lines instead of losing inner spaces.
+- The closing summary checks the LAN for the whole routed /64 (it matched the
+  first hextet only) and no longer claims reachability with `--no-firewall`
+  or without trusted nodes, or a routed prefix on the LAN with `--no-lan`.
+- Usage: `--dns`, the RA settings the LAN stage writes (`ra=server`,
+  `ra_default=2`), that a rerun applies its whole description of the node,
+  and a current `--status-version` example. Comments that pointed at the old
+  pointer files or described static DNS records are rewritten.
+
 ## Status 6.5.3 (not released yet) - polish from the repository review
 
 - Pin and Unpin could answer "busy" for up to ~20 s after a page refresh:

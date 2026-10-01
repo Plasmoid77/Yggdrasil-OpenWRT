@@ -1,6 +1,6 @@
 #!/bin/sh
 # deploy-openwrt-yggdrasil.sh — automated deployment of the routed Yggdrasil /64
-# design documented in this repository (README.md / QUICKSTART.md / REFERENCE_CONFIG.md).
+# design documented in this repository (docs/installation.md, docs/architecture.md).
 #
 # Runs ON the OpenWrt router, under BusyBox ash. POSIX sh only.
 #
@@ -16,7 +16,7 @@
 set -u
 umask 077
 
-VERSION='2.7.1'
+VERSION='2.7.2'
 SELF="${0##*/}"
 # Piped straight from a URL — wget -qO- ... | sh -s -- ... — $0 is the shell, so
 # the banner and the usage text would announce themselves as "sh".
@@ -51,7 +51,7 @@ DO_LAN=1
 DO_FIREWALL=1
 DO_STATUS=1
 DO_MULTICAST=1
-# Part III is a separate module in the design — the routed /64, SLAAC, the
+# The DNS module is separate in the design — the routed /64, SLAAC, the
 # firewall policy and the status page all work without it — but a deployment
 # that stops short of it is not finished, so it runs unless --no-dns says not to.
 DO_DNS=1
@@ -156,14 +156,15 @@ Trusted remote access (firewall src_ip allow-list):
   --trusted ADDR        Yggdrasil /128 allowed to reach the router and LAN.
                         Repeatable. Without any, the ygg zone stays fully closed.
 
-DNS module (Part III, on by default — see also --no-dns):
+DNS module (on by default — see also --dns / --no-dns):
   --dns-domain NAME     Private namespace (default: $DNS_DOMAIN)
   --dns-router NAME     Hostname for this router (default: $DNS_ROUTER)
   --dns-host NAME=ADDR  Extra record. Repeatable; repeat a NAME to give it
                         several addresses.
 
 LAN (the routed /64 is added beside the LAN's existing IPv6 prefixes; the
-stock RA/DHCPv6 configuration is kept, so reservations work without a mode):
+stock RA/DHCPv6 mode is kept - the router is made RA server and default router
+(ra=server, ra_default=2) - so reservations work without a mode):
   --host NAME=MAC=HOSTID
   --host NAME=duid:HEX[%IAID]=HOSTID
   --host NAME=MAC+duid:HEX[%IAID]=HOSTID
@@ -187,9 +188,10 @@ Scope:
   --no-lan              Do not touch LAN ip6assign/ip6class/RA
   --no-firewall         Do not create the ygg zone or trusted rules
   --no-status           Do not install the LuCI status module
-  --no-dns              Do not serve <name>.$DNS_DOMAIN over Yggdrasil
+  --dns / --no-dns      Serve <name>.$DNS_DOMAIN over Yggdrasil (the default) /
+                        do not set it up; --no-dns leaves an earlier setup alone
   --status-pkg PATH     Install a local tarball; PATH.sha256 is required
-  --status-version VER  Install this status release (e.g. v5.2) instead of the
+  --status-version VER  Install this status release (e.g. v6.5.2) instead of the
                         newest published one
   --ygg-edge            Install the newest Yggdrasil build from this project's
                         releases (newer than the OpenWrt feed) instead of the
@@ -221,6 +223,9 @@ comment, blank lines are ignored. Unknown sections are an error. Sections:
                                                (as the switches of the same name)
 Keep the file mode 600 when it holds the key. --dry-run, --yes and --wait
 describe the run, not the node, and stay on the command line.
+Each run applies its whole description of the node: only the peers and the key
+are kept when not given. Keep everything else (zone, hosts, flags) in one
+--config file and rerun with it.
 The 1.x switches --dhcpv6 / --slaac (and the flags of the same name) are gone:
 2.0 keeps the LAN's stock RA/DHCPv6 configuration; delete them.
 USAGE
@@ -228,15 +233,29 @@ USAGE
 
 # -------------------------------------------------------------- arg parsing ---
 
+# A peer URI as the diagnostics print it: a query (?password=...) and a
+# user:password@ part may carry a secret, so neither is shown.
+peer_shown() {
+    _ps="${1%%\?*}"
+    [ "$_ps" = "$1" ] || _ps_q='?...'
+    case "$_ps" in
+        *://*@*) _ps="${_ps%%://*}://...@${_ps#*@}" ;;
+    esac
+    printf '%s%s' "$_ps" "${_ps_q:-}"
+    _ps_q=''
+}
+
 add_peer() {
     _p="$1"
     case "$_p" in
         tls://*|tcp://*|quic://*|ws://*|wss://*|socks://*|sockstls://*) : ;;
-        *) die "unsupported peer URI (bad scheme): $_p" ;;
+        *) die "unsupported peer URI (bad scheme): $(peer_shown "$_p")" ;;
     esac
     case "$_p" in
-        *' '*|*"$(printf '\t')"*) die "peer URI contains whitespace: $_p" ;;
+        *' '*|*"$(printf '\t')"*) die "peer URI contains whitespace: $(peer_shown "$_p")" ;;
     esac
+    # the same URI twice would be two sections for one link
+    if printf '%s\n' "$PEERS" | grep -qxF -- "$_p"; then return 0; fi
     PEERS="${PEERS}${PEERS:+
 }$_p"
 }
@@ -433,6 +452,12 @@ HOSTS_EOF
 }$_hn $_hkt $_hk $_hidn"
 }
 
+# Defined here, above the option loop that calls it: a function exists only
+# once its definition has run.
+status_valid_version() { # $1 = candidate version label
+    printf '%s\n' "$1" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(\.(0|[1-9][0-9]*))?$'
+}
+
 # One settings file instead of a long command line. Every line goes through the
 # same add_*/validation path as the option it stands for, so nothing can enter
 # through the file that the command line would refuse.
@@ -506,7 +531,7 @@ while [ $# -gt 0 ]; do
                        [ -r "$2" ]  || die "cannot read peers file: $2"
                        while IFS= read -r _line || [ -n "$_line" ]; do
                            _line="${_line%%#*}"
-                           _line="$(printf '%s' "$_line" | tr -d ' \t\r')"
+                           _line="$(printf '%s' "$_line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
                            [ -n "$_line" ] && add_peer "$_line"
                        done < "$2"
                        shift 2 ;;
@@ -546,6 +571,17 @@ while [ $# -gt 0 ]; do
         *)             usage; die "unknown argument: $1" ;;
     esac
 done
+
+# The interface names end up in UCI paths, in the generated hotplug scripts and
+# in sed replacements, so they get UCI's own section-name alphabet.
+for _nm in "$IFACE" "$LAN"; do
+    case "$_nm" in
+        ''|*[!A-Za-z0-9_]*) die "invalid interface name '$_nm' (letters, digits and '_' only, as in UCI)" ;;
+    esac
+done
+case "$WAIT_SECS" in
+    ''|*[!0-9]*) die "--wait needs a number of seconds: $WAIT_SECS" ;;
+esac
 
 # A reservation only means something where odhcpd hands out the addresses.
 # Whether this LAN's DHCPv6 server is on is settled in preflight, once the
@@ -597,16 +633,20 @@ if [ "$DO_DNS" -eq 1 ]; then
     # the longest name is a 63-character label, a dot and the zone
     [ $(( ${#DNS_DOMAIN} + 64 )) -le 253 ] || die "--dns-domain is too long: $DNS_DOMAIN"
     dns_label_ok "$DNS_ROUTER" || die "--dns-router must be one label (letters, digits, '-'): $DNS_ROUTER"
-    _names="$DNS_ROUTER"
+    # A --dns-host NAME may repeat (one record per address); only a clash
+    # between the router, the --dns-host names and the --host names is an error.
+    _dnames=''
     while IFS= read -r _dh; do
         [ -n "$_dh" ] || continue
         _n="$(lower_str "${_dh%%=*}")"
         dns_label_ok "$_n" || die "--dns-host: invalid name '${_dh%%=*}' (letters, digits, '-', at most 63)"
-        _names="$_names
+        _dnames="$_dnames
 $_n"
     done <<DNS_EOF
 $DNS_HOSTS
 DNS_EOF
+    _names="$DNS_ROUTER
+$(printf '%s\n' "$_dnames" | sed '/^$/d' | sort -u)"
     while IFS=' ' read -r _hn _hkt _hk _hid; do
         [ -n "$_hn" ] && _names="$_names
 $(lower_str "$_hn")"
@@ -794,10 +834,14 @@ rollback() {
             rm -f "$DNS_CONF" "$DNS_HOSTS_DIR/yggdrasil-$IFACE" && warn "  removed $DNS_CONF and the generated names"
         fi
     fi
-    /etc/init.d/network reload  >/dev/null 2>&1 || true
-    /etc/init.d/odhcpd restart  >/dev/null 2>&1 || true
+    # Only the services whose configuration went back; odhcpd by reload, which
+    # keeps the bound DHCPv6 leases (see stage_lan).
+    [ "$CHANGED_NETWORK" -eq 1 ] && { /etc/init.d/network reload >/dev/null 2>&1 || true; }
+    if [ "$CHANGED_NETWORK$CHANGED_DHCP" != "00" ]; then
+        /etc/init.d/odhcpd reload >/dev/null 2>&1 || /etc/init.d/odhcpd restart >/dev/null 2>&1 || true
+    fi
     [ "$CHANGED_DHCP" -eq 1 ] && { /etc/init.d/dnsmasq restart >/dev/null 2>&1 || true; }
-    /etc/init.d/firewall reload >/dev/null 2>&1 || true
+    [ "$CHANGED_FIREWALL" -eq 1 ] && { /etc/init.d/firewall reload >/dev/null 2>&1 || true; }
     warn "rollback done — verify the router state manually"
 }
 
@@ -899,7 +943,7 @@ stage_preflight() {
 
     if [ -n "$PEERS" ]; then
         info 'peers to configure (the existing set is replaced):'
-        printf '%s\n' "$PEERS" | while IFS= read -r _p; do [ -n "$_p" ] && info "    $_p"; done
+        printf '%s\n' "$PEERS" | while IFS= read -r _p; do [ -n "$_p" ] && info "    $(peer_shown "$_p")"; done
     else
         _have="$(uci show network 2>/dev/null | grep -c "=yggdrasil_${IFACE}_peer\$" || true)"
         if [ "${_have:-0}" -gt 0 ]; then
@@ -916,24 +960,6 @@ stage_preflight() {
         warn "no --trusted given: the ygg zone will be created closed (no remote access)"
     fi
 
-    if [ "$DRY_RUN" -eq 0 ]; then
-        BACKUP_DIR="/root/ygg-deploy-backup-$(date +%Y%m%d-%H%M%S)"
-        mkdir -p "$BACKUP_DIR" || die "cannot create $BACKUP_DIR"
-        for _c in network dhcp firewall; do
-            [ -f "/etc/config/$_c" ] && cp "/etc/config/$_c" "$BACKUP_DIR/$_c"
-        done
-        # the DNS names' settings live beside UCI (stage 6); "absent" marks a first run
-        if [ -f "$DNS_CONF" ]; then
-            cp "$DNS_CONF" "$BACKUP_DIR/dns.conf"
-        else
-            : > "$BACKUP_DIR/dns.conf.absent"
-        fi
-        uci export network  > "$BACKUP_DIR/network.uciexport"  2>/dev/null || true
-        uci export dhcp     > "$BACKUP_DIR/dhcp.uciexport"     2>/dev/null || true
-        uci export firewall > "$BACKUP_DIR/firewall.uciexport" 2>/dev/null || true
-        ok "backup written to $BACKUP_DIR"
-    fi
-
     # refuse to run on top of uncommitted changes we would otherwise commit blindly
     if [ "$DRY_RUN" -eq 0 ]; then
         for _c in network dhcp firewall; do
@@ -947,6 +973,23 @@ stage_preflight() {
 
     confirm "Apply this deployment to $(cat /tmp/sysinfo/model 2>/dev/null || echo 'this router')?" \
         || die "aborted by operator"
+
+    # The backup holds the node key: written only for a run that goes ahead,
+    # so a refused or declined run leaves no copy behind.
+    if [ "$DRY_RUN" -eq 0 ]; then
+        BACKUP_DIR="/root/ygg-deploy-backup-$(date +%Y%m%d-%H%M%S)"
+        mkdir -p "$BACKUP_DIR" || die "cannot create $BACKUP_DIR"
+        for _c in network dhcp firewall; do
+            [ -f "/etc/config/$_c" ] && cp "/etc/config/$_c" "$BACKUP_DIR/$_c"
+        done
+        # the DNS names' settings live beside UCI (stage 6); "absent" marks a first run
+        if [ -f "$DNS_CONF" ]; then
+            cp "$DNS_CONF" "$BACKUP_DIR/dns.conf"
+        else
+            : > "$BACKUP_DIR/dns.conf.absent"
+        fi
+        ok "backup written to $BACKUP_DIR"
+    fi
 }
 
 # =========================================================== stage 1: packages
@@ -1241,8 +1284,6 @@ stage_yggdrasil() {
     FAILED_STAGE='yggdrasil interface'
     step "Stage 2 — Yggdrasil interface '$IFACE'"
 
-    CHANGED_NETWORK=1
-
     _priv="$EXISTING_KEY"
     if [ -n "$SUPPLIED_KEY" ]; then
         if [ -n "$EXISTING_KEY" ] && [ "$EXISTING_KEY" != "$SUPPLIED_KEY" ]; then
@@ -1274,6 +1315,9 @@ stage_yggdrasil() {
     validate_private_key "$_priv" "the selected Yggdrasil identity"
     _pub="$(pub_from_priv "$_priv")"
 
+    # Only now: declining the identity prompt above writes nothing, so it must
+    # not send the rollback restoring and reloading an untouched network.
+    CHANGED_NETWORK=1
     uci_set "network.$IFACE" 'interface'
     uci_set "network.$IFACE.proto" 'yggdrasil'
     uci_set "network.$IFACE.private_key" "$_priv"
@@ -1322,21 +1366,14 @@ stage_yggdrasil() {
     fi
     [ "$_n" -gt 0 ] && info "removed $_n existing peer section(s)"
 
-    _existing_peers=''
-
-    _added=0
     printf '%s\n' "$PEERS" | while IFS= read -r _p; do
         [ -n "$_p" ] || continue
-        if printf '%s\n' "$_existing_peers" | grep -qxF "$_p"; then
-            info "peer already present, skipping: $_p"
-            continue
-        fi
         if [ "$DRY_RUN" -eq 1 ]; then
-            printf '    would add peer: %s\n' "$_p" >&2
+            printf '    would add peer: %s\n' "$(peer_shown "$_p")" >&2
         else
             _s="$(uci add network "$_peer_type")" || exit 1
             uci set "network.$_s.address=$_p" || exit 1
-            printf '[+] peer added: %s\n' "$_p" >&2
+            printf '[+] peer added: %s\n' "$(peer_shown "$_p")" >&2
         fi
     done || die "failed while adding peer sections"
 
@@ -1344,20 +1381,26 @@ stage_yggdrasil() {
     _mc_type="yggdrasil_${IFACE}_interface"
     _lan_dev="$(uci -q get "network.$LAN.device" 2>/dev/null)"
     [ -n "$_lan_dev" ] || _lan_dev='br-lan'
+    # The sections are rewritten on every run, so --no-multicast also turns
+    # off the peering an earlier run enabled.
+    if [ "$DRY_RUN" -eq 0 ]; then
+        _count="$(uci show network 2>/dev/null | grep -c "=$_mc_type\$" || true)"
+        [ -z "$_count" ] && _count=0
+        while [ "$_count" -gt 0 ]; do
+            _count=$((_count - 1))
+            uci -q delete "network.@${_mc_type}[${_count}]" 2>/dev/null || true
+        done
+    fi
     if [ "$DO_MULTICAST" -eq 1 ]; then
         if [ "$DRY_RUN" -eq 0 ]; then
-            _count="$(uci show network 2>/dev/null | grep -c "=$_mc_type\$" || true)"
-            [ -z "$_count" ] && _count=0
-            while [ "$_count" -gt 0 ]; do
-                _count=$((_count - 1))
-                uci -q delete "network.@${_mc_type}[${_count}]" 2>/dev/null || true
-            done
             _s="$(uci add network "$_mc_type")"
             uci add_list "network.$_s.interface=$_lan_dev"
             uci set "network.$_s.beacon=1"
             uci set "network.$_s.listen=1"
         fi
         info "LAN multicast peering on '$_lan_dev' (beacon=1 listen=1)"
+    else
+        info "LAN multicast peering off (--no-multicast)"
     fi
 
     if [ "$DRY_RUN" -eq 0 ]; then
@@ -1710,28 +1753,32 @@ lan_has_ygg_prefix() {
         | grep -qixF "$_want"
 }
 
+# dhcp is also the status module's file (Pin/Unpin edit config host under
+# this lock, and an open status page holds it shared for a few seconds on
+# every refresh). A stage takes it before staging anything in dhcp, so a busy
+# lock means "nothing changed yet" rather than a rollback over someone else's
+# edit, and releases it (exec 9>&-) once its commit is done.
+# BusyBox flock has no -w, so wait by retrying.
+dhcp_lock() {
+    if ! have flock || [ "$DRY_RUN" -eq 1 ]; then return 0; fi
+    exec 9>>/var/lock/yggdrasil-status-dhcp.lock
+    _tries=0
+    until flock -n 9; do
+        _tries=$((_tries + 1))
+        [ "$_tries" -lt 30 ] || die "another process is editing DHCP configuration (lock busy for 30 s) — retry in a moment"
+        sleep 1
+    done
+    if uci -q changes dhcp 2>/dev/null | grep -q .; then
+        die "uncommitted UCI changes appeared in 'dhcp' since preflight — commit or revert them first"
+    fi
+}
+
 stage_lan() {
     [ "$DO_LAN" -eq 1 ] || { info "skipping LAN stage (--no-lan)"; return 0; }
     FAILED_STAGE='LAN routed /64 and RA'
     step "Stage 4 — LAN routed /64 beside the existing prefixes"
 
-    # dhcp is also the status module's file (Pin/Unpin edit config host under
-    # this lock, and an open status page holds it shared for a few seconds on
-    # every refresh). Take it before staging anything, so a busy lock means
-    # "nothing changed yet" rather than a rollback over someone else's edit.
-    # BusyBox flock has no -w, so wait by retrying.
-    if have flock && [ "$DRY_RUN" -eq 0 ]; then
-        exec 9>>/var/lock/yggdrasil-status-dhcp.lock
-        _tries=0
-        until flock -n 9; do
-            _tries=$((_tries + 1))
-            [ "$_tries" -lt 30 ] || die "another process is editing DHCP configuration (lock busy for 30 s) — retry in a moment"
-            sleep 1
-        done
-        if uci -q changes dhcp 2>/dev/null | grep -q .; then
-            die "uncommitted UCI changes appeared in 'dhcp' since preflight — commit or revert them first"
-        fi
-    fi
+    dhcp_lock
 
     CHANGED_NETWORK=1
     CHANGED_DHCP=1
@@ -1822,18 +1869,20 @@ lan_zone() {
     fi
 }
 
+# Restrict an ACCEPT rule to the trusted sources ($1 = section; the caller sets
+# the rest). Its old src_ip list goes first, so a failed write would leave the
+# rule open to every Yggdrasil node: that ends the run, and the rollback puts
+# the previous firewall configuration back.
 fw_rule_trusted() {
-    # $1 = section name, $2 = human name, and the caller pre-sets the specifics
     _sec="$1"
     uci_del "firewall.$_sec.src_ip"
-    printf '%s\n' "$TRUSTED" | while IFS= read -r _t; do
+    while IFS= read -r _t; do
         [ -n "$_t" ] || continue
-        if [ "$DRY_RUN" -eq 1 ]; then
-            printf '    would run: uci add_list firewall.%s.src_ip=%s\n' "$_sec" "$_t" >&2
-        else
-            uci add_list "firewall.$_sec.src_ip=$_t"
-        fi
-    done
+        uci_add_list "firewall.$_sec.src_ip" "$_t" \
+            || die "could not restrict firewall.$_sec to $_t - refusing to leave an unrestricted ACCEPT rule"
+    done <<TRUSTED_EOF
+$TRUSTED
+TRUSTED_EOF
 }
 
 stage_firewall() {
@@ -1911,9 +1960,9 @@ stage_firewall() {
 
 # ================================================ stage 6: DNS over Yggdrasil
 
-# Part III of the design (AI_CONTEXT.md section 10, REFERENCE_CONFIG.md 6-7).
-# One 'config domain' record serves two roles at once: persistent canonical Ygg
-# metadata for the status page, and a plain dnsmasq answer. No extra daemon.
+# The DNS module (docs/architecture.md). The generated names serve two roles
+# at once: canonical Ygg metadata for the status page, and plain dnsmasq
+# answers. No extra daemon.
 
 # The names are not static UCI records: they would keep the addresses of the key
 # the deployer ran with. A generator of ours writes them as a hosts file into
@@ -2065,6 +2114,7 @@ stage_dns() {
     uci -q get 'dhcp.@dnsmasq[0]' >/dev/null 2>&1 \
         || die "no dnsmasq section in /etc/config/dhcp"
 
+    dhcp_lock
     CHANGED_DHCP=1
 
     # The zones this router answered before: the one in dns.conf, or (up to
@@ -2130,6 +2180,7 @@ stage_dns() {
 
     if [ "$DRY_RUN" -eq 0 ]; then
         uci commit dhcp || die "uci commit dhcp failed"
+        have flock && exec 9>&-
         /etc/init.d/dnsmasq restart >/dev/null 2>&1 || die "dnsmasq restart failed"
 
         # A dnsmasq that cannot parse its config exits without a word, taking
@@ -2170,10 +2221,6 @@ status_fetch() { # $1 = HTTPS URL, $2 = destination, $3 = optional request heade
         [ "$sf_try" -lt 3 ] || return 1
         sleep 2
     done
-}
-
-status_valid_version() { # $1 = candidate version label
-    printf '%s\n' "$1" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(\.(0|[1-9][0-9]*))?$'
 }
 
 # Read exactly one digest from a checksum file. A file naming several artifacts
@@ -2297,7 +2344,7 @@ stage_status() {
         return 0
     fi
 
-    # Isolated cleanup traps must not replace the parent deployer's rollback traps.
+    # A subshell, so the cleanup trap of this workspace stays local to it.
     (
         ss_tmp="$(mktemp -d "${TMPDIR:-/tmp}/ygg-status-deploy.XXXXXX")" \
             || { warn "cannot create private status workspace"; exit 0; }
@@ -2395,7 +2442,7 @@ HOSTS_EOF
         # A lease proves the DHCPv6 path end to end, but odhcpd forgets leases
         # on restart and a client asks again only on renew/reconnect, so an
         # empty list right after a run is information, not a failed invariant.
-        _leases="$(ubus call dhcp ipv6leases 2>/dev/null | jsonfilter -e '@.device[*].leases[*]["ipv6-addr"][*].address' 2>/dev/null | grep -i "^${YGG_PREFIX%%::*}" | tr '\n' ' ')"
+        _leases="$(ubus call dhcp ipv6leases 2>/dev/null | jsonfilter -e '@.device[*].leases[*]["ipv6-addr"][*].address' 2>/dev/null | grep -i "^${YGG_PREFIX%%::*}:" | tr '\n' ' ')"
         if [ -n "$_leases" ]; then
             ok "bound DHCPv6 leases in the routed /64: $_leases"
         else
@@ -2442,16 +2489,16 @@ HOSTS_EOF
     if [ -S "/tmp/yggdrasil/${IFACE}.sock" ]; then
         printf '\nPeers:\n' >&2
         yggdrasilctl -json -endpoint="unix:///tmp/yggdrasil/${IFACE}.sock" getpeers 2>/dev/null \
-            | jsonfilter -e '@.peers[@.up=true].remote' 2>/dev/null | sed 's/^/  Up  /' >&2
+            | jsonfilter -e '@.peers[@.up=true].remote' 2>/dev/null | sed 's/?.*//; s|://[^/@]*@|://...@|; s/^/  Up  /' >&2
     fi
 
     printf '\nLAN state:\n' >&2
     _lan_dev="$(uci -q get "network.$LAN.device" 2>/dev/null)"; [ -n "$_lan_dev" ] || _lan_dev='br-lan'
     ip -6 addr show dev "$_lan_dev" 2>/dev/null | sed -n 's/^ *inet6 /  /p' >&2
 
-    _pfx="${YGG_PREFIX%%/*}"
-    _pfx="${_pfx%::}"
-    if ip -6 addr show dev "$_lan_dev" 2>/dev/null | grep -q "${_pfx%%:*}:"; then
+    if [ "$DO_LAN" -eq 0 ]; then
+        info "LAN left as it was (--no-lan)"
+    elif ip -6 addr show dev "$_lan_dev" 2>/dev/null | grep -qi "inet6 ${YGG_PREFIX%%::*}:"; then
         ok "LAN carries an address from the delegated prefix"
     else
         warn "LAN does not yet carry an address from $YGG_PREFIX — give odhcpd a moment, then re-check"
@@ -2468,15 +2515,21 @@ HOSTS_EOF
     fi
 
     printf '\n%s%s%s\n' "$C_OK" "$RULE" "$C_RST" >&2
-    printf '%s%s SUCCESS — Yggdrasil is up and this router is reachable%s\n' \
-        "$C_OK" "$C_BLD" "$C_RST" >&2
+    if [ -n "$TRUSTED" ] && [ "$DO_FIREWALL" -eq 1 ]; then
+        printf '%s%s SUCCESS — Yggdrasil is up, trusted nodes can reach this router%s\n' \
+            "$C_OK" "$C_BLD" "$C_RST" >&2
+    else
+        printf '%s%s SUCCESS — Yggdrasil is up%s\n' "$C_OK" "$C_BLD" "$C_RST" >&2
+    fi
     printf '%s%s%s\n\n' "$C_OK" "$RULE" "$C_RST" >&2
 
     printf '  Router Yggdrasil address\n' >&2
     printf '      %s%s%s%s\n\n' "$C_OK" "$C_BLD" "$NODE_ADDR" "$C_RST" >&2
 
-    printf '  Routed prefix advertised to the LAN\n' >&2
-    printf '      %s  (beside the LAN'"'"'s own prefixes; SLAAC and DHCPv6 as configured)\n\n' "$YGG_PREFIX" >&2
+    if [ "$DO_LAN" -eq 1 ]; then
+        printf '  Routed prefix advertised to the LAN\n' >&2
+        printf '      %s  (beside the LAN'"'"'s own prefixes; SLAAC and DHCPv6 as configured)\n\n' "$YGG_PREFIX" >&2
+    fi
     if [ -n "$HOSTS" ]; then
         printf '  Reserved LAN addresses\n' >&2
         while IFS=' ' read -r _hn _hkt _hk _hid; do
@@ -2488,7 +2541,9 @@ HOSTS_EOF
         printf '\n' >&2
     fi
 
-    if [ -n "$TRUSTED" ]; then
+    if [ "$DO_FIREWALL" -eq 0 ]; then
+        printf '  %sThe firewall was left as it was (--no-firewall).%s\n' "$C_WRN" "$C_RST" >&2
+    elif [ -n "$TRUSTED" ]; then
         printf '  Reachable over Yggdrasil from\n' >&2
         printf '%s\n' "$TRUSTED" | while IFS= read -r _t; do
             [ -n "$_t" ] && printf '      %s\n' "$_t" >&2
@@ -2544,10 +2599,19 @@ keep_on_sysupgrade() {
         grep -qxF "$_k" "$SYSUPGRADE_CONF" 2>/dev/null && continue
         if [ "$DRY_RUN" -eq 1 ]; then
             info "would add $_k to $SYSUPGRADE_CONF"
-        else
-            printf '%s\n' "$_k" >> "$SYSUPGRADE_CONF" || die "cannot write $SYSUPGRADE_CONF"
-            info "kept on sysupgrade: $_k"
+            continue
         fi
+        # an operator's last line without its newline would swallow ours
+        if [ -s "$SYSUPGRADE_CONF" ] && [ -n "$(tail -c 1 "$SYSUPGRADE_CONF")" ]; then
+            printf '\n' >> "$SYSUPGRADE_CONF"
+        fi
+        # The deployment itself is complete by now: a write failure (a full
+        # overlay) costs the keep list, it must not roll the router back.
+        if ! printf '%s\n' "$_k" >> "$SYSUPGRADE_CONF"; then
+            warn "cannot write $SYSUPGRADE_CONF: $_k will not survive a sysupgrade"
+            return 0
+        fi
+        info "kept on sysupgrade: $_k"
     done
 }
 
@@ -2664,11 +2728,15 @@ install_restore() {
         printf '# Written by Yggdrasil-OpenWRT (deploy-openwrt-yggdrasil.sh): what %s --restore puts back.\n' "$RESTORE_COPY"
         printf 'iface %s\nlan %s\npackages %s\njumper %s\nstatus %s\nstatus_src %s\nedge_hash %s\nedge_src %s\n' \
             "$IFACE" "$LAN" "$_pk" "$DO_JUMPER" "$DO_STATUS" "$_ss" "$_eh" "$_es"
-    } > "$RESTORE_CONF" || die "cannot write $RESTORE_CONF"
+    } > "$RESTORE_CONF" || { restore_disable "cannot write $RESTORE_CONF"; return 0; }
+    # Like the copy above, a failure here costs the restore hook, not the
+    # deployment that is already in place.
     if [ ! -f "$RESTORE_HOOK" ] || [ "$(cat "$RESTORE_HOOK")" != "$(restore_hook_text)" ]; then
-        restore_hook_text > "$RESTORE_HOOK" || die "cannot write $RESTORE_HOOK"
+        if ! restore_hook_text > "$RESTORE_HOOK" || ! sh -n "$RESTORE_HOOK"; then
+            restore_disable "cannot write a working $RESTORE_HOOK"
+            return 0
+        fi
         chmod 644 "$RESTORE_HOOK"
-        sh -n "$RESTORE_HOOK" || die "$RESTORE_HOOK does not parse"
     fi
     ok "restore hook in place: packages and the status module come back after a sysupgrade"
 }

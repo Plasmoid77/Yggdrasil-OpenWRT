@@ -39,6 +39,8 @@ sh tests/deploy-peer-hook.sh
 busybox ash tests/deploy-peer-hook.sh
 sh tests/deploy-keep-edge.sh
 busybox ash tests/deploy-keep-edge.sh
+sh tests/deploy-cli.sh
+busybox ash tests/deploy-cli.sh
 sh tests/status-inventory.sh
 busybox ash tests/status-inventory.sh
 sh tests/status-download.sh
