@@ -255,6 +255,21 @@ installed first and netifd is restarted to load the Yggdrasil protocol (the
 same as a first deployment). A router whose uplink itself needs packages from
 outside the official feeds (a modem stack) has to get those back first.
 
+Running the attended sysupgrade with `owut` (validated on a real 25.12.5 →
+25.12.5 rebuild on 2026-10-01):
+
+- after a `--ygg-edge` run, `owut check` reports the feed's Yggdrasil as a
+  downgrade and refuses; `owut upgrade --force` is correct here, the restore
+  hook puts the build back;
+- a package from a third-party feed makes `owut` refuse ("missing in target
+  version"); leave it out with `-r <package>` and reinstall it afterwards. Its
+  feed line in `/etc/apk/repositories.d/customfeeds.list` survives (a package
+  conffile), but its signing key in `/etc/apk/keys/` does not: list the key in
+  `/etc/sysupgrade.conf`, or every later `apk update` fails on that feed;
+- if that package is the uplink (a modem protocol), the restore hook waits for
+  another uplink; with a second one (a Wi-Fi station) it restored everything
+  within about three minutes of that uplink coming up, with no network restart.
+
 For offline or custom builds, use `--status-pkg PATH` and provide the generated
 single-entry `PATH.sha256` beside it. Both must be readable. Missing, malformed
 or mismatched checksums now refuse the status installation; older deployers

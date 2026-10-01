@@ -1,5 +1,13 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## Docs - attended sysupgrade with owut
+
+- `installation.md` ("Surviving a sysupgrade"): what a real attended
+  sysupgrade needed on a clean router with deployer 2.7.0 — `--force` after
+  `--ygg-edge`, `-r` for third-party packages, keeping a third-party feed key
+  in `/etc/sysupgrade.conf`, and the restore hook needing a second uplink when
+  the modem stack itself is third-party. No code change.
+
 ## Status 6.5.1 - the installer names the version it installed
 
 - `install.sh` announced "Yggdrasil Status v5 installed" whatever it
