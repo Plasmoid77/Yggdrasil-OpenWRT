@@ -29,7 +29,7 @@ for fn in lower normalize_mac valid_mac valid_hostname valid_ipv4 first_ipv4 \
     collect_host_duids collect_host_duid host_mac_for_duid mac_seen_on_lan mac_for_lease collect_dhcpv6_leases probe_unattributed_leases dhcpv6_lease_for_mac dhcpv6_lease_match_for_mac \
     norm_hostid valid_hostid collect_taken_hostids collect_taken_hostid lease_duid_for_mac emit_dynamic_leases6 \
     iid_to_addr find_active_lease6_by_mac \
-    emit_client rpc_pin rpc_unpin; do load "$fn"; done
+    host_section_has_extra_options load_ygg_prefix emit_client rpc_pin rpc_unpin; do load "$fn"; done
 
 # The production constants point at /tmp and /etc. Default every memory into
 # the sandbox so no group can touch a real path by forgetting to override one.
@@ -85,6 +85,15 @@ $PRIVACY lladdr $MAC REACHABLE
     NEIGHBORS=''
     build_known_ipv6 "$MAC"
     eq '' "$KNOWN_IPV6"
+    # The kernel writes groups without leading zeros: 00:11:22:33:00:55 is
+    # ...:211:22ff:fe33:55, and the stable address must still win.
+    MAC='00:11:22:33:00:55'
+    STABLE='300:1111:2222:3333:211:22ff:fe33:55'
+    NEIGHBORS="$STABLE lladdr $MAC STALE
+$PRIVACY lladdr $MAC REACHABLE"
+    build_known_ipv6 "$MAC"
+    eq "$STABLE" "$KNOWN_IPV6"
+    eq eui64 "$KNOWN_IPV6_SOURCE"
 }
 
 # A LAN device running its own daemon peers with the router. Only an established
@@ -169,6 +178,17 @@ node_memory() {
     ygg_node_is_live "$MAC" || fail 'fresh observation not reported as live'
     save_address_memory
     eq "$MAC 200:aaaa::9" "$(cat "$NODE_CACHE_FILE")"
+
+    # A device seen with two node addresses keeps both while it is quiet -
+    # but only from the newest memory that knows it, never mixed with flash.
+    YGG_NODE_ROWS="$(printf '%s\n' "$MAC 200:aaaa::9 1" "$MAC 200:bbbb::7 1")"
+    merge_node_cache
+    save_address_memory
+    printf '%s\n' "$MAC 200:dead::1" > "$NODE_STORE_FILE"
+    YGG_NODE_ROWS=''
+    merge_node_cache
+    eq "$(printf '%s\n' "$MAC 200:aaaa::9 0" "$MAC 200:bbbb::7 0")" "$YGG_NODE_ROWS"
+    rm -f "$NODE_STORE_FILE"
 
     # A missing cache file is an empty memory, not an error.
     rm -f "$NODE_CACHE_FILE"
@@ -378,6 +398,11 @@ presence() {
     if probe_online 192.0.2.1; then fail 'unprobed row marked online'; fi
     eq 0 "$PROBED"
     eq '' "$(cat "$TRACE")"
+    # a row with nothing to ask is offline, budget or not - never "unknown"
+    SAVED_KNOWN="$KNOWN_IPV6"; KNOWN_IPV6=''
+    if probe_online ''; then fail 'row without addresses marked online'; fi
+    eq 1 "$PROBED"
+    KNOWN_IPV6="$SAVED_KNOWN"
     STATE=REACHABLE
     probe_online 192.0.2.1 || fail 'REACHABLE ignored when the budget is spent'
     eq 1 "$PROBED"
@@ -790,6 +815,18 @@ pinned_lan_memory() {
     probe_online() { return 0; }
     emit_client pc "$PINNED" 192.0.2.5 1 200 '' 0 0 0 0
     eq 1 "$DISCOVERY_WANTED"
+
+    # Several recalled addresses: the singular ipv6 field carries the first
+    # one, not the whole newline-separated memory.
+    LAN_ADDR_ROWS=''
+    KNOWN_IPV6="$ADDR $OTHER"; remember_lan_addresses "$PINNED" 1
+    save_address_memory
+    LAN_ADDR_ROWS=''
+    PRIMARY=''
+    json_add_string() { if [ "$1" = ipv6 ]; then PRIMARY="$2"; fi; }
+    emit_client pc "$PINNED" 192.0.2.5 1 200 '' 0 0 0 0
+    eq "$ADDR" "$PRIMARY"
+    json_add_string() { :; }
 }
 
 # The router cannot derive a silent host's SLAAC address, so it asks the LAN for
@@ -861,6 +898,31 @@ background_probes_release_lock() {
         wait
     done
     unset -f ip ping
+}
+
+# Unpin deletes only a section it can fully account for. One DUID beside the
+# MAC is the deployer's own MAC+duid reservation; several are several devices.
+host_classification() {
+    SHOW=''
+    uci() { printf '%s\n' "$SHOW"; }
+    SHOW="dhcp.h=host
+dhcp.h.name='laptop'
+dhcp.h.mac='aa:bb:cc:dd:ee:ff'
+dhcp.h.duid='0004aabbccdd'
+dhcp.h.hostid='20'"
+    if host_section_has_extra_options h; then fail 'MAC+duid reservation treated as complex'; fi
+    SHOW="dhcp.h=host
+dhcp.h.name='bmc'
+dhcp.h.mac='aa:bb:cc:dd:ee:ff'
+dhcp.h.duid='00030001000000000000%1' '00030001000000000000%2'"
+    host_section_has_extra_options h || fail 'section with several DUIDs not protected'
+    SHOW="dhcp.h=host
+dhcp.h.name='tv'
+dhcp.h.mac='aa:bb:cc:dd:ee:ff'
+dhcp.h.tag='iot'"
+    host_section_has_extra_options h || fail 'section with a tag not protected'
+    unset -f uci
+    uci() { return 1; }
 }
 
 # RPC guard fixtures stop at the UCI boundary: any unexpected mutation fails.
@@ -1010,4 +1072,5 @@ run 'Unpin destructive and pending-change guards' unpin_guards
 run 'Pin existing, expired, pending-change and busy guards' pin_guards
 run 'routed address discovery is sourced and gated' address_discovery
 run 'background probes do not hold the DHCP lock' background_probes_release_lock
+run 'Unpin deletes only sections it can account for' host_classification
 printf '%s backend fixture groups passed\n' "$COUNT"

@@ -10,13 +10,16 @@
 # Lifetime model:
 #   - config host         -> persistent row
 #   - active DHCPv4 lease -> dynamic row for exactly the lease lifetime
-#   - neighbour entries   -> stable-first runtime IPv6 enrichment; never persisted
+#   - bound DHCPv6 lease  -> dynamic row too, when its MAC is known
+#   - neighbour entries   -> stable-first runtime IPv6 enrichment; the last
+#                            addresses seen are remembered like node addresses
 #   - Yggdrasil peer link -> native node address of a LAN device that runs its
 #                            own daemon; remembered for exactly as long as the
 #                            row itself lives, in the same storage class as the
 #                            row: tmpfs for a lease-backed row, flash for a
 #                            config-host row that already survives a reboot
-#   - config domain       -> optional canonical Ygg IPv6 + DNS alias
+#   - config domain, or a name the deployer generates into /tmp/hosts
+#                         -> optional canonical Ygg IPv6 + DNS alias
 #
 # Management model:
 #   - Pin   -> create a normal config host (name + MAC)
@@ -26,7 +29,8 @@
 #   - config domain records are never deleted by Pin/Unpin
 #
 # Online state:
-#   IPv4 ARP OR any known Ygg IPv6 response
+#   a recent kernel REACHABLE entry, else IPv4 ARP OR any known Ygg IPv6
+#   response, within an 8 s probe budget per call (rows past it: unknown)
 #
 # No daemon.
 # No cron.
@@ -57,7 +61,8 @@ LAN_STORE_FILE='/etc/yggdrasil-status-lan'
 
 lower() {
 	# 'A-Z'/'a-z', not '[:upper:]'/'[:lower:]': the POSIX class form failed on
-	# the real BusyBox target (see AI_CONTEXT.md 13.1) — do not "simplify" this.
+	# the real BusyBox target (see docs/development.md, "BusyBox and UCI
+	# pitfalls") — do not "simplify" this.
 	# shellcheck disable=SC2018,SC2019
 	printf '%s' "$1" | tr 'A-Z' 'a-z'
 }
@@ -180,6 +185,10 @@ host_section_has_extra_options() {
 		[ -n "$hse_line" ] || continue
 
 		case "$hse_line" in
+			"dhcp.${hse_selector}.duid="*"' '"*)
+				# several DUIDs are several identities in one section
+				return 0
+				;;
 			"dhcp.${hse_selector}=host"|\
 			"dhcp.${hse_selector}.name="*|\
 			"dhcp.${hse_selector}.mac="*|\
@@ -427,6 +436,15 @@ find_lan_ygg_prefix() {
 }
 
 
+# The Yggdrasil interface (YGG_NET) and the routed /64 it delegates to the LAN
+# (LAN_YGG_PREFIX). Leaves the network package loaded.
+load_ygg_prefix() {
+	YGG_NET=''
+	config_load network
+	config_foreach select_ygg_network interface
+	LAN_YGG_PREFIX="$(find_lan_ygg_prefix)"
+}
+
 # "<duid>[%iaid] <mac>" for every config host that names both, so a lease can be
 # attributed to the MAC the operator tied its DUID to. The IAID, when the
 # section has one, is normalised the way odhcpd reads it (hex, no leading
@@ -471,6 +489,21 @@ host_mac_for_duid() {
 	'
 }
 
+# A MAC the LAN has actually seen: an active DHCPv4 lease (expiry 0 means
+# unlimited, as in lease_is_active) or any neighbour entry (IPv4 or IPv6) on
+# the LAN device.
+mac_seen_on_lan() {
+	local msl_mac
+	msl_mac="$(normalize_mac "$1")"
+	[ -n "$msl_mac" ] || return 1
+	if [ -r "$LEASE_FILE" ] && awk -v m="$msl_mac" -v now="${NOW:-0}" \
+		'tolower($2) == m && ($1 == 0 || $1 > now) { f = 1 } END { exit !f }' "$LEASE_FILE" 2>/dev/null; then
+		return 0
+	fi
+	{ ip neigh show dev "$LAN_DEV" 2>/dev/null; ip -6 neigh show dev "$LAN_DEV" 2>/dev/null; } \
+		| awk -v m="$msl_mac" '{ for (i = 1; i < NF; i++) if ($i == "lladdr" && tolower($(i + 1)) == m) { f = 1; exit } } END { exit !f }'
+}
+
 # The MAC a bound DHCPv6 lease belongs to, printed as "<mac> <how>", or
 # nothing. Three sources, in order of authority:
 #   host     - a config host ties this DUID (with IAID) to a MAC: the
@@ -494,21 +527,6 @@ host_mac_for_duid() {
 # kernel has just confirmed the entry (MFL_FRESH_ONLY=1: REACHABLE, not a
 # stale or reused entry). One resolver for the table and for Pin, so both
 # name the same device.
-# A MAC the LAN has actually seen: an active DHCPv4 lease (expiry 0 means
-# unlimited, as in lease_is_active) or any neighbour entry (IPv4 or IPv6) on
-# the LAN device.
-mac_seen_on_lan() {
-	local msl_mac
-	msl_mac="$(normalize_mac "$1")"
-	[ -n "$msl_mac" ] || return 1
-	if [ -r "$LEASE_FILE" ] && awk -v m="$msl_mac" -v now="${NOW:-0}" \
-		'tolower($2) == m && ($1 == 0 || $1 > now) { f = 1 } END { exit !f }' "$LEASE_FILE" 2>/dev/null; then
-		return 0
-	fi
-	{ ip neigh show dev "$LAN_DEV" 2>/dev/null; ip -6 neigh show dev "$LAN_DEV" 2>/dev/null; } \
-		| awk -v m="$msl_mac" '{ for (i = 1; i < NF; i++) if ($i == "lladdr" && tolower($(i + 1)) == m) { f = 1; exit } } END { exit !f }'
-}
-
 # $1 = duid (lower-case hex), $2 = iaid (hex, may be empty), $3.. = addresses
 mac_for_lease() {
 	local mfl_duid="$1" mfl_iaid="$2" mfl_mac mfl_hw mfl_seen mfl_addr mfl_n
@@ -663,10 +681,9 @@ neighbor_recently_reachable() {
 
 
 # The device's global IPv6 addresses outside the routed prefix - native
-# (2000::/3) and ULA (fc00::/7) - as the kernel neighbour table shows them.
-# Display only: never stored, never used for identity or presence.
-# Native and ULA addresses a MAC has in the neighbour table, limited to the
-# prefixes br-lan carries right now. NDP keeps entries for a prefix the LAN was
+# (2000::/3) and ULA (fc00::/7) - as the kernel neighbour table shows them,
+# limited to the prefixes br-lan carries right now. Display only: never
+# stored, never used for identity or presence. NDP keeps entries for a prefix the LAN was
 # renumbered away from (odhcpd deprecates it, RFC 9096) long after the clients
 # dropped it, and the page must not show those next to the current prefix.
 native_ipv6_for_mac() {
@@ -982,10 +999,16 @@ merge_node_cache() {
 					if (remembered[1] == "" || remembered[2] == "")
 						continue
 
-					if (remembered[1] in live || remembered[1] in recalled)
+					# every address of a MAC, but only from the first
+					# memory that has the MAC: flash never adds to tmpfs
+					if (remembered[1] in live)
+						continue
+					if (remembered[1] in recalled && recalled[remembered[1]] != file)
+						continue
+					if (seen[remembered[1] " " remembered[2]]++)
 						continue
 
-					recalled[remembered[1]] = 1
+					recalled[remembered[1]] = file
 					print remembered[1] " " remembered[2] " 0"
 				}
 			}
@@ -1205,7 +1228,7 @@ ygg_node_addresses_for_mac() {
 
 
 eui64_ipv6_for_mac() {
-	local e64_mac e64_old_ifs e64_first
+	local e64_mac e64_old_ifs
 
 	e64_mac="$(normalize_mac "$1")"
 	valid_mac "$e64_mac" || return 1
@@ -1218,9 +1241,11 @@ eui64_ipv6_for_mac() {
 	IFS="$e64_old_ifs"
 	[ "$#" -eq 6 ] || return 1
 
-	e64_first="$((0x$1 ^ 2))"
-	printf '%s%02x%s:%sff:fe%s:%s%s\n' \
-		"$LAN_YGG_PREFIX" "$e64_first" "$2" "$3" "$4" "$5" "$6"
+	# Written the way the kernel prints it, each group without leading zeros
+	# (02:11:... gives 211:..., not 0211:...), so it compares as text.
+	printf '%s%x:%x:%x:%x\n' "$LAN_YGG_PREFIX" \
+		"$(( ((0x$1 ^ 2) << 8) | 0x$2 ))" "$(( (0x$3 << 8) | 0xff ))" \
+		"$(( 0xfe00 | 0x$4 ))" "$(( (0x$5 << 8) | 0x$6 ))"
 }
 
 
@@ -1302,6 +1327,10 @@ probe_online() {
 		fi
 	done
 
+	# Nothing to ask is a plain "offline", whatever the budget: otherwise the
+	# same row would flip to "unknown" once the budget is spent.
+	[ -n "$po_ipv4" ] || [ -n "$KNOWN_IPV6" ] || return 1
+
 	if ! probe_budget_left; then
 		PROBED=0
 		return 1
@@ -1355,7 +1384,6 @@ emit_client() {
 		DNS_ALIAS=''
 	fi
 
-	KNOWN_IPV6_SOURCE=''
 	build_known_ipv6 "$ec_mac"
 
 	# What odhcpd handed out is the router's own record and outranks anything
@@ -1389,7 +1417,8 @@ emit_client() {
 	# memory. Anything else came from NDP, which forgets a device that stops
 	# talking long before its row expires, so fall back to what was seen last.
 	if [ -z "$CANONICAL_IPV6" ] && [ -z "$KNOWN_IPV6" ]; then
-		KNOWN_IPV6="$(recall_lan_addresses "$ec_mac")"
+		# one per line from the memory; KNOWN_IPV6 is space-separated
+		for ec_addr in $(recall_lan_addresses "$ec_mac"); do append_unique_ipv6 "$ec_addr"; done
 		[ -n "$KNOWN_IPV6" ] && { ec_ipv6_live=0; KNOWN_IPV6_SOURCE='remembered'; }
 	fi
 
@@ -1601,10 +1630,7 @@ rpc_clients() {
 
 	NOW="$(date +%s)"
 	PROBE_DEADLINE=$((NOW + 8))
-	YGG_NET=''
-	config_load network
-	config_foreach select_ygg_network interface
-	LAN_YGG_PREFIX="$(find_lan_ygg_prefix)"
+	load_ygg_prefix
 	collect_ygg_nodes
 	merge_node_cache
 	EMITTED_MACS=''
@@ -1685,6 +1711,10 @@ restore_dhcp_config() {
 	cp -p "$DHCP_BACKUP" "$DHCP_CONFIG" || true
 	uci -q revert dhcp >/dev/null 2>&1 || true
 	/etc/init.d/dnsmasq reload >/dev/null 2>&1 || true
+	# odhcpd may already have read the change (or failed on it): back too
+	if dhcpv6_is_served; then
+		/etc/init.d/odhcpd reload >/dev/null 2>&1 || true
+	fi
 }
 
 
@@ -1709,7 +1739,9 @@ dhcpv6_is_served() {
 # Does the LAN itself serve stateful DHCPv6? Only then can a reservation reach
 # the clients this page lists; a guest interface serving it does not count.
 lan_dhcpv6_is_served() {
-	[ "$(uci -q get "dhcp.${LAN_NET}.dhcpv6" 2>/dev/null)" = 'server' ]
+	[ "$(uci -q get "dhcp.${LAN_NET}.dhcpv6" 2>/dev/null)" = 'server' ] &&
+		# dhcpv6_na=0 hands out no addresses, so nothing could be reserved
+		[ "$(uci -q get "dhcp.${LAN_NET}.dhcpv6_na" 2>/dev/null)" != '0' ]
 }
 
 commit_and_reload_dhcp() {
@@ -1725,7 +1757,6 @@ commit_and_reload_dhcp() {
 
 	if dhcpv6_is_served && ! /etc/init.d/odhcpd reload >/dev/null 2>&1; then
 		restore_dhcp_config
-		/etc/init.d/dnsmasq reload >/dev/null 2>&1
 		return 1
 	fi
 
@@ -1887,10 +1918,7 @@ rpc_pin() {
 
 	if ! find_active_lease_by_mac "$rp_mac"; then
 		# an IPv6-only client is known by its bound DHCPv6 lease alone
-		YGG_NET=''
-		config_load network
-		config_foreach select_ygg_network interface
-		LAN_YGG_PREFIX="$(find_lan_ygg_prefix)"
+		load_ygg_prefix
 		config_load dhcp
 		collect_host_duids
 		collect_dhcpv6_leases
@@ -1993,10 +2021,7 @@ rpc_pin() {
 	fi
 
 	if [ -n "$rp_hostid" ]; then
-		YGG_NET=''
-		config_load network
-		config_foreach select_ygg_network interface
-		LAN_YGG_PREFIX="$(find_lan_ygg_prefix)"
+		load_ygg_prefix
 		[ -n "$LAN_YGG_PREFIX" ] && rp_addr6="$(iid_to_addr "$LAN_YGG_PREFIX" "$rp_hostid")"
 		if [ -n "$rp_duid" ]; then
 			json_reply_device 1 'pinned' "Device pinned; ${rp_addr6:-::$rp_hostid} reserved for its DUID and MAC. It takes effect when the device next renews or reconnects." "$rp_mac" "$rp_name" "$rp_ipv4" "$rp_addr6"
@@ -2070,10 +2095,7 @@ rpc_unpin() {
 			*)
 				ru_addr6=''
 				if [ -n "$FOUND_HOST_HOSTID" ]; then
-					YGG_NET=''
-					config_load network
-					config_foreach select_ygg_network interface
-					LAN_YGG_PREFIX="$(find_lan_ygg_prefix)"
+					load_ygg_prefix
 					config_load dhcp
 					if [ -n "$LAN_YGG_PREFIX" ]; then
 						ru_addr6="$(iid_to_addr "$LAN_YGG_PREFIX" "$(norm_hostid "$FOUND_HOST_HOSTID")")"

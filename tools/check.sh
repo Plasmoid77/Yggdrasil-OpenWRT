@@ -45,6 +45,18 @@ sh tests/status-inventory.sh
 busybox ash tests/status-inventory.sh
 sh tests/status-download.sh
 busybox ash tests/status-download.sh
+# The router runs BusyBox's awk, sed, grep and friends, not the host's gawk or
+# GNU tools: run the shell tests once more with those applets first on PATH.
+APPLETS="$(mktemp -d)"
+trap 'rm -rf "$APPLETS"' EXIT HUP INT TERM
+for applet in awk sed tr grep cut head tail date sort uniq wc; do
+    printf '#!/bin/sh\nexec busybox %s "$@"\n' "$applet" > "$APPLETS/$applet"
+    chmod +x "$APPLETS/$applet"
+done
+for test in tests/deploy-*.sh tests/status-inventory.sh; do
+    PATH="$APPLETS:$PATH" busybox ash "$test" >/dev/null \
+        || { echo "FAIL with BusyBox applets: $test" >&2; exit 1; }
+done
 python3 tests/repository.py
 (
     cd packages

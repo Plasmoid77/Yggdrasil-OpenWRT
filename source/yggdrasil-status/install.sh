@@ -90,12 +90,16 @@ mkdir -p \
 	"$(dirname "$MENU_DST")" \
 	"$(dirname "$VIEW_DST")"
 
-cp "$BACKEND_SRC" "$BACKEND_DST"
-cp "$ACL_SRC" "$ACL_DST"
-cp "$MENU_SRC" "$MENU_DST"
-cp "$VIEW_SRC" "$VIEW_DST"
-chmod 0755 "$BACKEND_DST"
-chmod 0644 "$ACL_DST" "$MENU_DST" "$VIEW_DST"
+# set -e would exit on a failed copy (a full overlay) and leave old and new
+# files mixed; restore the backup instead.
+{
+	cp "$BACKEND_SRC" "$BACKEND_DST" &&
+	cp "$ACL_SRC" "$ACL_DST" &&
+	cp "$MENU_SRC" "$MENU_DST" &&
+	cp "$VIEW_SRC" "$VIEW_DST" &&
+	chmod 0755 "$BACKEND_DST" &&
+	chmod 0644 "$ACL_DST" "$MENU_DST" "$VIEW_DST"
+} || rollback
 
 sh -n "$BACKEND_DST" || rollback
 

@@ -54,6 +54,32 @@ no router run yet.
   address. The child now closes fd 9 first, as the unattributed-lease probe
   has since 6.1.2. Regression test: both background helpers leave the lock
   free once the call returns.
+- The stable (modified EUI-64) address was never recognised for a MAC whose
+  first octet is below 0x10 - most classic vendor prefixes - or with a zero
+  third or fifth octet: the expected address was built with leading zeros
+  (`0211:22ff:...`) and compared as text with the kernel's `211:22ff:...`, so
+  such devices showed all their privacy addresses instead. It is now written
+  the kernel's way.
+- With several remembered routed addresses, the RPC's single `ipv6` field
+  carried all of them separated by newlines; it now carries the first.
+- A device seen with two node addresses kept only the first one while quiet;
+  it keeps both now, still only from the newest memory that knows it.
+- Unpin no longer deletes a config host that lists several DUIDs (several
+  identities in one section); it is protected like other complex sections.
+- Pin offers no IPv6 reservation where the LAN has `dhcpv6_na=0` (odhcpd
+  hands out no addresses there), as the deployer already refuses.
+- A row with no address to probe is "Offline" whatever the probe budget,
+  instead of flipping to "Unknown" once the budget is spent.
+- A failed DHCP change restored the file but left odhcpd on the new one; it
+  is reloaded with the restore now.
+- `install.sh`: a failed copy (a full overlay) now restores the previous
+  files instead of exiting with old and new files mixed.
+- View: the "Routed subnet" cell falls back to the interface's first prefix
+  like the backend does; the Unpin dialog no longer says the IPv6 reservation
+  is "derived" from IPv4 when it may be an explicit one; dead branches and
+  fallbacks for fields the backend always sends are gone.
+- Tests: `tools/check.sh` also runs every shell test with BusyBox's `awk`,
+  `sed`, `grep` and friends on `PATH`, as on the router, not only the host's.
 
 ## Deployer 2.7.1 - reservations can be reshuffled in one run
 

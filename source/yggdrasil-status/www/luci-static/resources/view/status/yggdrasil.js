@@ -225,9 +225,6 @@ function ipv6Cell(client) {
 		? client.ipv6_addresses.slice()
 		: [];
 
-	if (!addresses.length && client.ipv6)
-		addresses.push(client.ipv6);
-
 	if (!addresses.length)
 		return '—';
 
@@ -279,7 +276,7 @@ function ipv6Cell(client) {
 
 
 /*
- * The native 0200::/7 address of a LAN device that runs Yggdrasil itself,
+ * The native 0200::/8 address of a LAN device that runs Yggdrasil itself,
  * reported by the router's peer table. Devices without one reach Yggdrasil
  * only through the router's routed prefix.
  */
@@ -287,9 +284,6 @@ function nodeCell(client) {
 	var addresses = Array.isArray(client.ygg_node_addresses)
 		? client.ygg_node_addresses.slice()
 		: [];
-
-	if (!addresses.length && client.ygg_node_ipv6)
-		addresses.push(client.ygg_node_ipv6);
 
 	if (!addresses.length)
 		return '—';
@@ -527,15 +521,11 @@ function showUnpinDialog(client) {
 		paragraphs.push(E('p', {}, _('This persistent entry is an existing OpenWrt config host record, not one created by the Yggdrasil status Pin button. Unpinning removes that config host section from /etc/config/dhcp.')));
 	}
 
-	if (client.shared_host) {
-		paragraphs.push(E('p', { 'style': 'color:#dc2626; font-weight:600' }, _('This config host contains multiple MAC addresses. It cannot be safely removed from this page. Use Network -> DHCP and DNS to edit it manually.')));
-	}
-
 	if (confirmStatic) {
 		/* the backend names exactly which reservations go: IPv4, IPv6 or both */
 		paragraphs.push(E('p', { 'style': 'color:#dc2626; font-weight:600' },
 			client.confirm_message
-				|| _('This device has a static DHCP reservation. Removing this persistent entry will also remove the reserved IPv4 address %s and, where DHCPv6 is served, the IPv6 suffix derived from it.').format(client.reserved_ipv4 || client.ipv4 || '—')
+				|| _('This device has a static DHCP reservation. Removing this persistent entry will also remove the reserved IPv4 address %s and, where DHCPv6 is served, its IPv6 reservation.').format(client.reserved_ipv4 || client.ipv4 || '—')
 		));
 		var reserved = [];
 		if (client.reserved_ipv4) reserved.push(client.reserved_ipv4);
@@ -554,9 +544,6 @@ function showUnpinDialog(client) {
 			performUnpin(client, confirmStatic, errorBox, actionButton);
 		}
 	};
-
-	if (client.shared_host)
-		actionAttrs.disabled = '';
 
 	actionButton = E('button', actionAttrs, actionLabel);
 
@@ -767,9 +754,11 @@ return view.extend({
 		interfaces.forEach(function(iface) {
 			var address = (iface['ipv6-address'] || [])[0];
 
-			var subnet = (iface['ipv6-prefix'] || []).find(function(p) {
+			/* the class names the providing interface; else its first prefix, as the backend does */
+			var prefixes = iface['ipv6-prefix'] || [];
+			var subnet = prefixes.find(function(p) {
 				return p.class === iface.interface;
-			});
+			}) || prefixes[0];
 
 			var publicKey =
 				uci.get('network', iface.interface, 'public_key') || '—';
