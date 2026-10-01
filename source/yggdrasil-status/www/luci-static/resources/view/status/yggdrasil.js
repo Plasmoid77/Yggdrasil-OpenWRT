@@ -133,6 +133,24 @@ function hostnameCell(name) {
 	}, name);
 }
 
+/*
+ * A DNS name stays on one line while the table fits; otherwise it may break
+ * once, before the zone (thinkpad-wifi / .spb.internal), never inside a label.
+ */
+function dnsCell(name) {
+	if (!name)
+		return '—';
+
+	var dot = name.indexOf('.');
+	var part = function(text) {
+		return E('span', { 'style': 'white-space: nowrap' }, text);
+	};
+
+	return E('span', { 'style': 'font-family: monospace' }, dot > 0
+		? [part(name.slice(0, dot)), E('wbr'), part(name.slice(dot))]
+		: part(name));
+}
+
 /* A small boxed label before an address ("node", "ULA"); currentColor keeps it
  * legible in light and dark themes. */
 function addrLabel(text) {
@@ -670,7 +688,7 @@ function makeClientTable(clients) {
 			/* a folded column keeps an empty, narrow cell */
 			collapsed.ipv4 ? E('span') : (client.ipv4 || '—'),
 			collapsed.native ? E('span') : nativeCell(client),
-			client.dns || '—',
+			dnsCell(client.dns),
 			client.online
 				? E('span', { 'style': 'color: #16a34a; font-weight: 600' }, _('Online'))
 				: (client.probed === 0
@@ -681,10 +699,11 @@ function makeClientTable(clients) {
 		];
 	});
 
-	/* State on one line; a folded column is as narrow as its heading; MAC, the
-	 * address columns and DNS in monospace without mid-address wraps */
+	/* State on one line; a folded column is as narrow as its heading; MAC and
+	 * the address columns in monospace without mid-address wraps (DNS styles
+	 * its own cell, see dnsCell) */
 	var compact = [6];
-	var mono = [1, 2, 5];
+	var mono = [1, 2];
 
 	(collapsed.ipv4 ? compact : mono).push(3);
 	(collapsed.native ? compact : mono).push(4);

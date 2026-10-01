@@ -1,5 +1,16 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## Status 6.5.2 - the LAN table fits again with folded columns
+
+- Since the zones moved from `home.arpa` to names like `spb.internal`, the
+  longest DNS name made the LAN clients table 12 px wider than LuCI's
+  1180 px content area, so a horizontal scrollbar showed even with IPv4 and
+  IPv6 folded. A DNS name may now break once, before its zone
+  (`thinkpad-wifi` / `.spb.internal`), and only when the table would not fit
+  otherwise; it never breaks inside a label. Measured against the Bootstrap
+  theme with the SPb router's data: 1192 px before, 1180 px after; opening a
+  folded column still scrolls when the addresses need it. View only.
+
 ## Docs - attended sysupgrade with owut
 
 - `installation.md` ("Surviving a sysupgrade"): what a real attended
