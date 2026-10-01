@@ -840,6 +840,29 @@ address_discovery() {
     unset -f ip ping
 }
 
+# clients holds the shared DHCP lock on fd 9 and leaves probes running in the
+# background. A child that inherited fd 9 would keep that lock after the call
+# returned, and every Pin/Unpin (flock -n, exclusive) in the meantime would
+# answer busy.
+background_probes_release_lock() {
+    LOCK="$TMP/dhcp.lock"
+    LAN_DEV=br-lan
+    LAN_YGG_PREFIX='303:170f:3ab2:166e:'
+    ip() { printf '    inet6 303:170f:3ab2:166e::1/64 scope global\n'; }
+    ping() { sleep 2; }
+    for bpl_helper in discover_lan_addresses probe_unattributed_leases; do
+        exec 9>>"$LOCK"
+        flock -s 9
+        DISCOVERY_WANTED=1
+        UNATTRIBUTED_LEASE_ADDRS='303:170f:3ab2:166e::40'
+        "$bpl_helper"
+        exec 9>&-
+        flock -n -x "$LOCK" true || fail "$bpl_helper left the DHCP lock held by its background child"
+        wait
+    done
+    unset -f ip ping
+}
+
 # RPC guard fixtures stop at the UCI boundary: any unexpected mutation fails.
 setup_rpc() {
     CODE=''
@@ -986,4 +1009,5 @@ run 'a pinned row keeps its routed addresses across a reboot' pinned_lan_memory
 run 'Unpin destructive and pending-change guards' unpin_guards
 run 'Pin existing, expired, pending-change and busy guards' pin_guards
 run 'routed address discovery is sourced and gated' address_discovery
+run 'background probes do not hold the DHCP lock' background_probes_release_lock
 printf '%s backend fixture groups passed\n' "$COUNT"

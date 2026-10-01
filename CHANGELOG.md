@@ -1,5 +1,15 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## Status 6.5.3 (not released yet) - polish from the repository review
+
+- Pin and Unpin could answer "busy" for up to ~20 s after a page refresh:
+  the detached routed-address discovery inherited the shared DHCP lock
+  (fd 9) that `clients` holds, so the lock outlived the call while its pings
+  ran - and a refresh every 15 s restarts discovery as long as a row lacks an
+  address. The child now closes fd 9 first, as the unattributed-lease probe
+  has since 6.1.2. Regression test: both background helpers leave the lock
+  free once the call returns.
+
 ## Deployer 2.7.1 - reservations can be reshuffled in one run
 
 - Moving a reservation to another adapter (the old section takes a new

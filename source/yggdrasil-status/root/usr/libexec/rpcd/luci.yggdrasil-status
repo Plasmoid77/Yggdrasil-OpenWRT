@@ -1123,7 +1123,11 @@ discover_lan_addresses() {
 	)"
 	[ -n "$dla_source" ] || return 0
 
-	confirm_discovered_addresses "$dla_source" >/dev/null 2>&1 &
+	(
+		# the shared DHCP lock (fd 9) must not outlive the call in this child
+		exec 9>&- 2>/dev/null
+		confirm_discovered_addresses "$dla_source"
+	) >/dev/null 2>&1 &
 }
 
 
