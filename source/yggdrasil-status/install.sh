@@ -10,17 +10,19 @@ set -eu
 }
 
 BASE="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
-BACKUP="/root/yggdrasil-status-backup-$(date +%Y%m%d-%H%M%S)"
+# DESTDIR installs under another root (the host tests); empty on the router.
+DESTDIR="${DESTDIR:-}"
+BACKUP="$DESTDIR/root/yggdrasil-status-backup-$(date +%Y%m%d-%H%M%S)"
 
 BACKEND_SRC="$BASE/root/usr/libexec/rpcd/luci.yggdrasil-status"
 ACL_SRC="$BASE/root/usr/share/rpcd/acl.d/yggdrasil-status.json"
 MENU_SRC="$BASE/root/usr/share/luci/menu.d/yggdrasil-status.json"
 VIEW_SRC="$BASE/www/luci-static/resources/view/status/yggdrasil.js"
 
-BACKEND_DST='/usr/libexec/rpcd/luci.yggdrasil-status'
-ACL_DST='/usr/share/rpcd/acl.d/yggdrasil-status.json'
-MENU_DST='/usr/share/luci/menu.d/yggdrasil-status.json'
-VIEW_DST='/www/luci-static/resources/view/status/yggdrasil.js'
+BACKEND_DST="$DESTDIR/usr/libexec/rpcd/luci.yggdrasil-status"
+ACL_DST="$DESTDIR/usr/share/rpcd/acl.d/yggdrasil-status.json"
+MENU_DST="$DESTDIR/usr/share/luci/menu.d/yggdrasil-status.json"
+VIEW_DST="$DESTDIR/www/luci-static/resources/view/status/yggdrasil.js"
 
 for f in "$BACKEND_SRC" "$ACL_SRC" "$MENU_SRC" "$VIEW_SRC"; do
 	[ -f "$f" ] || {
@@ -39,7 +41,7 @@ mkdir -p "$BACKUP"
 
 backup_one() {
 	local src="$1"
-	local rel="${src#/}"
+	local rel="${src#"$DESTDIR"/}"
 
 	if [ -f "$src" ]; then
 		mkdir -p "$BACKUP/$(dirname "$rel")"
@@ -50,7 +52,7 @@ backup_one() {
 
 restore_one() {
 	local dst="$1"
-	local rel="${dst#/}"
+	local rel="${dst#"$DESTDIR"/}"
 
 	if grep -Fxq "$dst" "$BACKUP/present.list" 2>/dev/null; then
 		mkdir -p "$(dirname "$dst")"
@@ -66,8 +68,8 @@ rollback() {
 	restore_one "$ACL_DST"
 	restore_one "$MENU_DST"
 	restore_one "$VIEW_DST"
-	rm -f /tmp/luci-indexcache
-	/etc/init.d/rpcd restart >/dev/null 2>&1 || true
+	rm -f "$DESTDIR/tmp/luci-indexcache"
+	"$DESTDIR/etc/init.d/rpcd" restart >/dev/null 2>&1 || true
 	echo "Rollback restored from: $BACKUP" >&2
 	exit 1
 }
@@ -103,8 +105,8 @@ mkdir -p \
 
 sh -n "$BACKEND_DST" || rollback
 
-rm -f /tmp/luci-indexcache
-/etc/init.d/rpcd restart || rollback
+rm -f "$DESTDIR/tmp/luci-indexcache"
+"$DESTDIR/etc/init.d/rpcd" restart || rollback
 sleep 2
 
 ubus list | grep -qx 'luci.yggdrasil-status' || rollback

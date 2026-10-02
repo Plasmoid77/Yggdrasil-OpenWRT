@@ -51,6 +51,7 @@ DNS_CONF='/etc/yggdrasil-openwrt/dns.conf'
 DNS_HOSTS_DIR='/tmp/hosts'
 LEASE_FILE='/tmp/dhcp.leases'
 DHCP_CONFIG='/etc/config/dhcp'
+INITD='/etc/init.d'
 PIN_SECTION_PREFIX='ygg_status_'
 DHCP_LOCK_FILE='/var/lock/yggdrasil-status-dhcp.lock'
 NODE_CACHE_FILE='/tmp/yggdrasil-status-nodes'
@@ -1696,10 +1697,10 @@ restore_dhcp_config() {
 	[ -n "$DHCP_BACKUP" ] && [ -f "$DHCP_BACKUP" ] || return 0
 	cp -p "$DHCP_BACKUP" "$DHCP_CONFIG" || true
 	uci -q revert dhcp >/dev/null 2>&1 || true
-	/etc/init.d/dnsmasq reload >/dev/null 2>&1 || true
+	"$INITD/dnsmasq" reload >/dev/null 2>&1 || true
 	# odhcpd may already have read the change (or failed on it): back too
 	if dhcpv6_is_served; then
-		/etc/init.d/odhcpd reload >/dev/null 2>&1 || true
+		"$INITD/odhcpd" reload >/dev/null 2>&1 || true
 	fi
 }
 
@@ -1736,12 +1737,12 @@ commit_and_reload_dhcp() {
 		return 1
 	fi
 
-	if ! /etc/init.d/dnsmasq reload >/dev/null 2>&1; then
+	if ! "$INITD/dnsmasq" reload >/dev/null 2>&1; then
 		restore_dhcp_config
 		return 1
 	fi
 
-	if dhcpv6_is_served && ! /etc/init.d/odhcpd reload >/dev/null 2>&1; then
+	if dhcpv6_is_served && ! "$INITD/odhcpd" reload >/dev/null 2>&1; then
 		restore_dhcp_config
 		return 1
 	fi

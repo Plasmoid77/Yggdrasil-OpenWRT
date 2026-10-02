@@ -47,6 +47,11 @@ sh tests/status-inventory.sh
 busybox ash tests/status-inventory.sh
 sh tests/status-download.sh
 busybox ash tests/status-download.sh
+sh tests/status-writes.sh
+busybox ash tests/status-writes.sh
+sh tests/status-install.sh
+busybox ash tests/status-install.sh
+node tests/status-view.mjs
 # The router runs BusyBox's awk, sed, grep and friends, not the host's gawk or
 # GNU tools: run the shell tests once more with those applets first on PATH.
 APPLETS="$(mktemp -d)"
@@ -63,7 +68,7 @@ for applet in $applets; do
     printf '#!/bin/sh\nexec busybox %s "$@"\n' "$applet" > "$APPLETS/$applet"
     chmod +x "$APPLETS/$applet"
 done
-for test in tests/deploy-*.sh tests/status-inventory.sh; do
+for test in tests/deploy-*.sh tests/status-inventory.sh tests/status-writes.sh tests/status-install.sh; do
     PATH="$APPLETS:$PATH" busybox ash "$test" >/dev/null \
         || { echo "FAIL with BusyBox applets: $test" >&2; exit 1; }
 done
