@@ -8,6 +8,14 @@ trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 fail() { echo "FAIL: $*" >&2; exit 1; }
 load() { eval "$(awk -v name="$1" '$0 ~ "^"name"\\(\\)" {f=1} f {print} f && /^}/ {exit}' "$SOURCE")"; }
 info() { :; }; ok() { :; }; DRY_RUN=0
+cp() {
+    if [ "${FAIL_COPY:-0}" = 1 ]; then
+        [ "$1" != -p ] || shift
+        printf partial > "$2"
+        return 1
+    fi
+    command cp "$@"
+}
 load put_file
 printf '#!/bin/sh\necho working\n' > "$TMP/hook"
 cp "$TMP/hook" "$TMP/before"
@@ -24,7 +32,6 @@ put_file "$TMP/absent" 755 '#!/bin/sh' test
 [ ! -e "$TMP/absent" ] || fail 'dry run wrote a file'
 echo 'PASS: atomic hook writes preserve working content and repair permissions'
 load backup_file
-cp() { [ "$1" != -p ] || shift; [ "${FAIL_COPY:-0}" != 1 ] || { printf partial > "$2"; return 1; }; command cp "$@"; }
 backup_file "$TMP/before" "$TMP/backup"
 FAIL_COPY=1
 if backup_file "$TMP/hook" "$TMP/backup"; then fail 'failed copy accepted'; fi
