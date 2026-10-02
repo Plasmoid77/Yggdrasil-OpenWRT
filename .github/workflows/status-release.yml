@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'New status version, e.g. v6.6 or v6.5.3 (never reuse a tag)'
+        description: 'New status version, e.g. v7.1 or v7.0.1 (never reuse a tag)'
         required: true
         type: string
       revision:

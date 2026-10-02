@@ -106,7 +106,7 @@ laptop=<MAC>+duid:<HEX>=20  # DUID for odhcpd, MAC for the status page
 bmc=duid:<HEX>%<IAID>=21  # by DUID (and IAID) alone
 
 [status-version]        # as --status-version
-v6.5.2
+v7.0
 [status-pkg]            # as --status-pkg
 /root/yggdrasil-status.tar.gz
 [ygg-pkg]               # as --ygg-pkg (or the flag ygg-edge below)
@@ -117,7 +117,7 @@ no-jumper
 no-dns
 no-lan-forward          # LAN hosts may not initiate connections into Yggdrasil
 # also: no-multicast no-lan no-firewall no-status dns ygg-edge ygg-feed
-# dhcpv6 / slaac        # 1.x only: 2.0 refuses them, delete the line
+# dhcpv6 / slaac        # 1.x only: current deployer refuses them, delete the line
 ```
 
 ```sh
@@ -193,8 +193,8 @@ the router's Yggdrasil address and the command to reach it.
 ### A router deployed with 1.x
 
 Reinstall rather than migrate: reset the router to stock (`firstboot`),
-bring its uplink back, then run 2.0 with the same peers, trusted addresses
-and `--host` reservations and the old identity via `--private-key-file`
+bring its uplink back, then run the current deployer with the same peers,
+trusted addresses and `--host` reservations and the old identity via `--private-key-file`
 (the node address and the routed /64 follow the key). Delete `dhcpv6` /
 `slaac` from `[flags]` - the script refuses them. There is no in-place
 migration.
@@ -244,9 +244,15 @@ is restarted onto the new binary when the version changed.
 
 `--ygg-edge` takes the build only while it is newer than the feed's version
 (`apk version -t`); once the feed has caught up, the same switch installs the
-feed's version instead, so rerunning with `--ygg-edge` never holds a router on
+feed's version instead when the index supplies a comparable version, so
+rerunning with `--ygg-edge` does not intentionally hold a router on
 an older build. A later run without either switch keeps what is installed: apk
 does not downgrade by itself, and the build stays pinned in `/etc/apk/world`.
+If `apk update` fails and no feed version can be read, the deployer warns
+and may still install the checksum-verified project build. In that fallback
+the comparison with the feed is unknown; `--ygg-edge` does not guarantee the
+build is newer. A known caught-up feed version continues to take precedence.
+
 `--ygg-feed` (`ygg-feed` under `[flags]`) goes back to the feed's version, as a
 downgrade if need be, drops that pin so a later `apk upgrade` follows the feed,
 restarts the node on the new binary, and the restore hook stops bringing the

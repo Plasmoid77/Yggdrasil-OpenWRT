@@ -17,7 +17,7 @@ load() {
     [ -n "$body" ] || fail "production function missing: $1"
     eval "$body"
 }
-for fn in lower normalize_mac valid_mac valid_hostname valid_ipv4 first_ipv4 \
+for fn in ipv6_prefix_awk lower normalize_mac valid_mac valid_hostname valid_ipv4 first_ipv4 \
     lease_is_active mac_was_emitted remember_emitted_mac remember_persistent_mac \
     find_active_lease_by_mac \
     eui64_ipv6_for_mac append_unique_ipv6 observed_ipv6_for_mac build_known_ipv6 \
@@ -453,6 +453,7 @@ LEASES
 }
 
 canonical_guard() {
+    LAN_DEV=br-lan
     YGG_NODE_ROWS=''
     ygg_node_is_live() { return 1; }
     CANONICAL_IPV6=stale
@@ -715,6 +716,7 @@ nomac|00030001000000000000|'
 # it goes quiet - long before its row expires. A pinned row keeps them the same
 # way it keeps its node address, and on the same storage class.
 pinned_lan_memory() {
+    LAN_DEV=br-lan
     LAN_CACHE_FILE="$TMP/pin-lan"
     LAN_STORE_FILE="$TMP/pin-lan.flash"
     LAN_YGG_PREFIX='303:170f:3ab2:166e:'

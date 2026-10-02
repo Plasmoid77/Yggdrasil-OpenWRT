@@ -160,8 +160,11 @@ busy even after a client had stopped using the addresses.
 
 The current implementation uses stable-first selection: a canonical `config domain` wins; otherwise an
 observed modified EUI-64 wins; privacy-only clients retain all observed
-addresses. Nothing is persisted, and no address is assigned to or removed from
-the client.
+addresses. Remembered routed and native node addresses follow row lifetime:
+lease-backed rows use tmpfs; existing persistent `config host` rows may retain
+their address memory on flash, rewritten only on change. Memory never creates
+a row or a reservation, and routed memory is discarded after a prefix change.
+No address is assigned to or removed from the client by this observation.
 
 This also applies to LAN devices that run their own Yggdrasil daemon. Such a
 device separately owns a native `2xx:` node address, which belongs in the peer

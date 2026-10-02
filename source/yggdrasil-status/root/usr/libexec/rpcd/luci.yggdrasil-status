@@ -290,9 +290,8 @@ find_host_by_mac() {
 
 	[ -n "$FOUND_HOST_SECTION" ] || return 1
 
-	case "$FOUND_HOST_SECTION" in
-		${PIN_SECTION_PREFIX}*) FOUND_HOST_MANAGED=1 ;;
-	esac
+	# Only the deterministic section created by Pin owns this MAC's reservation.
+	[ "$FOUND_HOST_SECTION" = "${PIN_SECTION_PREFIX}$(normalize_mac "$1" | tr -d ':')" ] && FOUND_HOST_MANAGED=1
 
 	FOUND_HOST_STATIC_IPV4="$(first_ipv4 "$FOUND_HOST_IP" 2>/dev/null || true)"
 	[ "$FOUND_HOST_MATCH_COUNT" -gt 1 ] && FOUND_HOST_AMBIGUOUS=1
@@ -422,6 +421,40 @@ select_ygg_network() {
 # Determine the routed /64 delegated by the Yggdrasil netifd interface. This
 # deliberately does not select the first global /64 from br-lan: WAN prefix
 # delegation or another overlay may legitimately add more prefixes later.
+# Compare the first 64 bits, not the textual spelling of an IPv6 address.
+# netifd and ip may compress zeros inside the delegated /64 differently.
+ipv6_prefix_awk() {
+	cat <<'AWK'
+	function ipv6_head(a,    x, l, r, nl, nr, i, n, out, h) {
+		a = tolower(a); sub(/\/.*/, "", a); sub(/%.*/, "", a)
+		x = index(a, "::")
+		if (x) {
+			l = substr(a, 1, x - 1); r = substr(a, x + 2)
+			nl = l == "" ? 0 : split(l, LH, ":")
+			nr = r == "" ? 0 : split(r, RH, ":")
+			if (nl + nr > 7) return ""
+			n = 0
+			for (i = 1; i <= nl; i++) H[++n] = LH[i]
+			for (i = 1; i <= 8 - nl - nr; i++) H[++n] = "0"
+			for (i = 1; i <= nr; i++) H[++n] = RH[i]
+		} else if (split(a, H, ":") != 8) return ""
+		out = ""
+		for (i = 1; i <= 8; i++) {
+			h = H[i]
+			if (h == "" || length(h) > 4 || h ~ /[^0-9a-f]/) return ""
+			sub(/^0+/, "", h); if (h == "") h = "0"
+			if (i <= 4) out = out h ":"
+		}
+		return out
+	}
+	function in_lan_prefix(a, p,    h) {
+		h = ipv6_head(a)
+		return p != "" && h != "" && h == ipv6_head(p "0:0:0:0")
+	}
+AWK
+}
+
+
 find_lan_ygg_prefix() {
 	local flyp_addr
 
@@ -446,14 +479,8 @@ find_lan_ygg_prefix() {
 	)"
 
 	printf '%s\n' "$flyp_addr" |
-		awk '
-			NF {
-				split($1, h, ":")
-				if (h[1] != "" && h[2] != "" && h[3] != "" && h[4] != "") {
-					print tolower(h[1] ":" h[2] ":" h[3] ":" h[4] ":")
-					exit
-				}
-			}
+		awk "$(ipv6_prefix_awk)"'
+			NF { h = ipv6_head($1); if (h != "") { print h; exit } }
 		'
 }
 
@@ -642,10 +669,11 @@ collect_dhcpv6_leases() {
 			# Y: routed-prefix address (the Yggdrasil column); N: native or ULA
 			# address, which feeds the Native column of an idle client that
 			# the neighbour table has no entry for
-			case "$cdl_addr" in
-				"$LAN_YGG_PREFIX"*) printf 'Y %s %s %s %s\n' "$cdl_mac" "$cdl_addr" "$cdl_name" "$cdl_how" ;;
-				*) printf 'N %s %s\n' "$cdl_mac" "$cdl_addr" ;;
-			esac
+			if printf '%s\n' "$cdl_addr" | awk -v prefix="$LAN_YGG_PREFIX" "$(ipv6_prefix_awk)"' { exit !in_lan_prefix($1, prefix) }'; then
+				printf 'Y %s %s %s %s\n' "$cdl_mac" "$cdl_addr" "$cdl_name" "$cdl_how"
+			else
+				printf 'N %s %s\n' "$cdl_mac" "$cdl_addr"
+			fi
 		done
 	done <<EOF
 $(ubus call dhcp ipv6leases 2>/dev/null | jsonfilter -e '@.device[*].leases[*]' 2>/dev/null)
@@ -731,7 +759,7 @@ native_ipv6_for_mac() {
 			awk 'NF == 2 { print $2, "dev lease lladdr", $1, "LEASE" }'
 		ip -6 neigh show dev "$LAN_DEV" 2>/dev/null
 	} |
-		awk -v wanted="$(normalize_mac "$n6_wanted")" -v prefix="$LAN_YGG_PREFIX" -v current="$n6_current" '
+		awk -v wanted="$(normalize_mac "$n6_wanted")" -v prefix="$LAN_YGG_PREFIX" -v current="$n6_current" "$(ipv6_prefix_awk)"'
 		function pad(g) { while (length(g) < 4) g = "0" g; return g }
 		# 32 hex digits for an IPv6 address, "" when it does not parse
 		function hex32(a,    lft, rgt, nl, nr, i, out) {
@@ -787,7 +815,7 @@ native_ipv6_for_mac() {
 			}
 			if (mac != wanted)
 				next
-			if (prefix != "" && index(addr, prefix) == 1)
+			if (in_lan_prefix(addr, prefix))
 				next
 			if ($NF == "FAILED" || $NF == "INCOMPLETE")
 				next
@@ -812,7 +840,7 @@ observed_ipv6_for_mac() {
 	[ -n "$LAN_YGG_PREFIX" ] || return 0
 
 	ip -6 neigh show dev "$LAN_DEV" 2>/dev/null |
-		awk -v wanted="$(normalize_mac "$o6_wanted")" -v prefix="$LAN_YGG_PREFIX" '
+		awk -v wanted="$(normalize_mac "$o6_wanted")" -v prefix="$LAN_YGG_PREFIX" "$(ipv6_prefix_awk)"'
 		{
 			addr = tolower($1)
 			mac = ""
@@ -827,7 +855,7 @@ observed_ipv6_for_mac() {
 			if (mac != wanted)
 				next
 
-			if (index(addr, prefix) != 1)
+			if (!in_lan_prefix(addr, prefix))
 				next
 
 			if (!seen[addr]++)
@@ -1125,8 +1153,8 @@ recall_lan_addresses() {
 	[ -n "$LAN_YGG_PREFIX" ] || return 0
 
 	cat "$LAN_CACHE_FILE" "$LAN_STORE_FILE" 2>/dev/null |
-		awk -v wanted="$rla_wanted" -v prefix="$LAN_YGG_PREFIX" '
-			$1 == wanted && index(tolower($2), prefix) == 1 && !seen[$2]++ {
+		awk -v wanted="$rla_wanted" -v prefix="$LAN_YGG_PREFIX" "$(ipv6_prefix_awk)"'
+			$1 == wanted && in_lan_prefix($2, prefix) && !seen[$2]++ {
 				print $2
 			}
 		'
@@ -1164,8 +1192,8 @@ discover_lan_addresses() {
 
 	dla_source="$(
 		ip -6 addr show dev "$LAN_DEV" 2>/dev/null |
-			awk -v prefix="$LAN_YGG_PREFIX" '
-				$1 == "inet6" && index(tolower($2), prefix) == 1 {
+			awk -v prefix="$LAN_YGG_PREFIX" "$(ipv6_prefix_awk)"'
+				$1 == "inet6" && in_lan_prefix($2, prefix) {
 					split($2, dla_own, "/")
 					print dla_own[1]
 					exit
@@ -1196,13 +1224,13 @@ confirm_discovered_addresses() {
 	# test LAN, where a single request drew no replies at all and three drew
 	# every device.
 	ping -6 -c 3 -W 2 -I "$cda_source" "ff02::1%${LAN_DEV}" 2>/dev/null |
-		awk -v prefix="$LAN_YGG_PREFIX" -v own="$cda_source" '
+		awk -v prefix="$LAN_YGG_PREFIX" -v own="$cda_source" "$(ipv6_prefix_awk)"'
 			$3 == "from" {
 				cda_seen = $4
 				sub(/:$/, "", cda_seen)
 				if (tolower(cda_seen) == tolower(own))
 					next
-				if (index(tolower(cda_seen), prefix) != 1)
+				if (!in_lan_prefix(cda_seen, prefix))
 					next
 				if (!cda_known[cda_seen]++)
 					print cda_seen
@@ -1689,21 +1717,38 @@ read_request() {
 
 backup_dhcp_config() {
 	DHCP_BACKUP="/tmp/yggdrasil-status-dhcp.$$.bak"
-	cp -p "$DHCP_CONFIG" "$DHCP_BACKUP" || return 1
+	cp -p "$DHCP_CONFIG" "$DHCP_BACKUP" || { rm -f "$DHCP_BACKUP"; DHCP_BACKUP=''; return 1; }
 }
 
 
 restore_dhcp_config() {
-	[ -n "$DHCP_BACKUP" ] && [ -f "$DHCP_BACKUP" ] || return 0
-	cp -p "$DHCP_BACKUP" "$DHCP_CONFIG" || true
-	uci -q revert dhcp >/dev/null 2>&1 || true
-	"$INITD/dnsmasq" reload >/dev/null 2>&1 || true
-	# odhcpd may already have read the change (or failed on it): back too
-	if dhcpv6_is_served; then
-		"$INITD/odhcpd" reload >/dev/null 2>&1 || true
+	local rd_failed=0 rd_tmp
+	[ -n "$DHCP_BACKUP" ] && [ -f "$DHCP_BACKUP" ] || return 1
+	rd_tmp="$(mktemp "$DHCP_CONFIG.ygg-restore.XXXXXX")" || rd_failed=1
+	if [ -n "$rd_tmp" ]; then
+		if ! cp -p "$DHCP_BACKUP" "$rd_tmp" || ! mv -f "$rd_tmp" "$DHCP_CONFIG"; then
+			rm -f "$rd_tmp"
+			rd_failed=1
+		fi
 	fi
+	uci -q revert dhcp >/dev/null 2>&1 || rd_failed=1
+	"$INITD/dnsmasq" reload >/dev/null 2>&1 || rd_failed=1
+	# Try every recovery step, but never claim restoration on partial success.
+	if dhcpv6_is_served; then
+		"$INITD/odhcpd" reload >/dev/null 2>&1 || rd_failed=1
+	fi
+	return "$rd_failed"
 }
 
+
+dhcp_change_failed() {
+	if restore_dhcp_config; then
+		finish_dhcp_config
+		json_reply 0 "$1" "$2 The previous configuration was restored."
+	else
+		json_reply 0 'rollback_failed' "DHCP recovery is incomplete. Backup retained at $DHCP_BACKUP; check the configuration and reload dnsmasq/odhcpd before retrying."
+	fi
+}
 
 finish_dhcp_config() {
 	rm -f "$DHCP_BACKUP"
@@ -1733,17 +1778,14 @@ lan_dhcpv6_is_served() {
 
 commit_and_reload_dhcp() {
 	if ! uci commit dhcp; then
-		restore_dhcp_config
 		return 1
 	fi
 
 	if ! "$INITD/dnsmasq" reload >/dev/null 2>&1; then
-		restore_dhcp_config
 		return 1
 	fi
 
 	if dhcpv6_is_served && ! "$INITD/odhcpd" reload >/dev/null 2>&1; then
-		restore_dhcp_config
 		return 1
 	fi
 
@@ -1967,32 +2009,25 @@ rpc_pin() {
 	if ! uci set "dhcp.${rp_section}=host" ||
 	   ! uci set "dhcp.${rp_section}.name=${rp_name}" ||
 	   ! uci set "dhcp.${rp_section}.mac=${rp_mac}"; then
-		restore_dhcp_config
-		finish_dhcp_config
-		json_reply 0 'uci_failed' 'Could not create the persistent host entry.'
+		dhcp_change_failed 'uci_failed' 'Could not create the persistent host entry.'
 		return 0
 	fi
 
 	if [ -n "$rp_ipv4" ] && ! uci set "dhcp.${rp_section}.ip=${rp_ipv4}"; then
-		restore_dhcp_config
-		finish_dhcp_config
-		json_reply 0 'uci_failed' 'Could not store the IPv4 reservation.'
+		dhcp_change_failed 'uci_failed' 'Could not store the IPv4 reservation.'
 		return 0
 	fi
 
 	if [ -n "$rp_hostid" ]; then
 		if ! uci set "dhcp.${rp_section}.hostid=${rp_hostid}" ||
 		   { [ -n "$rp_duid" ] && ! uci set "dhcp.${rp_section}.duid=${rp_duid}"; }; then
-			restore_dhcp_config
-			finish_dhcp_config
-			json_reply 0 'uci_failed' 'Could not store the IPv6 reservation.'
+			dhcp_change_failed 'uci_failed' 'Could not store the IPv6 reservation.'
 			return 0
 		fi
 	fi
 
 	if ! commit_and_reload_dhcp; then
-		finish_dhcp_config
-		json_reply 0 'reload_failed' 'Could not commit/reload DHCP configuration; the previous configuration was restored.'
+		dhcp_change_failed 'reload_failed' 'Could not commit/reload DHCP configuration.'
 		return 0
 	fi
 
@@ -2106,15 +2141,12 @@ rpc_unpin() {
 	}
 
 	if ! uci -q delete "dhcp.${ru_section}"; then
-		restore_dhcp_config
-		finish_dhcp_config
-		json_reply 0 'uci_failed' 'Could not remove the persistent host entry.'
+		dhcp_change_failed 'uci_failed' 'Could not remove the persistent host entry.'
 		return 0
 	fi
 
 	if ! commit_and_reload_dhcp; then
-		finish_dhcp_config
-		json_reply 0 'reload_failed' 'Could not commit/reload DHCP configuration; the previous configuration was restored.'
+		dhcp_change_failed 'reload_failed' 'Could not commit/reload DHCP configuration.'
 		return 0
 	fi
 

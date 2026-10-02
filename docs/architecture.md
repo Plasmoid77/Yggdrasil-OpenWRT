@@ -96,10 +96,19 @@ connections. Android does DHCPv6 by policy not at all and takes SLAAC
 addresses from the routed prefix as from any other.
 
 The deployer takes the status module's DHCP lock before it stages any `dhcp`
-change, so a Pin/Unpin in progress makes it stop with nothing touched.
-`odhcpd reload` (SIGHUP) applies the change and keeps the bound leases; the
-restart fallback, and a rollback's restart, empty the router's lease record
-until clients renew.
+change. It waits up to 30 seconds for an active reader or Pin/Unpin, then
+refuses the run if the lock remains busy. Under the lock it refreshes the
+DHCP recovery image, including any Pin committed after preflight. The lock
+stays held through all fatal LAN, firewall and DNS operations and their
+rollback; it is released before optional status installation, whose validator
+reads DHCP. Every required backup copy must succeed before configuration
+edits. Backup directories are unique even for concurrent starts. Rollback restores files by
+atomic replacement, reports incomplete copying or service recovery, and keeps
+the recovery images. HUP/INT/TERM during fatal core stages attempt the same
+rollback. After core completion, interruption stops optional stages without undoing configuration
+that another Pin/Unpin may already have changed. Power loss and SIGKILL cannot run it.
+`odhcpd reload` (SIGHUP), including during rollback, keeps the bound leases;
+only its restart fallback empties the record until clients renew.
 
 ### Fresh router, not a migration
 
@@ -412,14 +421,19 @@ Unpin removes only a simple single-MAC host section. A static reservation
 requires `confirm_static=true`; removing that section also removes its
 reservation. Multiple MACs, duplicate sections for one MAC, several DUIDs, or
 options beyond `name`, `mac`, `ip`, `hostid` and one `duid` prevent automatic
-deletion; a hand-made `hostid` (not written by Pin) protects the section too. Both named and anonymous UCI
-sections must work. An active lease leaves a formerly pinned row Dynamic;
+deletion; a `hostid` outside the reserved Pin namespace protects the section
+too. Both named and anonymous UCI sections must work. An active lease leaves a formerly pinned row Dynamic;
 without a lease it disappears. Neither operation deletes `config domain`.
 
 Persistent mutations acquire `/var/lock/yggdrasil-status-dhcp.lock` using
 exclusive nonblocking flock, refuse pending DHCP UCI edits, back up the DHCP
-file, mutate, commit and reload dnsmasq. On reported failure the code attempts
-to restore the backup and reload. This is not a guarantee against power loss
+file, mutate, commit and reload dnsmasq and, when DHCPv6 is served, odhcpd.
+On failure it restores the backup, reverts staged DHCP changes and reloads.
+Only complete recovery returns `uci_failed`/`reload_failed` with a restoration
+message. Failed copying, reverting or reloading returns `rollback_failed`
+and retains the original `/tmp/yggdrasil-status-dhcp.<pid>.bak` for manual
+recovery; inspect that file and the live DHCP configuration before retrying.
+This is not a guarantee against power loss
 or every external concurrent writer. A shared read lock coordinates inventory
 with this module's mutations. A concurrent Pin/Unpin returns `busy`.
 
@@ -462,7 +476,8 @@ types to booleans/numbers when refactoring.
 Pin outcomes: `pinned`, `already_persistent`, `invalid_request`, `invalid_mac`,
 `busy`, `no_active_lease`, `invalid_hostname`, `no_ipv4`, `dhcpv6_not_served`,
 `invalid_hostid`, `hostid_taken`, `pending_uci_changes`, `section_collision`,
-`backup_failed`, `uci_failed`, `reload_failed`. `reserve_ipv6` is a hex
+`backup_failed`, `uci_failed`, `reload_failed`, `rollback_failed`.
+`reserve_ipv6` is a hex
 suffix (1-16 digits, not 0 = dynamic, not 1 = the router), accepted only where
 DHCPv6 is served and refused when any `config host` already claims it,
 explicitly (`hostid`) or implicitly (an IPv4 `ip`). Pin writes `hostid` and,
@@ -475,12 +490,17 @@ address).
 Unpin outcomes: `unpinned`, `already_dynamic`, `invalid_request`, `invalid_mac`,
 `busy`, `static_confirmation_required`, `ambiguous_host`, `shared_host`,
 `complex_host`, `reserved_ipv6`, `pending_uci_changes`, `backup_failed`,
-`uci_failed`, `reload_failed`. `hostid` is a known option, not a "complex"
-one. A section carrying a `hostid` this page's own Pin wrote (a managed pin)
-is unpinned under the same `static_confirmation_required` step as an IPv4
+`uci_failed`, `reload_failed`, `rollback_failed`. `hostid` is a known option,
+not a "complex"
+one. A managed pin is exactly `ygg_status_<12 lowercase MAC hex digits>`,
+with that same MAC in the section. This namespace is reserved for the page;
+a custom section merely starting with `ygg_status_` is not managed. This is
+an ownership convention, not historical provenance: manually adding `hostid`
+to an exact managed section also makes it subject to the confirmation below.
+A section carrying `hostid` in that managed namespace is unpinned under the same `static_confirmation_required` step as an IPv4
 reservation, and the reply names the address; one written by hand or by the
 deployer is refused with `reserved_ipv6` - the status page does not delete
-reservations it did not make; the `hostid` option is removed in the DHCP page
+reservations outside its reserved namespace; the `hostid` option is removed in the DHCP page
 (or `uci delete dhcp.<section>.hostid`) first. Omitting a `--host` line from
 a deployer rerun does not remove it either; only its derived DNS record goes.
 A section with an IPv4 `ip` and no `hostid` is an implicit IPv6 reservation
@@ -693,3 +713,18 @@ it does not install or copy every referenced project's complete stack.
 The project's contribution is this particular routed-LAN profile, native
 state/lifetime model, safe Pin/Unpin workflow and optional integration, not a
 new IPv6 address-allocation protocol.
+
+### IPv6 prefix spelling
+
+The routed `/64` is matched by its first 64 bits, including prefixes whose
+zero hextets netifd compresses with `::`. Compressed, expanded and
+zero-padded addresses are filtered against the same prefix in leases,
+observations, discovery and remembered addresses.
+
+### Failed inventory refresh
+
+A failed periodic or post-mutation RPC refresh retains the last successful
+LAN table and displays a warning that its contents are stale. Online and
+persistence flags in that retained table are observations from the previous
+response. A successful refresh replaces the table and clears the warning.
+The initial page load still reports RPC failure through LuCI's load error.
