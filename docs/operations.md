@@ -351,11 +351,12 @@ apk upgrade yggdrasil luci-proto-yggdrasil yggdrasil-jumper
 
 Do not assume every future package keeps the exact same UCI options.
 
-On a router installed with `--ygg-edge` (or `--ygg-pkg`), upgrading
-`yggdrasil` from the feed replaces this project's build, and the restore hook
-below treats the changed binary as lost and puts the project build back at the
-next uplink. To move to the feed's build for good, rerun the deployer without
-`--ygg-edge` afterwards (see
+On a router installed with `--ygg-edge` (or `--ygg-pkg`), `apk upgrade` leaves
+this project's build alone: apk pinned the package to that file in
+`/etc/apk/world`. A rerun with `--ygg-edge` moves to the feed by itself once the
+feed's version is not older than the build; `--ygg-feed` moves at once and drops
+the pin. A feed version installed by hand that is newer than the build is kept:
+the restore hook below brings the build back only over an older version (see
 [installation](installation.md#yggdrasil-version-the-feeds-or-this-projects-build)).
 
 The deployer's own files live outside any package, survive package upgrades and

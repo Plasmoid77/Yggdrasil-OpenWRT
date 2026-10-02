@@ -16,7 +16,7 @@
 set -u
 umask 077
 
-VERSION='2.7.2'
+VERSION='3.0.0'
 SELF="${0##*/}"
 # Piped straight from a URL — wget -qO- ... | sh -s -- ... — $0 is the shell, so
 # the banner and the usage text would announce themselves as "sh".

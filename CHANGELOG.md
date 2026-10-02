@@ -1,10 +1,36 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
-## Deployer 2.7.2 - fixes from the repository review
+## Deployer 3.0.0 - remastered
+
+Shorter code that does the same, a version-aware `--ygg-edge`, a way back to
+the feed, and the fixes of the repository review. Host-tested.
+
+- One writer for the deployer's own files (`put_file`: written only when the
+  text changed, with its mode) replaces four copies of that logic; one RFC 5952
+  compressor (`addr_awk`) serves the reserved addresses and the generated DNS
+  generator, whose text stays byte-identical; small helpers count and delete
+  UCI sections and name the LAN device and the peers that are up.
+- `--ygg-edge` installs this project's Yggdrasil build only while it is newer
+  than the feed's (`apk version -t`); once the feed has caught up it installs
+  the feed's version instead. `restore.conf` records the build by its package
+  version (`edge_version`; a 2.x `edge_hash` is honoured once), and the restore
+  hook brings the build back only over an older version, so a newer feed
+  version is kept.
+- New `--ygg-feed` (`ygg-feed` under `[flags]`): back to the feed's Yggdrasil,
+  as a downgrade if need be, without leaving the version pin in
+  `/etc/apk/world`; the restore hook stops bringing the build back.
+- The package index lives in RAM and is empty after a reboot: it is now
+  refreshed once per run before the feed's version is read (a rerun with every
+  package installed never refreshed it, so `--ygg-edge` could compare against a
+  missing feed version and `--ygg-feed` could stop with "no yggdrasil"). A dry
+  run reports an unknown feed version instead of stopping.
+- `tests/deploy-restore.sh`: what `restore.conf` records, `--restore`, the
+  package choice and keep-list failures.
+
+### Fixes from the repository review
 
 Found by the review of the whole repository (Codex and three independent
-audits); every item was confirmed against the code first. Host-tested only,
-no router run yet.
+audits); every item was confirmed against the code first.
 
 - `--status-version` and `[status-version]` never worked: the option loop
   runs at the top of the script and called `status_valid_version`, which was
@@ -47,7 +73,11 @@ no router run yet.
   and a current `--status-version` example. Comments that pointed at the old
   pointer files or described static DNS records are rewritten.
 
-## Docs - brought in line with the code (repository review)
+## Docs - in line with deployer 3.0.0 and status 7.0
+
+- installation.md: the `--ygg-edge` version rule and `--ygg-feed`;
+  operations.md: `apk upgrade` on a router with this project's build;
+  development.md: the coverage of the new tests.
 
 - README: the installer keeps the ULA (it never removed it in 2.x), follows
   the newest status release instead of pinning one, and routes the routers'
@@ -68,7 +98,20 @@ no router run yet.
   `dhcpv6_served` rules as implemented, test coverage as it is, and no more
   "deployer pin" or "installer banner says v5".
 
-## Status 6.5.3 (not released yet) - polish from the repository review
+## Status 7.0 - remastered
+
+- Backend: `host_flags` and `lease_fields` replace repeated unpacking; the
+  init scripts are called through `INITD`, so a test can stand in for them.
+- `install.sh`: `DESTDIR` installs under another root (the host tests); it is
+  empty on the router, where nothing changes.
+- Tests: the Pin/Unpin write path against an in-memory UCI (values written,
+  commit and reloads, rollback after a failed commit or reload, host lookup);
+  the LuCI view under node (routed-prefix IPv6 cell, Unknown state,
+  protected-host and static-confirmation dialogs); the installer (fresh
+  install, upgrade backup, rollback). Each was checked against a mutated copy
+  of the code first.
+
+### Fixes from the repository review
 
 - Pin and Unpin could answer "busy" for up to ~20 s after a page refresh:
   the detached routed-address discovery inherited the shared DHCP lock

@@ -116,7 +116,7 @@ v6.5.2
 no-jumper
 no-dns
 no-lan-forward          # LAN hosts may not initiate connections into Yggdrasil
-# also: no-multicast no-lan no-firewall no-status dns ygg-edge
+# also: no-multicast no-lan no-firewall no-status dns ygg-edge ygg-feed
 # dhcpv6 / slaac        # 1.x only: 2.0 refuses them, delete the line
 ```
 
@@ -240,11 +240,19 @@ and installs it with `apk add --allow-untrusted`, since the build key is not one
 the router knows. The checksum carries the same limit as the status module's:
 it travels in the same release. `--ygg-pkg PATH` does the same from a local file
 (`PATH.sha256` required), for a router that cannot reach GitHub. A running node
-is restarted onto the new binary when the version changed. A later run without
-the switch keeps the installed build: apk does not downgrade to the feed's
-older version. Back to the feed's build: `apk update && apk add
-yggdrasil=<feed version>` (e.g. `0.5.12-r1`), then `ifup ygg0`, and rerun the
-deployer without `--ygg-edge` so the restore hook stops bringing the build back.
+is restarted onto the new binary when the version changed.
+
+`--ygg-edge` takes the build only while it is newer than the feed's version
+(`apk version -t`); once the feed has caught up, the same switch installs the
+feed's version instead, so rerunning with `--ygg-edge` never holds a router on
+an older build. A later run without either switch keeps what is installed: apk
+does not downgrade by itself, and the build stays pinned in `/etc/apk/world`.
+`--ygg-feed` (`ygg-feed` under `[flags]`) goes back to the feed's version, as a
+downgrade if need be, drops that pin so a later `apk upgrade` follows the feed,
+restarts the node on the new binary, and the restore hook stops bringing the
+build back. When the feed offers the build's very version, apk keeps the
+installed build until the feed's next release: it cannot tell two builds of
+one version apart.
 
 ### Surviving a sysupgrade
 

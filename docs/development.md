@@ -31,11 +31,15 @@ Do not call that a full pass or merge without the complete CI check.
 | Settings file | Every `--config` section lands in its option variable; later options add to lists and override single values; unknown sections, bad values, a missing file and a duplicated key are rejected; a wide file mode warns; the file's key sits between `--private-key-file` and `YGG_PRIVATE_KEY`; no option takes the key as a value |
 | Real command line (`deploy-cli.sh`) | The unmodified deployer run with real options under sh and BusyBox ash up to its preflight: `--status-version` and `[status-version]`, a repeated `--dns-host` name, name clashes, interface names, `--wait`; peer URIs shown without secrets; trusted rules fail closed |
 | LAN overlay (`deploy-lan-overlay.sh`) | `--host` forms, LAN inspection and preconditions, address arithmetic, collisions and reshuffles, the UCI values written, the LAN zone and the firewall rules |
-| Hotplug guard, DNS names, peer hook, sysupgrade keep list and restore (`deploy-hotplug-guard.sh`, `deploy-dns-names.sh`, `deploy-peer-hook.sh`, `deploy-keep-edge.sh`) | The generated guard, peer hook, DNS generator and its hook: their text, idempotent rewrites and behaviour against stubbed `ifstatus`/`ubus`/`yggdrasilctl`; the files kept on sysupgrade; the newest same-architecture build for `--ygg-edge`; when the restore hook runs `--restore` (not `restore.conf` itself or `--restore`'s own steps) |
+| Hotplug guard, DNS names, peer hook, sysupgrade keep list and restore hook (`deploy-hotplug-guard.sh`, `deploy-dns-names.sh`, `deploy-peer-hook.sh`, `deploy-keep-edge.sh`) | The generated guard, peer hook, DNS generator and its hook: their text, idempotent rewrites and behaviour against stubbed `ifstatus`/`ubus`/`yggdrasilctl`; the files kept on sysupgrade; the newest same-architecture build for `--ygg-edge`; when the restore hook runs `--restore` |
+| Restore and package choice (`deploy-restore.sh`) | What `restore.conf` records (also from a 2.x file); `--restore` over an older, a newer and a lost build and a lost status module; `--ygg-edge` only while newer than the feed, `--ygg-feed` without a version pin; one package index refresh per run, none on a dry run; keep-list write failures |
 | Inventory fixtures | DHCP expiry including unlimited leases; MAC deduplication and persistent lease-free rows; canonical/EUI-64/privacy selection; foreign prefix/MAC filtering; canonical identity guard |
 | Node-address memory fixtures | Peer-to-MAC correlation and upstream field renames; recall and pruning with the row; a pinned row recovering its address after a reboot wipes tmpfs; no flash rewrite when the address is unchanged |
 | Presence fixtures | REACHABLE shortcut, ARP success, IPv6 success, failure; the 8 s probe budget and unprobed ("Unknown") rows; background probes releasing the DHCP lock |
 | Mutation guards | Pin existing/expired/pending/busy; Unpin duplicate/shared/complex/static-confirmation/pending/busy |
+| Pin/Unpin write path (`status-writes.sh`) | Pin and Unpin past their guards against an in-memory UCI: the values written, commit and reloads, the rollback after a failed commit or reload, Unpin of a pin and of a hand-made section, protected sections untouched, host lookup with duplicates and shared sections |
+| LuCI view (`status-view.mjs`) | The real view under node with stub LuCI globals: the routed-prefix IPv6 cell, the Unknown state, the protected-host dialog, the Unpin re-dialog on a static confirmation and a refused Unpin |
+| Installer (`status-install.sh`) | The shipped installer into a scratch root (`DESTDIR`): fresh install and file modes, the upgrade backup, the rollback after a failed copy or a failed rpcd validation |
 | Documentation | Local Markdown links and heading fragments, shared Claude instructions |
 | Packaging | Exact tracked payload bytes, permissions, provenance, manifest, determinism, unsafe labels, no overwrite, exclusion of untracked files |
 | Frozen downloads | Existing archive SHA-256 files |
@@ -43,10 +47,11 @@ Do not call that a full pass or merge without the complete CI check.
 | Release builds | Numeric version, clean tracked checkout, no forgotten source files |
 
 Fixtures execute actual extracted backend functions with controlled OpenWrt
-I/O boundaries. They do not emulate the complete UCI/netifd/rpcd stack.
-Successful Pin/Unpin writes, actual service reload/rollback, LuCI dialogs,
-firewall behavior, protocol registration and reboot recovery remain manual
-integration tests below. Passing syntax or fixtures is not a hardware test.
+I/O boundaries. They do not emulate the complete UCI/netifd/rpcd stack: the
+write path runs against a small UCI emulation and stub init scripts, the view
+against stub LuCI globals. Real uci/dnsmasq/odhcpd behaviour, the page in a
+browser, firewall behavior, protocol registration and reboot recovery remain
+manual integration tests below. Passing syntax or fixtures is not a hardware test.
 
 ## Development packaging
 
@@ -165,8 +170,8 @@ depends on them.
 
 ## Version identities
 
-Changelog headings, the deployer's `VERSION` (for example 2.7.2) and a status
-distribution label (for example v6.5.2) name different things. Do not renumber
+Changelog headings, the deployer's `VERSION` (for example 3.0.0) and a status
+distribution label (for example v7.0) name different things. Do not renumber
 old history.
 The current source directory has no version suffix; Git identifies revisions.
 Repository maintenance is recorded by its PR/commits, not an invented release number.
