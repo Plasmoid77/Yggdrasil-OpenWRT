@@ -1,5 +1,34 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## Deployer 3.0.1 and status source safety fixes
+
+- Required configuration backups fail closed and replace recovery images only
+  after a complete copy. DHCP is backed up again under the shared mutation
+  lock, so a Pin committed after preflight is included in rollback. The lock
+  remains held through fatal service operations and is released before the
+  optional status installer. Unique backup directories prevent collisions;
+  rollback restores files atomically, reports incomplete recovery and is
+  attempted on HUP/INT/TERM during core stages; optional-stage interruption
+  cannot roll back a concurrent Pin after the lock is released.
+- Own script files are validated and chmodded before atomic replacement; an
+  unchanged file also has its requested permissions repaired.
+- Pin/Unpin report `rollback_failed` and retain the DHCP recovery image when
+  restore, UCI revert or daemon reload fails. Only complete recovery claims
+  the previous configuration was restored.
+- Only the exact generated section for its MAC is treated as a managed Pin;
+  custom sections sharing the name prefix keep their IPv6 protection.
+- Compressed zero hextets inside a delegated `/64` are recognised; leases,
+  observed addresses, discovery and memory compare IPv6 prefix bits rather
+  than spelling.
+- A failed inventory refresh visibly marks the retained table as stale,
+  including after Pin/Unpin; a successful refresh clears the warning.
+- Documentation describes address memory, lock and rollback boundaries,
+  reserved section ownership, BusyBox coverage and the unknown-feed-version
+  edge fallback. Released archives and the `status-v7.0` tag are unchanged;
+  these status changes are source changes pending a new release.
+- Regression checks cover the failure paths on the host under sh and BusyBox
+  ash. No router deployment or hardware validation is claimed for this patch.
+
 ## Deployer 3.0.0 - remastered
 
 Shorter code that does the same, a version-aware `--ygg-edge`, a way back to

@@ -70,7 +70,8 @@ const ui = {
     addNotification: () => {}
 };
 const window = { localStorage: { getItem: () => null, setItem: () => {} } };
-const document = { getElementById: () => null };
+const elements = {};
+const document = { getElementById: id => elements[id] || null };
 const view = { extend: obj => obj };
 const uci = { load: () => Promise.resolve(), get: () => null };
 const poll = { add: () => {} };
@@ -80,7 +81,7 @@ const source = readFileSync(VIEW, 'utf8');
 if (source.split(HOOK).length !== 2) fail('the view no longer ends in exactly one `return view.extend(`');
 let helpers;
 const hooked = source.replace(HOOK,
-    '\n__expose({ ipv6Cell, makeClientTable, persistenceCell });' + HOOK);
+    '\n__expose({ ipv6Cell, makeClientTable, persistenceCell, refreshClients });' + HOOK);
 const module = new Function('E', '_', 'view', 'rpc', 'uci', 'poll', 'ui', 'window', 'document', '__expose', hooked)(
     E, _, view, rpc, uci, poll, ui, window, document, h => { helpers = h; });
 if (!module || typeof module.render !== 'function' || !helpers) fail('the view did not evaluate to a LuCI view');
@@ -198,7 +199,26 @@ async function confirmGroup() {
     eq(1, modals.length, 'no second dialog on a refusal');
 }
 
+async function refreshFailureGroup() {
+    const warning = E('div', { style: 'display: none' }, []);
+    elements['yggdrasil-clients-refresh-error'] = warning;
+    replies.clients = () => Promise.reject(new Error('RPC unavailable'));
+    await helpers.refreshClients().catch(() => {});
+    eq('', warning.style.display, 'failed refresh warning visible');
+    if (!warning.textContent.includes('RPC unavailable')) fail('refresh failure omitted from warning');
+    for (const reason of [null, undefined]) {
+        replies.clients = () => Promise.reject(reason);
+        await helpers.refreshClients();
+        eq('', warning.style.display, 'empty rejection still shows a warning');
+    }
+    replies.clients = [];
+    await helpers.refreshClients();
+    eq('none', warning.style.display, 'successful refresh clears warning');
+    delete elements['yggdrasil-clients-refresh-error'];
+}
+
 const groups = [
+    ['a failed refresh visibly marks the retained inventory, and recovery clears it', refreshFailureGroup],
     ['the routed-prefix IPv6 cell: canonical, DHCPv6 lease, stale addresses', ipv6CellGroup],
     ['an unprobed row is Unknown, never Offline', stateGroup],
     ['a protected host gets an explanation and no Unpin', protectedGroup],

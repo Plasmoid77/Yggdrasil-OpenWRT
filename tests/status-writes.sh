@@ -21,9 +21,9 @@ load() {
     [ -n "$body" ] || fail "production function missing: $1"
     eval "$body"
 }
-for fn in lower normalize_mac valid_mac valid_hostname valid_ipv4 first_ipv4 lease_is_active \
+for fn in ipv6_prefix_awk lower normalize_mac valid_mac valid_hostname valid_ipv4 first_ipv4 lease_is_active \
     find_active_lease_by_mac match_host_section_by_mac find_host_by_mac host_section_has_extra_options \
-    backup_dhcp_config restore_dhcp_config finish_dhcp_config dhcp_has_pending_changes \
+    backup_dhcp_config restore_dhcp_config dhcp_change_failed finish_dhcp_config dhcp_has_pending_changes \
     dhcpv6_is_served lan_dhcpv6_is_served commit_and_reload_dhcp norm_hostid valid_hostid \
     collect_taken_hostids collect_taken_hostid iid_to_addr load_ygg_prefix rpc_pin rpc_unpin; do
     load "$fn"
@@ -35,6 +35,12 @@ STORE="$TMP/dhcp"          # committed state, `uci show` lines; also DHCP_CONFIG
 STAGE="$TMP/stage"         # staged changes: "set KEY=VALUE" / "delete KEY"
 DHCP_CONFIG="$STORE"
 : > "$STAGE"
+cp() {
+    if [ "${FAIL_RESTORE_COPY:-0}" = 1 ] && [ "$1" = -p ] && [ "$2" = "${DHCP_BACKUP:-}" ]; then
+        return 1
+    fi
+    command cp "$@"
+}
 view() {   # committed state with the staged changes applied
     cp "$STORE" "$TMP/view"
     while IFS= read -r vw_op; do
@@ -74,7 +80,8 @@ config_get() {       # $1 = variable, $2 = section, $3 = option
 # --- services and RPC plumbing -----------------------------------------------
 INITD="$TMP/init.d"; mkdir -p "$INITD"
 for svc in dnsmasq odhcpd; do
-    printf '#!/bin/sh\necho "%s $1" >> "%s/services"\n[ "${FAIL_%s:-0}" != 1 ]\n' "$svc" "$TMP" "$svc" > "$INITD/$svc"
+    printf '#!/bin/sh\necho "%s $1" >> "%s/services"\n[ "${FAIL_%s:-0}" != 1 ] || exit 1\n' "$svc" "$TMP" "$svc" > "$INITD/$svc"
+    printf 'if [ "${FAIL_%s:-0}" = once ] && [ ! -f "%s/%s.failed" ]; then touch "%s/%s.failed"; exit 1; fi\n' "$svc" "$TMP" "$svc" "$TMP" "$svc" >> "$INITD/$svc"
     chmod 755 "$INITD/$svc"
 done
 export FAIL_dnsmasq FAIL_odhcpd   # the init scripts are separate processes
@@ -106,7 +113,8 @@ dhcp.cfg01.ip='192.0.2.50'
 EOF
     : > "$STAGE"; : > "$TMP/services"
     printf '%s\n' '9999 aa:bb:cc:dd:ee:ff 192.0.2.10 laptop *' > "$LEASE_FILE"
-    CODE=''; ADDR6=''; FAIL_COMMIT=0; FAIL_dnsmasq=0; FAIL_odhcpd=0; LEASE_DUID=''
+    rm -f "$TMP/dnsmasq.failed" "$TMP/odhcpd.failed"
+    CODE=''; ADDR6=''; FAIL_RESTORE_COPY=0; FAIL_COMMIT=0; FAIL_dnsmasq=0; FAIL_odhcpd=0; LEASE_DUID=''
     PIN_SECTION_PREFIX='ygg_status_'
 }
 
@@ -168,7 +176,7 @@ name=laptop'
     # odhcpd refuses the new file: the old file returns and both daemons reread it
     reset
     cp "$STORE" "$TMP/before"
-    FAIL_odhcpd=1
+    FAIL_odhcpd=once
     rpc_pin
     eq reload_failed "$CODE"
     cmp -s "$STORE" "$TMP/before" || fail 'the previous configuration was not restored'
@@ -228,6 +236,46 @@ host_lookup() {
     if find_host_by_mac de:ad:be:ef:00:01; then fail 'an unknown MAC was found'; fi
 }
 
+rollback_failure() {
+    reset
+    REQUEST='mac=aa:bb:cc:dd:ee:ff
+name=laptop'
+    FAIL_odhcpd=1
+    rpc_pin
+    eq rollback_failed "$CODE"
+    [ -f "$DHCP_BACKUP" ] || fail 'failed recovery backup removed'
+    rm -f "$DHCP_BACKUP"
+}
+
+restore_copy_failure() {
+    reset
+    cp "$STORE" "$TMP/before"
+    REQUEST='mac=aa:bb:cc:dd:ee:ff
+name=laptop'
+    FAIL_odhcpd=once
+    FAIL_RESTORE_COPY=1
+    rpc_pin
+    eq rollback_failed "$CODE"
+    [ -f "$DHCP_BACKUP" ] || fail 'failed copy lost recovery image'
+    cmp -s "$DHCP_BACKUP" "$TMP/before" || fail 'retained image is not the original config'
+    rm -f "$DHCP_BACKUP"
+}
+
+managed_namespace() {
+    reset
+    printf "%s\n" "set dhcp.ygg_status_manual=host" "set dhcp.ygg_status_manual.mac=aa:bb:cc:dd:ee:ff" "set dhcp.ygg_status_manual.hostid=20" > "$STAGE"
+    uci commit dhcp
+    find_host_by_mac aa:bb:cc:dd:ee:ff
+    eq 0 "$FOUND_HOST_MANAGED"
+    REQUEST='mac=aa:bb:cc:dd:ee:ff
+confirm_static=true'
+    rpc_unpin
+    eq reserved_ipv6 "$CODE"
+}
+
+run 'a failed restore copy retains the original recovery image' restore_copy_failure
+run 'failed recovery retains backup and reports rollback_failed' rollback_failure
+run 'a custom prefixed section is not a managed IPv6 reservation' managed_namespace
 run 'Pin writes name and MAC, commits and reloads; a second Pin changes nothing' pin_writes
 run 'Pin stores IPv4, hostid and DUID; a taken suffix is refused before any write' pin_reservations
 run 'a refused commit or reload brings the previous DHCP configuration back' pin_rollback

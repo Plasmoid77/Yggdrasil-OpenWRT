@@ -41,8 +41,12 @@ sh tests/deploy-keep-edge.sh
 busybox ash tests/deploy-keep-edge.sh
 sh tests/deploy-cli.sh
 busybox ash tests/deploy-cli.sh
+sh tests/deploy-safety.sh
+busybox ash tests/deploy-safety.sh
 sh tests/deploy-restore.sh
 busybox ash tests/deploy-restore.sh
+sh tests/status-prefix.sh
+busybox ash tests/status-prefix.sh
 sh tests/status-inventory.sh
 busybox ash tests/status-inventory.sh
 sh tests/status-download.sh
@@ -68,7 +72,7 @@ for applet in $applets; do
     printf '#!/bin/sh\nexec busybox %s "$@"\n' "$applet" > "$APPLETS/$applet"
     chmod +x "$APPLETS/$applet"
 done
-for test in tests/deploy-*.sh tests/status-inventory.sh tests/status-writes.sh tests/status-install.sh; do
+for test in tests/deploy-*.sh tests/status-prefix.sh tests/status-inventory.sh tests/status-writes.sh tests/status-install.sh; do
     PATH="$APPLETS:$PATH" busybox ash "$test" >/dev/null \
         || { echo "FAIL with BusyBox applets: $test" >&2; exit 1; }
 done

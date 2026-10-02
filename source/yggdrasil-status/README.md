@@ -54,14 +54,19 @@ Canonical metadata attaches only to persistent identities. Recent kernel
 `REACHABLE` results avoid redundant probes; otherwise ARP/IPv6 probes determine
 Online/Offline within an 8-second budget per refresh, and a row the budget did
 not reach shows "Unknown" until the next one. The page polls clients every 15
-seconds while open. The native/ULA addresses of a device have their own IPv6
-column; the IPv4 and IPv6 columns can be folded.
+seconds while open. Failed refreshes mark the retained table as stale until
+a successful response arrives. The native/ULA addresses of a device have their
+own IPv6 column; the IPv4 and IPv6 columns can be folded.
 
 Pin defaults to hostname + MAC, without an IPv4 reservation. A requested
 reservation comes from a fresh active lease, never a browser-supplied address.
 Unpin requires explicit confirmation for static reservations and refuses
 shared, duplicate or complex host sections. Pin/Unpin preserves domain records,
 refuses pending DHCP edits and uses locking plus configuration backup/rollback.
+Incomplete recovery reports `rollback_failed` and retains the original DHCP
+backup for inspection. Managed reservation ownership is limited to the exact
+`ygg_status_<MAC without colons>` section for that MAC; this namespace is
+reserved for Pin. Custom prefixed sections do not gain that ownership.
 
 The current backend handles one logical `lan`; the DNS suffix is the
 deployer's zone (`/etc/yggdrasil-openwrt/dns.conf`, `home.arpa` without it),

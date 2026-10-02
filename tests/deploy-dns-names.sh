@@ -148,7 +148,8 @@ grep -n "tr '\[:" "$SCRIPT" && fail 'tr with a character class in the deployer'
 echo 'PASS: lower-casing without character classes'
 
 # 9. rollback restores the DNS settings with the UCI files
-RB="$(extract_function rollback | sed 's|/etc/init.d/|rb_init |g')"
+eval "$(extract_function backup_file)"
+RB="$(extract_function rollback | sed "s|/etc/init.d/|rb_init |g; s|/etc/config/|$TMP/etc/config/|g")"
 [ -n "$RB" ] || fail 'rollback not found'
 eval "$RB"
 rb_init() { echo "$*" >> "$TMP/init.log"; }
@@ -157,9 +158,10 @@ uci() { return 0; }
 DRY_RUN=0; CHANGED_NETWORK=0; CHANGED_FIREWALL=0; CHANGED_DHCP=1; CHANGED_DNS=1
 DNS_CONF="$TMP/etc/dns.conf"; DNS_HOSTS_DIR="$TMP/rbhosts"; DNS_GEN="$TMP/gen"
 printf '#!/bin/sh\necho "gen $YGG_DNS_NOSIGNAL" >> "%s/init.log"\n' "$TMP" > "$DNS_GEN"; chmod 755 "$DNS_GEN"
-mkdir -p "$TMP/etc" "$DNS_HOSTS_DIR"
+mkdir -p "$TMP/etc/config" "$DNS_HOSTS_DIR"
 # a rerun that changed the zone: the old settings come back and the names are rebuilt
 BACKUP_DIR="$TMP/bk1"; mkdir -p "$BACKUP_DIR"; echo 'zone home.arpa' > "$BACKUP_DIR/dns.conf"
+printf 'original dhcp\n' > "$BACKUP_DIR/dhcp"
 echo 'zone spb.home.arpa' > "$DNS_CONF"; : > "$TMP/init.log"
 rollback
 [ "$(cat "$DNS_CONF")" = 'zone home.arpa' ] || fail "dns.conf not restored: $(cat "$DNS_CONF")"
@@ -168,6 +170,7 @@ grep -qx 'gen 1' "$TMP/init.log" || fail 'names not rebuilt on rollback'
     || fail 'names rebuilt after the dnsmasq restart'
 # a first run (no dns.conf before): settings and generated names removed
 BACKUP_DIR="$TMP/bk2"; mkdir -p "$BACKUP_DIR"; : > "$BACKUP_DIR/dns.conf.absent"
+printf 'original dhcp\n' > "$BACKUP_DIR/dhcp"
 echo 'zone home.arpa' > "$DNS_CONF"; echo '203::1 router.home.arpa' > "$DNS_HOSTS_DIR/yggdrasil-ygg0"
 rollback
 if [ -e "$DNS_CONF" ] || [ -e "$DNS_HOSTS_DIR/yggdrasil-ygg0" ]; then fail 'first-run DNS state left after rollback'; fi

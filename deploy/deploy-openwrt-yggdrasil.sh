@@ -16,7 +16,7 @@
 set -u
 umask 077
 
-VERSION='3.0.0'
+VERSION='3.0.1'
 SELF="${0##*/}"
 # Piped straight from a URL — wget -qO- ... | sh -s -- ... — $0 is the shell, so
 # the banner and the usage text would announce themselves as "sh".
@@ -127,7 +127,7 @@ die() {
     [ -n "$FAILED_STAGE" ] && err "failed during stage: $FAILED_STAGE"
     # Argument errors die before rollback() is defined; there is nothing to
     # roll back at that point, and ash would otherwise print "rollback: not found".
-    if command -v rollback >/dev/null 2>&1; then rollback; fi
+    if command -v rollback >/dev/null 2>&1; then rollback || true; fi
     exit 1
 }
 
@@ -757,14 +757,34 @@ put_file() {
         return 0
     fi
     if [ -f "$1" ] && [ "$(cat "$1")" = "$3" ]; then
+        case "$1" in *.conf) : ;; *) sh -n "$1" 2>/dev/null || return 1 ;; esac
+        chmod "$2" "$1" || return 1
         ok "$4 already in place: $1"
         return 0
     fi
-    if ! { mkdir -p "$(dirname "$1")" && printf '%s\n' "$3" > "$1" && chmod "$2" "$1"; }; then
+    _pf_dir="$(dirname "$1")"
+    mkdir -p "$_pf_dir" || return 1
+    _pf_tmp="$(mktemp "$_pf_dir/.ygg-write.XXXXXX")" || return 1
+    if ! { printf '%s\n' "$3" > "$_pf_tmp" && chmod "$2" "$_pf_tmp"; }; then
+        rm -f "$_pf_tmp"
         return 1
     fi
-    case "$1" in *.conf) : ;; *) sh -n "$1" 2>/dev/null || return 1 ;; esac
+    case "$1" in
+        *.conf) : ;;
+        *) sh -n "$_pf_tmp" 2>/dev/null || { rm -f "$_pf_tmp"; return 1; } ;;
+    esac
+    mv -f "$_pf_tmp" "$1" || { rm -f "$_pf_tmp"; return 1; }
     ok "$4 written: $1"
+}
+
+# Replace a recovery image only after a complete copy. A failed refresh must
+# leave the previous image intact, and must stop the deployment before edits.
+backup_file() {
+    _bf_tmp="$(mktemp "$2.XXXXXX")" || return 1
+    if ! cp -p "$1" "$_bf_tmp" || ! mv -f "$_bf_tmp" "$2"; then
+        rm -f "$_bf_tmp"
+        return 1
+    fi
 }
 
 confirm() {
@@ -867,6 +887,7 @@ rollback() {
     [ -d "$BACKUP_DIR" ] || return 0
     [ "$CHANGED_NETWORK$CHANGED_DHCP$CHANGED_FIREWALL" = "000" ] && return 0
 
+    _rb_failed=0
     warn "rolling back UCI configuration from $BACKUP_DIR"
     for _c in network dhcp firewall; do
         _flag=0
@@ -877,29 +898,47 @@ rollback() {
         esac
         [ "$_flag" -eq 1 ] || continue
         if [ -f "$BACKUP_DIR/$_c" ]; then
-            uci -q revert "$_c" 2>/dev/null || true
-            cp "$BACKUP_DIR/$_c" "/etc/config/$_c" && warn "  restored /etc/config/$_c"
+            uci -q revert "$_c" 2>/dev/null || _rb_failed=1
+            if backup_file "$BACKUP_DIR/$_c" "/etc/config/$_c"; then
+                warn "  restored /etc/config/$_c"
+            else
+                _rb_failed=1
+            fi
+        else
+            _rb_failed=1
         fi
     done
     # The generated names go back with their settings; the dnsmasq restart
     # below rereads them.
     if [ "$CHANGED_DNS" -eq 1 ]; then
         if [ -f "$BACKUP_DIR/dns.conf" ]; then
-            cp "$BACKUP_DIR/dns.conf" "$DNS_CONF" && warn "  restored $DNS_CONF"
-            [ -x "$DNS_GEN" ] && YGG_DNS_NOSIGNAL=1 "$DNS_GEN"
+            if backup_file "$BACKUP_DIR/dns.conf" "$DNS_CONF"; then
+                warn "  restored $DNS_CONF"
+                if [ -x "$DNS_GEN" ]; then YGG_DNS_NOSIGNAL=1 "$DNS_GEN" || _rb_failed=1; fi
+            else
+                _rb_failed=1
+            fi
         elif [ -f "$BACKUP_DIR/dns.conf.absent" ]; then
-            rm -f "$DNS_CONF" "$DNS_HOSTS_DIR/yggdrasil-$IFACE" && warn "  removed $DNS_CONF and the generated names"
+            rm -f "$DNS_CONF" "$DNS_HOSTS_DIR/yggdrasil-$IFACE" || _rb_failed=1
+            warn "  removal attempted for $DNS_CONF and the generated names"
+        else
+            _rb_failed=1
         fi
     fi
     # Only the services whose configuration went back; odhcpd by reload, which
     # keeps the bound DHCPv6 leases (see stage_lan).
-    [ "$CHANGED_NETWORK" -eq 1 ] && { /etc/init.d/network reload >/dev/null 2>&1 || true; }
+    [ "$CHANGED_NETWORK" -eq 1 ] && { /etc/init.d/network reload >/dev/null 2>&1 || _rb_failed=1; }
     if [ "$CHANGED_NETWORK$CHANGED_DHCP" != "00" ]; then
-        /etc/init.d/odhcpd reload >/dev/null 2>&1 || /etc/init.d/odhcpd restart >/dev/null 2>&1 || true
+        /etc/init.d/odhcpd reload >/dev/null 2>&1 || /etc/init.d/odhcpd restart >/dev/null 2>&1 || _rb_failed=1
     fi
-    [ "$CHANGED_DHCP" -eq 1 ] && { /etc/init.d/dnsmasq restart >/dev/null 2>&1 || true; }
-    [ "$CHANGED_FIREWALL" -eq 1 ] && { /etc/init.d/firewall reload >/dev/null 2>&1 || true; }
+    [ "$CHANGED_DHCP" -eq 1 ] && { /etc/init.d/dnsmasq restart >/dev/null 2>&1 || _rb_failed=1; }
+    [ "$CHANGED_FIREWALL" -eq 1 ] && { /etc/init.d/firewall reload >/dev/null 2>&1 || _rb_failed=1; }
+    if [ "$_rb_failed" -ne 0 ]; then
+        warn "rollback incomplete — backups retained in $BACKUP_DIR; verify configuration and services manually"
+        return 1
+    fi
     warn "rollback done — verify the router state manually"
+    return 0
 }
 
 # =========================================================== stage 0: preflight
@@ -965,6 +1004,10 @@ stage_preflight() {
     for _t in uci ubus jsonfilter ifstatus; do
         have "$_t" || die "required tool missing: $_t"
     done
+
+    if [ "$DRY_RUN" -eq 0 ] && { [ "$DO_LAN" -eq 1 ] || [ "$DO_DNS" -eq 1 ]; }; then
+        have flock || die "required tool missing: flock"
+    fi
 
     # apk only. The design targets OpenWrt 25.12+, where apk is the package
     # manager; on an opkg release the package names and the yggdrasil netifd
@@ -1034,16 +1077,15 @@ stage_preflight() {
     # The backup holds the node key: written only for a run that goes ahead,
     # so a refused or declined run leaves no copy behind.
     if [ "$DRY_RUN" -eq 0 ]; then
-        BACKUP_DIR="/root/ygg-deploy-backup-$(date +%Y%m%d-%H%M%S)"
-        mkdir -p "$BACKUP_DIR" || die "cannot create $BACKUP_DIR"
+        BACKUP_DIR="$(mktemp -d "/root/ygg-deploy-backup-$(date +%Y%m%d-%H%M%S)-XXXXXX")" || die "cannot create backup directory"
         for _c in network dhcp firewall; do
-            [ -f "/etc/config/$_c" ] && cp "/etc/config/$_c" "$BACKUP_DIR/$_c"
+            backup_file "/etc/config/$_c" "$BACKUP_DIR/$_c" || die "cannot back up $_c to $BACKUP_DIR"
         done
         # the DNS names' settings live beside UCI (stage 6); "absent" marks a first run
         if [ -f "$DNS_CONF" ]; then
-            cp "$DNS_CONF" "$BACKUP_DIR/dns.conf"
+            backup_file "$DNS_CONF" "$BACKUP_DIR/dns.conf" || die "cannot back up $DNS_CONF"
         else
-            : > "$BACKUP_DIR/dns.conf.absent"
+            : > "$BACKUP_DIR/dns.conf.absent" || die "cannot record absent DNS configuration"
         fi
         ok "backup written to $BACKUP_DIR"
     fi
@@ -1146,7 +1188,8 @@ ygg_use_feed() {
 # --allow-untrusted, but only after the bytes have matched the SHA-256 that is
 # published beside it (the same trust as the status module). A later run
 # without the switch keeps it (apk does not downgrade by itself); --ygg-feed
-# goes back. --ygg-edge takes the build only while it is newer than the feed's.
+# goes back. With a known feed version, --ygg-edge takes only a newer build;
+# an unavailable index leaves that comparison unknown (with a warning).
 install_ygg_build() {
     if [ "$YGG_FEED" -eq 1 ]; then
         FAILED_STAGE='Yggdrasil from the feed'
@@ -1844,15 +1887,15 @@ lan_has_ygg_prefix() {
 # dhcp is also the status module's file (Pin/Unpin edit config host under
 # this lock, and an open status page holds it shared for a few seconds on
 # every refresh). The first stage that edits dhcp takes it before staging
-# anything, so a busy lock means "nothing changed yet" rather than a rollback
-# over someone else's edit, and it is held until the last dhcp commit of the
-# run: no other writer can get in between, so a rollback never restores the
-# file over a change it did not make. BusyBox flock has no -w, so wait by
+# DHCP, and refresh its recovery image under that lock. Hold it through the
+# last fatal LAN/firewall/DNS operation, including any rollback: cooperating
+# writers cannot commit an edit between that image and restoration. BusyBox flock has no -w, so wait by
 # retrying.
 dhcp_lock() {
     [ "$DHCP_LOCKED" -eq 0 ] || return 0
-    if ! have flock || [ "$DRY_RUN" -eq 1 ]; then return 0; fi
-    exec 9>>/var/lock/yggdrasil-status-dhcp.lock
+    [ "$DRY_RUN" -eq 1 ] && return 0
+    have flock || die "flock is required to protect DHCP edits"
+    exec 9>>/var/lock/yggdrasil-status-dhcp.lock || die "cannot open DHCP lock"
     _tries=0
     until flock -n 9; do
         _tries=$((_tries + 1))
@@ -1863,6 +1906,7 @@ dhcp_lock() {
     if uci -q changes dhcp 2>/dev/null | grep -q .; then
         die "uncommitted UCI changes appeared in 'dhcp' since preflight — commit or revert them first"
     fi
+    backup_file /etc/config/dhcp "$BACKUP_DIR/dhcp" || die "cannot refresh DHCP backup under lock"
 }
 
 dhcp_unlock() {
@@ -1922,8 +1966,7 @@ stage_lan() {
     if [ "$DRY_RUN" -eq 0 ]; then
         uci commit network || die "uci commit network failed"
         uci commit dhcp    || die "uci commit dhcp failed"
-        # stage 6 edits dhcp too: the lock stays until its commit
-        [ "$DO_DNS" -eq 1 ] || dhcp_unlock
+        # Keep the lock through all fatal operations, including stage 6.
         /etc/init.d/network reload >/dev/null 2>&1 || die "network reload failed"
         # reload (SIGHUP) re-reads the configuration but keeps the bound DHCPv6
         # leases; a restart would drop every lease from the router's record
@@ -2244,7 +2287,6 @@ stage_dns() {
 
     if [ "$DRY_RUN" -eq 0 ]; then
         uci commit dhcp || die "uci commit dhcp failed"
-        dhcp_unlock
         /etc/init.d/dnsmasq restart >/dev/null 2>&1 || die "dnsmasq restart failed"
 
         # A dnsmasq that cannot parse its config exits without a word, taking
@@ -2861,6 +2903,8 @@ restore_run() {
 
 # ------------------------------------------------------------------- main ---
 
+trap 'trap "" HUP INT TERM; die "interrupted by signal; recovery attempted"' HUP INT TERM
+
 if [ "$RESTORE" -eq 1 ]; then
     restore_run || exit 1
     exit "$RC_OK"
@@ -2880,6 +2924,10 @@ stage_wait
 stage_lan
 stage_firewall
 stage_dns
+# Core edits are complete. Never roll them back after cooperating writers can
+# acquire the DHCP lock again, including on interruption of optional stages.
+trap 'warn "interrupted after core deployment; verify optional stages"; exit 1' HUP INT TERM
+dhcp_unlock
 stage_status
 install_restore
 keep_on_sysupgrade

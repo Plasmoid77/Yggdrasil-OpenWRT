@@ -327,10 +327,23 @@ function notifyError(message) {
 }
 
 
+function setClientRefreshError(message) {
+	var warning = document.getElementById('yggdrasil-clients-refresh-error');
+	if (warning) {
+		warning.textContent = message;
+		warning.style.display = message ? '' : 'none';
+	}
+}
+
+
 function refreshClients() {
 	return callClients().then(function(clients) {
 		replaceClientTable(clients || []);
+		setClientRefreshError('');
 		return clients;
+	}, function(error) {
+		setClientRefreshError(_('Could not refresh LAN clients. Showing the last successful result: %s').format(error && error.message || String(error)));
+		return null;
 	});
 }
 
@@ -846,6 +859,7 @@ return view.extend({
 
 		content.push(
 			E('h3', {}, _('LAN clients')),
+			E('div', { 'id': 'yggdrasil-clients-refresh-error', 'role': 'alert', 'class': 'alert-message warning', 'style': 'display: none' }, []),
 			makeClientTable(data.clients)
 		);
 
@@ -855,7 +869,7 @@ return view.extend({
 		 * only while this page is open and refreshes the LAN table every 15 sec.
 		 */
 		poll.add(function() {
-			return refreshClients().catch(function() {});
+			return refreshClients();
 		}, 15);
 
 		return E(content);

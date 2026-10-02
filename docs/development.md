@@ -24,8 +24,9 @@ Do not call that a full pass or merge without the complete CI check.
 | Check | Runs automatically |
 | --- | --- |
 | Shell syntax under host sh and BusyBox ash; ShellCheck | All tracked router/test shell entry points, including `client/linux/yggdrasil-split-dns` |
-| BusyBox applets | Every shell test again with BusyBox `awk`, `sed`, `grep`, `tr` and the other text tools first on `PATH`, as on the router |
+| BusyBox applets | All deployer tests plus prefix, inventory, writes and installer tests again with BusyBox text applets first on `PATH`; download tests run under both shells but not this extra applet pass. BusyBox `awk` is used only when the host build supports math, otherwise host awk remains |
 | JSON and LuCI JavaScript syntax | ACL/menu and frontend |
+| Deployment safety (`deploy-safety.sh`) | Atomic hook replacement, unchanged-content mode repair, failed backup preservation, DHCP backup refreshed after locking, lock held through fatal stages and released before optional status validation |
 | Secret handling | Existing deployer stdin, environment, validation, redaction and umask regressions |
 | Optional peers | Deployer parser accepts a run without `--peer`/`--peers-file`; the peers stage branches on an empty list; given peers are still validated |
 | Settings file | Every `--config` section lands in its option variable; later options add to lists and override single values; unknown sections, bad values, a missing file and a duplicated key are rejected; a wide file mode warns; the file's key sits between `--private-key-file` and `YGG_PRIVATE_KEY`; no option takes the key as a value |
@@ -35,9 +36,10 @@ Do not call that a full pass or merge without the complete CI check.
 | Restore and package choice (`deploy-restore.sh`) | What `restore.conf` records (also from a 2.x file); `--restore` over an older, a newer and a lost build and a lost status module; `--ygg-edge` only while newer than the feed, `--ygg-feed` without a version pin; one package index refresh per run, none on a dry run; keep-list write failures |
 | Inventory fixtures | DHCP expiry including unlimited leases; MAC deduplication and persistent lease-free rows; canonical/EUI-64/privacy selection; foreign prefix/MAC filtering; canonical identity guard |
 | Node-address memory fixtures | Peer-to-MAC correlation and upstream field renames; recall and pruning with the row; a pinned row recovering its address after a reboot wipes tmpfs; no flash rewrite when the address is unchanged |
+| Routed prefix (`status-prefix.sh`) | Compressed and expanded delegated prefixes, equivalent observed addresses and memory filtering across adjacent /64s |
 | Presence fixtures | REACHABLE shortcut, ARP success, IPv6 success, failure; the 8 s probe budget and unprobed ("Unknown") rows; background probes releasing the DHCP lock |
 | Mutation guards | Pin existing/expired/pending/busy; Unpin duplicate/shared/complex/static-confirmation/pending/busy |
-| Pin/Unpin write path (`status-writes.sh`) | Pin and Unpin past their guards against an in-memory UCI: the values written, commit and reloads, the rollback after a failed commit or reload, Unpin of a pin and of a hand-made section, protected sections untouched, host lookup with duplicates and shared sections |
+| Pin/Unpin write path (`status-writes.sh`) | Pin and Unpin past their guards against an in-memory UCI: the values written, commit and reloads, recovery after failed commit/reload, retained backup and `rollback_failed` on failed restore/reload, exact managed namespace, Unpin of a pin and of a hand-made section, protected sections untouched, host lookup with duplicates and shared sections |
 | LuCI view (`status-view.mjs`) | The real view under node with stub LuCI globals: the routed-prefix IPv6 cell, the Unknown state, the protected-host dialog, the Unpin re-dialog on a static confirmation and a refused Unpin |
 | Installer (`status-install.sh`) | The shipped installer into a scratch root (`DESTDIR`): fresh install and file modes, the upgrade backup, the rollback after a failed copy or a failed rpcd validation |
 | Documentation | Local Markdown links and heading fragments, shared Claude instructions |
@@ -290,7 +292,7 @@ Expected:
 ```text
 one row
 only the observed modified EUI-64 shown
-no automatic persistence of those addresses
+no automatic `config host` creation or UCI reservation; observed address memory follows the existing row lifetime and storage class
 router flag does not change MAC identity or create another row
 ```
 
@@ -309,7 +311,7 @@ Expected:
 ```text
 one row
 all unique observed Ygg addresses shown
-no automatic persistence of those addresses
+no automatic `config host` creation or UCI reservation; observed address memory follows the existing row lifetime and storage class
 ```
 
 ### Case G — canonical + observed address
@@ -718,7 +720,7 @@ A changed RPC contract requires backend/frontend/ACL, installer validation and
 fixtures to agree. A status-only release must preserve every core-network
 invariant listed above. For substantial behavior work, implement and test
 read-only inventory first, then address enrichment/presence, then mutations
-and rollback, then UI dialogs.
+and rollback, then UI dialogs and stale-refresh warnings.
 
 Review the diff, run host checks, then perform the explicitly scoped manual
 matrix on a test router with backups and another management path. Record the
