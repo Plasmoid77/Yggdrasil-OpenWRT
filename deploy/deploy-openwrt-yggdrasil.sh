@@ -1093,6 +1093,13 @@ ygg_pkg_version() {
 ygg_feed_version() {
     apk search -x yggdrasil 2>/dev/null | sed -n 's/^yggdrasil-\([0-9][^ ]*\)$/\1/p' | head -n 1
 }
+# The package index lives in RAM (/var/cache/apk) and is gone after a reboot:
+# refresh it once per run before anything reads or installs from the feed.
+apk_update() {
+    [ "${APK_UPDATED:-0}" -eq 1 ] && return 0
+    APK_UPDATED=1
+    apk update >/dev/null 2>&1 || warn "package index update failed — trying to install anyway"
+}
 ver_older() { # $1 is older than $2, in apk's ordering
     [ "$(apk version -t "$1" "$2" 2>/dev/null)" = '<' ]
 }
@@ -1114,20 +1121,23 @@ APK_WORLD='/etc/apk/world'
 # second add drops that version pin from /etc/apk/world again, so later
 # upgrades follow the feed.
 ygg_use_feed() {
+    [ "$DRY_RUN" -eq 1 ] || apk_update
     yuf_feed="$(ygg_feed_version)"
-    [ -n "$yuf_feed" ] || die "the package feed offers no yggdrasil (did apk update run?)"
     yuf_inst="$(ygg_pkg_version)"
     if [ "$DRY_RUN" -eq 1 ]; then
-        info "would install the feed's yggdrasil $yuf_feed (installed: ${yuf_inst:-none})"
+        info "would install the feed's yggdrasil ${yuf_feed:-(version unknown until apk update)} (installed: ${yuf_inst:-none})"
         return 0
     fi
+    [ -n "$yuf_feed" ] || die "the package feed offers no yggdrasil (package index update failed?)"
     yuf_old="$(ygg_binary_hash)"
     if [ "$yuf_inst" != "$yuf_feed" ] || ! grep -qx 'yggdrasil' "$APK_WORLD" 2>/dev/null; then
         if ! { apk add "yggdrasil=$yuf_feed" >/dev/null 2>&1 && apk add yggdrasil >/dev/null 2>&1; }; then
             die "apk could not install the feed's yggdrasil $yuf_feed"
         fi
     fi
-    ok "yggdrasil $yuf_feed from the OpenWrt feed"
+    # a build of this project with the feed's very version stays: apk sees
+    # nothing to replace; the feed's next release takes over
+    ok "yggdrasil $yuf_feed, the feed's version; upgrades follow the feed"
     ygg_restart_if_changed "$yuf_old"
 }
 
@@ -1164,6 +1174,7 @@ install_ygg_build() {
             || iyb_fail "no Yggdrasil build for $(pkg_arch) in the $STATUS_REPO releases (or GitHub unreachable) - run without --ygg-edge, or copy the .apk and .sha256 here and use --ygg-pkg"
         iyb_ver="${iyb_url##*/yggdrasil-}"
         iyb_ver="${iyb_ver%_"$(pkg_arch)".apk}"
+        apk_update
         iyb_feed="$(ygg_feed_version)"
         if [ -n "$iyb_feed" ] && ! ver_older "$iyb_feed" "$iyb_ver"; then
             rm -rf "$iyb_dir"
@@ -1215,8 +1226,7 @@ stage_packages() {
         return 0
     fi
 
-    # shellcheck disable=SC2086
-    apk update >/dev/null 2>&1 || warn "package index update failed — trying to install anyway"
+    apk_update
 
     for _p in $_missing; do
         # shellcheck disable=SC2086

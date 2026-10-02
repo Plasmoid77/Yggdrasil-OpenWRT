@@ -23,7 +23,7 @@ extract_function() {
 eval "$(sed -n '/^set -u$/,/^VERSION=/p' "$SCRIPT" | sed '/^set -u$/d')"
 eval "$(sed -n '/^# -* defaults -*$/,/^usage() {$/p' "$SCRIPT" | sed '$d')"
 for f in put_file restore_disable restore_conf_get restore_hook_text install_restore restore_run \
-         ygg_pkg_version ygg_feed_version ver_older ygg_restart_if_changed ygg_use_feed install_ygg_build \
+         ygg_pkg_version ygg_feed_version apk_update ver_older ygg_restart_if_changed ygg_use_feed install_ygg_build \
          keep_list keep_on_sysupgrade; do
     body="$(extract_function "$f")"
     [ -n "$body" ] || { echo "FAIL: function $f not found in deployer" >&2; exit 1; }
@@ -48,12 +48,14 @@ HOTPLUG_FILE=/h; PEER_HOOK=/p; DNS_HOOK=/d
 IFACE=ygg0; LAN=lan; DRY_RUN=0
 
 # apk: the installed version lives in $TMP/inst, the feed's in $TMP/feed;
-# every add is recorded. A local .apk installs $EDGE.
-INST="$TMP/inst"; FEED="$TMP/feed"; CALLS="$TMP/calls"
+# every add is recorded, index refreshes apart. A local .apk installs $EDGE.
+INST="$TMP/inst"; FEED="$TMP/feed"; CALLS="$TMP/calls"; UPDATES="$TMP/updates"
 apk() {
     case "$1" in
         list)    [ -s "$INST" ] && echo "yggdrasil-$(cat "$INST") aarch64_cortex-a53 {feeds} (LGPL-3.0-only) [installed]"; return 0 ;;
-        search)  echo "yggdrasil-$(cat "$FEED")"; return 0 ;;
+        update)  echo update >> "$UPDATES"; return 0 ;;
+        search)  [ -s "$UPDATES" ] || return 0   # no index before an update (RAM cache)
+                 echo "yggdrasil-$(cat "$FEED")"; return 0 ;;
         version) awk -v a="$3" -v b="$4" 'BEGIN {
                      n = split(a, x, /[^0-9]+/); m = split(b, y, /[^0-9]+/)
                      for (i = 1; i <= (n > m ? n : m); i++) {
@@ -87,7 +89,7 @@ stage_packages() { echo stage_packages >> "$CALLS"; }
 stage_status() { echo "stage_status ${STATUS_VERSION:-newest}" >> "$CALLS"; : > "$STATUS_VIEW"; }
 get() { restore_conf_get "$1"; }
 reset() {
-    : > "$LOG"; : > "$CALLS"
+    : > "$LOG"; : > "$CALLS"; : > "$UPDATES"; APK_UPDATED=0; DRY_RUN=0
     YGG_EDGE=0; YGG_FEED=0; YGG_PKG=''; STATUS_VERSION=''; STATUS_PKG=''
     DO_JUMPER=1; DO_STATUS=1
 }
@@ -99,7 +101,7 @@ install_restore
 expect packages yggdrasil,luci-proto-yggdrasil,yggdrasil-jumper,iputils-arping 'default run'
 expect status_src newest 'default run'
 expect edge_version '' 'default run'
-[ -f "$RESTORE_COPY" ] && [ -f "$RESTORE_HOOK" ] || fail 'deployer copy or hook missing'
+if [ ! -f "$RESTORE_COPY" ] || [ ! -f "$RESTORE_HOOK" ]; then fail 'deployer copy or hook missing'; fi
 
 reset; echo 0.5.14-r1 > "$INST"; YGG_EDGE=1; install_restore
 expect edge_version 0.5.14-r1 '--ygg-edge'; expect edge_src release '--ygg-edge'
@@ -170,6 +172,15 @@ grep -q 'allow-untrusted' "$CALLS" && fail '--ygg-edge downloaded a build that i
 reset; echo 0.5.12-r1 > "$INST"; echo 0.5.12-r1 > "$FEED"; EDGE=0.5.14-r1; YGG_EDGE=1
 install_ygg_build
 [ "$(cat "$INST")" = 0.5.14-r1 ] || fail '--ygg-edge did not install the newer build'
+# the index is refreshed once per run before the feed is read, never on a dry run
+[ "$(wc -l < "$UPDATES")" -eq 1 ] || fail "--ygg-edge: $(wc -l < "$UPDATES") index refreshes, expected 1"
+reset; echo 0.5.12-r1 > "$INST"; echo 0.5.14-r1 > "$FEED"; EDGE=0.5.14-r1; YGG_EDGE=1
+install_ygg_build
+[ "$(wc -l < "$UPDATES")" -eq 1 ] || fail "--ygg-edge falling back to the feed refreshed $(wc -l < "$UPDATES") times"
+reset; echo 0.5.14-r1 > "$INST"; echo 0.5.12-r1 > "$FEED"; DRY_RUN=1; YGG_FEED=1
+install_ygg_build
+[ ! -s "$UPDATES" ] || fail '--dry-run refreshed the package index'
+grep -q "^info would install the feed's yggdrasil (version unknown until apk update)" "$LOG" || fail "dry run without an index: $(cat "$LOG")"
 echo 'PASS: --ygg-edge only while newer than the feed, --ygg-feed back to the feed without a version pin'
 
 # 4. the keep list is not worth a rollback either
