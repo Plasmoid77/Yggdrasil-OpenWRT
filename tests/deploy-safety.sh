@@ -21,7 +21,8 @@ printf '#!/bin/sh\necho working\n' > "$TMP/hook"
 cp "$TMP/hook" "$TMP/before"
 chmod 600 "$TMP/hook"
 put_file "$TMP/hook" 755 "$(cat "$TMP/hook")" test
-[ "$(stat -c %a "$TMP/hook")" = 755 ] || fail 'unchanged hook mode not repaired'
+# shellcheck disable=SC2012
+[ "$(ls -ld "$TMP/hook" | cut -c1-10)" = -rwxr-xr-x ] || fail 'unchanged hook mode not repaired'
 if put_file "$TMP/hook" 755 'if then' test; then fail 'invalid shell accepted'; fi
 cmp -s "$TMP/hook" "$TMP/before" || fail 'invalid shell replaced working hook'
 put_file "$TMP/hook" 755 '#!/bin/sh

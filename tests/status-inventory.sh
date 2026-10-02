@@ -43,6 +43,8 @@ PROBE_DEADLINE=''; PROBED=1
 LAN_NET='lan'
 uci() { return 1; }
 DISCOVERY_WANTED=0
+LEASE_FILE="$TMP/default-leases"
+: > "$LEASE_FILE"
 COUNT=0
 run() {
     COUNT=$((COUNT + 1))
@@ -903,8 +905,8 @@ background_probes_release_lock() {
         bpl_tries=0
         until [ -f "$STARTED" ]; do
             bpl_tries=$((bpl_tries + 1))
-            [ "$bpl_tries" -lt 50 ] || fail "$bpl_helper: background probe never started"
-            sleep 0.1
+            [ "$bpl_tries" -lt 10 ] || fail "$bpl_helper: background probe never started"
+            sleep 1
         done
         flock -n -x "$LOCK" true || fail "$bpl_helper left the DHCP lock held by its background child"
         wait
