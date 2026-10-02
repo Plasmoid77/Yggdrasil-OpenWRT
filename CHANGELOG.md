@@ -1,5 +1,152 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## Deployer 3.0.0 - remastered
+
+Shorter code that does the same, a version-aware `--ygg-edge`, a way back to
+the feed, and the fixes of the repository review. Host-tested.
+
+- One writer for the deployer's own files (`put_file`: written only when the
+  text changed, with its mode) replaces four copies of that logic; one RFC 5952
+  compressor (`addr_awk`) serves the reserved addresses and the generated DNS
+  generator, whose text stays byte-identical; small helpers count and delete
+  UCI sections and name the LAN device and the peers that are up.
+- `--ygg-edge` installs this project's Yggdrasil build only while it is newer
+  than the feed's (`apk version -t`); once the feed has caught up it installs
+  the feed's version instead. `restore.conf` records the build by its package
+  version (`edge_version`; a 2.x `edge_hash` is honoured once), and the restore
+  hook brings the build back only over an older version, so a newer feed
+  version is kept.
+- New `--ygg-feed` (`ygg-feed` under `[flags]`): back to the feed's Yggdrasil,
+  as a downgrade if need be, without leaving the version pin in
+  `/etc/apk/world`; the restore hook stops bringing the build back.
+- The package index lives in RAM and is empty after a reboot: it is now
+  refreshed once per run before the feed's version is read (a rerun with every
+  package installed never refreshed it, so `--ygg-edge` could compare against a
+  missing feed version and `--ygg-feed` could stop with "no yggdrasil"). A dry
+  run reports an unknown feed version instead of stopping.
+- `tests/deploy-restore.sh`: what `restore.conf` records, `--restore`, the
+  package choice and keep-list failures.
+
+### Fixes from the repository review
+
+Found by the review of the whole repository (Codex and three independent
+audits); every item was confirmed against the code first.
+
+- `--status-version` and `[status-version]` never worked: the option loop
+  runs at the top of the script and called `status_valid_version`, which was
+  defined two thousand lines further down, so every value was refused as
+  "invalid". The tests had extracted the function first and could not see
+  it. The function now sits above the loop, and `tests/deploy-cli.sh` runs
+  the real script with real options under both shells.
+- A `--dns-host` name given twice (two addresses for one name, as the help
+  says) was refused as a duplicate. Only a clash between the router name,
+  `--dns-host` names and `--host` names is an error now.
+- The trusted rules fail closed: their `src_ip` list is deleted before it is
+  rewritten, and a failed write is now fatal (the rollback restores the
+  firewall) instead of leaving an ACCEPT rule without a source restriction.
+- The DHCP lock the status module's Pin/Unpin use is now held from stage 4
+  until stage 6 has committed `dhcp` (stage 6 took none, and stage 4 let go
+  before stage 6 began): no Pin/Unpin edit can be committed by the deployer
+  or overwritten by its rollback. An open status page waits for the lock
+  meanwhile.
+- A failed write of `restore.conf`, the restore hook or `/etc/sysupgrade.conf`
+  (a full overlay) at the very end no longer rolls back a deployment that is
+  already in place: the restore machinery is removed with a warning, as when
+  no deployer copy can be kept. A `sysupgrade.conf` without a final newline no
+  longer swallows the first line we add.
+- Declining the "replace the existing identity?" prompt no longer sends the
+  rollback reloading an untouched network; the rollback reloads only the
+  services whose configuration it restored, and odhcpd by `reload`.
+- The configuration backup (it holds the node key) is written only once the
+  uncommitted-changes check and the confirmation have passed, so refused runs
+  no longer leave copies on flash; the unused `*.uciexport` copies are gone.
+- Peer URIs are shown without their query (`?password=`) and `user:pass@`
+  part in every message; a repeated `--peer` is kept once.
+- `--no-multicast` now also removes the multicast section of an earlier run.
+- `--iface`/`--lan` must be UCI names and `--wait` a number; `--peers-file`
+  lines are trimmed like `[peers]` lines instead of losing inner spaces.
+- The closing summary checks the LAN for the whole routed /64 (it matched the
+  first hextet only) and no longer claims reachability with `--no-firewall`
+  or without trusted nodes, or a routed prefix on the LAN with `--no-lan`.
+- Usage: `--dns`, the RA settings the LAN stage writes (`ra=server`,
+  `ra_default=2`), that a rerun applies its whole description of the node,
+  and a current `--status-version` example. Comments that pointed at the old
+  pointer files or described static DNS records are rewritten.
+
+## Docs - in line with deployer 3.0.0 and status 7.0
+
+- installation.md: the `--ygg-edge` version rule and `--ygg-feed`;
+  operations.md: `apk upgrade` on a router with this project's build;
+  development.md: the coverage of the new tests.
+
+- README: the installer keeps the ULA (it never removed it in 2.x), follows
+  the newest status release instead of pinning one, and routes the routers'
+  zones, not only `home.arpa`; the "validation" link has a target again.
+- AGENTS.md invariant 1 no longer refers to the removed `--dhcpv6` switch.
+- operations.md: a table of the deployer's own hooks and files; removal
+  steps that take the restore hook out first (it would reinstall what was
+  removed), delete hooks 50/60/70/80 and `/etc/yggdrasil-openwrt`, and cover
+  the generated DNS names, the status module's address memories and the Linux
+  client; `--ygg-edge` versus `apk upgrade yggdrasil`; "Part II/III" replaced
+  by module names; the 1.x procedure kept in one place (installation.md).
+- installation.md: what `--no-dns` and the other skips leave in place, that a
+  rerun applies its whole description (zone, hosts), the restore hook of a
+  piped run, `status-vX.Y[.Z]` tags, and hand-written DNS records versus the
+  generated names.
+- architecture.md, development.md, the package README and the release
+  workflow: current versions and columns, IPv6-only rows, the Unpin and
+  `dhcpv6_served` rules as implemented, test coverage as it is, and no more
+  "deployer pin" or "installer banner says v5".
+
+## Status 7.0 - remastered
+
+- Backend: `host_flags` and `lease_fields` replace repeated unpacking; the
+  init scripts are called through `INITD`, so a test can stand in for them.
+- `install.sh`: `DESTDIR` installs under another root (the host tests); it is
+  empty on the router, where nothing changes.
+- Tests: the Pin/Unpin write path against an in-memory UCI (values written,
+  commit and reloads, rollback after a failed commit or reload, host lookup);
+  the LuCI view under node (routed-prefix IPv6 cell, Unknown state,
+  protected-host and static-confirmation dialogs); the installer (fresh
+  install, upgrade backup, rollback). Each was checked against a mutated copy
+  of the code first.
+
+### Fixes from the repository review
+
+- Pin and Unpin could answer "busy" for up to ~20 s after a page refresh:
+  the detached routed-address discovery inherited the shared DHCP lock
+  (fd 9) that `clients` holds, so the lock outlived the call while its pings
+  ran - and a refresh every 15 s restarts discovery as long as a row lacks an
+  address. The child now closes fd 9 first, as the unattributed-lease probe
+  has since 6.1.2. Regression test: both background helpers leave the lock
+  free once the call returns.
+- The stable (modified EUI-64) address was never recognised for a MAC whose
+  first octet is below 0x10 - most classic vendor prefixes - or with a zero
+  third or fifth octet: the expected address was built with leading zeros
+  (`0211:22ff:...`) and compared as text with the kernel's `211:22ff:...`, so
+  such devices showed all their privacy addresses instead. It is now written
+  the kernel's way.
+- With several remembered routed addresses, the RPC's single `ipv6` field
+  carried all of them separated by newlines; it now carries the first.
+- A device seen with two node addresses kept only the first one while quiet;
+  it keeps both now, still only from the newest memory that knows it.
+- Unpin no longer deletes a config host that lists several DUIDs (several
+  identities in one section); it is protected like other complex sections.
+- Pin offers no IPv6 reservation where the LAN has `dhcpv6_na=0` (odhcpd
+  hands out no addresses there), as the deployer already refuses.
+- A row with no address to probe is "Offline" whatever the probe budget,
+  instead of flipping to "Unknown" once the budget is spent.
+- A failed DHCP change restored the file but left odhcpd on the new one; it
+  is reloaded with the restore now.
+- `install.sh`: a failed copy (a full overlay) now restores the previous
+  files instead of exiting with old and new files mixed.
+- View: the "Routed subnet" cell falls back to the interface's first prefix
+  like the backend does; the Unpin dialog no longer says the IPv6 reservation
+  is "derived" from IPv4 when it may be an explicit one; dead branches and
+  fallbacks for fields the backend always sends are gone.
+- Tests: `tools/check.sh` also runs every shell test with BusyBox's `awk`,
+  `sed`, `grep` and friends on `PATH`, as on the router, not only the host's.
+
 ## Deployer 2.7.1 - reservations can be reshuffled in one run
 
 - Moving a reservation to another adapter (the old section takes a new

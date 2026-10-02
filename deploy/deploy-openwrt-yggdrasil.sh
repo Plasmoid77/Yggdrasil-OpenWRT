@@ -1,6 +1,6 @@
 #!/bin/sh
 # deploy-openwrt-yggdrasil.sh — automated deployment of the routed Yggdrasil /64
-# design documented in this repository (README.md / QUICKSTART.md / REFERENCE_CONFIG.md).
+# design documented in this repository (docs/installation.md, docs/architecture.md).
 #
 # Runs ON the OpenWrt router, under BusyBox ash. POSIX sh only.
 #
@@ -16,7 +16,7 @@
 set -u
 umask 077
 
-VERSION='2.7.1'
+VERSION='3.0.0'
 SELF="${0##*/}"
 # Piped straight from a URL — wget -qO- ... | sh -s -- ... — $0 is the shell, so
 # the banner and the usage text would announce themselves as "sh".
@@ -51,7 +51,7 @@ DO_LAN=1
 DO_FIREWALL=1
 DO_STATUS=1
 DO_MULTICAST=1
-# Part III is a separate module in the design — the routed /64, SLAAC, the
+# The DNS module is separate in the design — the routed /64, SLAAC, the
 # firewall policy and the status page all work without it — but a deployment
 # that stops short of it is not finished, so it runs unless --no-dns says not to.
 DO_DNS=1
@@ -73,8 +73,10 @@ STATUS_RELEASE_BASE="https://github.com/$STATUS_REPO/releases/download"
 STATUS_BASE=''
 # Yggdrasil comes from the OpenWrt feed by default. --ygg-edge installs the
 # newest build published in this project's releases instead (tags yggdrasil-*,
-# one .apk per architecture); --ygg-pkg the same from a local file.
+# one .apk per architecture) while it is newer than the feed's; --ygg-pkg a
+# local build; --ygg-feed goes back to the feed's version.
 YGG_EDGE=0
+YGG_FEED=0
 YGG_PKG=''
 YGG_RELEASES_API="https://api.github.com/repos/$STATUS_REPO/releases?per_page=30"
 DEPLOYER_URL="https://raw.githubusercontent.com/$STATUS_REPO/main/deploy/deploy-openwrt-yggdrasil.sh"
@@ -96,6 +98,7 @@ CHANGED_NETWORK=0
 CHANGED_DHCP=0
 CHANGED_FIREWALL=0
 CHANGED_DNS=0
+DHCP_LOCKED=0
 
 # Colour only on a real terminal, so a redirected log stays plain text.
 if [ -t 2 ] && [ -z "${NO_COLOR:-}" ]; then
@@ -156,14 +159,15 @@ Trusted remote access (firewall src_ip allow-list):
   --trusted ADDR        Yggdrasil /128 allowed to reach the router and LAN.
                         Repeatable. Without any, the ygg zone stays fully closed.
 
-DNS module (Part III, on by default — see also --no-dns):
+DNS module (on by default — see also --dns / --no-dns):
   --dns-domain NAME     Private namespace (default: $DNS_DOMAIN)
   --dns-router NAME     Hostname for this router (default: $DNS_ROUTER)
   --dns-host NAME=ADDR  Extra record. Repeatable; repeat a NAME to give it
                         several addresses.
 
 LAN (the routed /64 is added beside the LAN's existing IPv6 prefixes; the
-stock RA/DHCPv6 configuration is kept, so reservations work without a mode):
+stock RA/DHCPv6 mode is kept - the router is made RA server and default router
+(ra=server, ra_default=2) - so reservations work without a mode):
   --host NAME=MAC=HOSTID
   --host NAME=duid:HEX[%IAID]=HOSTID
   --host NAME=MAC+duid:HEX[%IAID]=HOSTID
@@ -187,14 +191,17 @@ Scope:
   --no-lan              Do not touch LAN ip6assign/ip6class/RA
   --no-firewall         Do not create the ygg zone or trusted rules
   --no-status           Do not install the LuCI status module
-  --no-dns              Do not serve <name>.$DNS_DOMAIN over Yggdrasil
+  --dns / --no-dns      Serve <name>.$DNS_DOMAIN over Yggdrasil (the default) /
+                        do not set it up; --no-dns leaves an earlier setup alone
   --status-pkg PATH     Install a local tarball; PATH.sha256 is required
-  --status-version VER  Install this status release (e.g. v5.2) instead of the
+  --status-version VER  Install this status release (e.g. v6.5.2) instead of the
                         newest published one
   --ygg-edge            Install the newest Yggdrasil build from this project's
-                        releases (newer than the OpenWrt feed) instead of the
-                        feed's; checked against its published SHA-256
-  --ygg-pkg PATH        The same from a local .apk; PATH.sha256 is required
+                        releases instead of the feed's, while it is the newer
+                        one; checked against its published SHA-256
+  --ygg-pkg PATH        Install a local Yggdrasil .apk; PATH.sha256 is required
+  --ygg-feed            Go back to the OpenWrt feed's Yggdrasil (the default
+                        for a router that never had a build of ours)
   --restore             Only put back what a sysupgrade removed (packages, this
                         project's Yggdrasil build, the status module), as
                         recorded by the last run; run by the restore hook
@@ -217,10 +224,13 @@ comment, blank lines are ignored. Unknown sections are an error. Sections:
   [status-pkg] [status-version]                (as --status-pkg, --status-version)
   [ygg-pkg]         a local Yggdrasil .apk     (as --ygg-pkg)
   [flags]           one per line: no-jumper no-multicast no-lan no-firewall
-                    no-status dns no-dns no-lan-forward ygg-edge
+                    no-status dns no-dns no-lan-forward ygg-edge ygg-feed
                                                (as the switches of the same name)
 Keep the file mode 600 when it holds the key. --dry-run, --yes and --wait
 describe the run, not the node, and stay on the command line.
+Each run applies its whole description of the node: only the peers and the key
+are kept when not given. Keep everything else (zone, hosts, flags) in one
+--config file and rerun with it.
 The 1.x switches --dhcpv6 / --slaac (and the flags of the same name) are gone:
 2.0 keeps the LAN's stock RA/DHCPv6 configuration; delete them.
 USAGE
@@ -228,15 +238,29 @@ USAGE
 
 # -------------------------------------------------------------- arg parsing ---
 
+# A peer URI as the diagnostics print it: a query (?password=...) and a
+# user:password@ part may carry a secret, so neither is shown.
+peer_shown() {
+    _ps="${1%%\?*}"
+    [ "$_ps" = "$1" ] || _ps_q='?...'
+    case "$_ps" in
+        *://*@*) _ps="${_ps%%://*}://...@${_ps#*@}" ;;
+    esac
+    printf '%s%s' "$_ps" "${_ps_q:-}"
+    _ps_q=''
+}
+
 add_peer() {
     _p="$1"
     case "$_p" in
         tls://*|tcp://*|quic://*|ws://*|wss://*|socks://*|sockstls://*) : ;;
-        *) die "unsupported peer URI (bad scheme): $_p" ;;
+        *) die "unsupported peer URI (bad scheme): $(peer_shown "$_p")" ;;
     esac
     case "$_p" in
-        *' '*|*"$(printf '\t')"*) die "peer URI contains whitespace: $_p" ;;
+        *' '*|*"$(printf '\t')"*) die "peer URI contains whitespace: $(peer_shown "$_p")" ;;
     esac
+    # the same URI twice would be two sections for one link
+    if printf '%s\n' "$PEERS" | grep -qxF -- "$_p"; then return 0; fi
     PEERS="${PEERS}${PEERS:+
 }$_p"
 }
@@ -433,6 +457,12 @@ HOSTS_EOF
 }$_hn $_hkt $_hk $_hidn"
 }
 
+# Defined here, above the option loop that calls it: a function exists only
+# once its definition has run.
+status_valid_version() { # $1 = candidate version label
+    printf '%s\n' "$1" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(\.(0|[1-9][0-9]*))?$'
+}
+
 # One settings file instead of a long command line. Every line goes through the
 # same add_*/validation path as the option it stands for, so nothing can enter
 # through the file that the command line would refuse.
@@ -482,6 +512,7 @@ read_config() {
                     no-dns)       DO_DNS=0 ;;
                     no-lan-forward) DO_LAN_FORWARD=0 ;;
                     ygg-edge)     YGG_EDGE=1 ;;
+                    ygg-feed)     YGG_FEED=1 ;;
                     dhcpv6|slaac) die "flag '$_cf_line' in [flags] of $_cf is from 1.x: 2.0 keeps the LAN's stock RA/DHCPv6 configuration — delete the line" ;;
                     *) die "unknown flag '$_cf_line' in [flags] of $_cf" ;;
                 esac ;;
@@ -506,7 +537,7 @@ while [ $# -gt 0 ]; do
                        [ -r "$2" ]  || die "cannot read peers file: $2"
                        while IFS= read -r _line || [ -n "$_line" ]; do
                            _line="${_line%%#*}"
-                           _line="$(printf '%s' "$_line" | tr -d ' \t\r')"
+                           _line="$(printf '%s' "$_line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
                            [ -n "$_line" ] && add_peer "$_line"
                        done < "$2"
                        shift 2 ;;
@@ -534,6 +565,7 @@ while [ $# -gt 0 ]; do
         --status-pkg)  [ $# -ge 2 ] || die "--status-pkg needs a value";  STATUS_PKG="$2";  shift 2 ;;
         --ygg-pkg)     [ $# -ge 2 ] || die "--ygg-pkg needs a value";     YGG_PKG="$2";     shift 2 ;;
         --ygg-edge)    YGG_EDGE=1;         shift ;;
+        --ygg-feed)    YGG_FEED=1;         shift ;;
         --restore)     RESTORE=1; ASSUME_YES=1; shift ;;
         --status-version)
             [ $# -ge 2 ] || die "--status-version needs a value"
@@ -546,6 +578,20 @@ while [ $# -gt 0 ]; do
         *)             usage; die "unknown argument: $1" ;;
     esac
 done
+
+# The interface names end up in UCI paths, in the generated hotplug scripts and
+# in sed replacements, so they get UCI's own section-name alphabet.
+for _nm in "$IFACE" "$LAN"; do
+    case "$_nm" in
+        ''|*[!A-Za-z0-9_]*) die "invalid interface name '$_nm' (letters, digits and '_' only, as in UCI)" ;;
+    esac
+done
+case "$WAIT_SECS" in
+    ''|*[!0-9]*) die "--wait needs a number of seconds: $WAIT_SECS" ;;
+esac
+if [ "$YGG_FEED" -eq 1 ] && { [ "$YGG_EDGE" -eq 1 ] || [ -n "$YGG_PKG" ]; }; then
+    die "--ygg-feed cannot be combined with --ygg-edge or --ygg-pkg"
+fi
 
 # A reservation only means something where odhcpd hands out the addresses.
 # Whether this LAN's DHCPv6 server is on is settled in preflight, once the
@@ -597,16 +643,20 @@ if [ "$DO_DNS" -eq 1 ]; then
     # the longest name is a 63-character label, a dot and the zone
     [ $(( ${#DNS_DOMAIN} + 64 )) -le 253 ] || die "--dns-domain is too long: $DNS_DOMAIN"
     dns_label_ok "$DNS_ROUTER" || die "--dns-router must be one label (letters, digits, '-'): $DNS_ROUTER"
-    _names="$DNS_ROUTER"
+    # A --dns-host NAME may repeat (one record per address); only a clash
+    # between the router, the --dns-host names and the --host names is an error.
+    _dnames=''
     while IFS= read -r _dh; do
         [ -n "$_dh" ] || continue
         _n="$(lower_str "${_dh%%=*}")"
         dns_label_ok "$_n" || die "--dns-host: invalid name '${_dh%%=*}' (letters, digits, '-', at most 63)"
-        _names="$_names
+        _dnames="$_dnames
 $_n"
     done <<DNS_EOF
 $DNS_HOSTS
 DNS_EOF
+    _names="$DNS_ROUTER
+$(printf '%s\n' "$_dnames" | sed '/^$/d' | sort -u)"
     while IFS=' ' read -r _hn _hkt _hk _hid; do
         [ -n "$_hn" ] && _names="$_names
 $(lower_str "$_hn")"
@@ -697,6 +747,26 @@ uci_changes_redacted() {
         | sed "s/^\([^=]*\.private_key\)=.*/\1='<REDACTED>'/"
 }
 
+# Our own files outside /etc/config: written only when the text changed (a
+# rerun leaves an identical file alone), with its mode, and a script must
+# parse. $1 = path, $2 = mode, $3 = content, $4 = what it is (for messages).
+# Fails (status 1) instead of dying: each caller decides what a failure costs.
+put_file() {
+    if [ "$DRY_RUN" -eq 1 ]; then
+        info "would write $1 ($4)"
+        return 0
+    fi
+    if [ -f "$1" ] && [ "$(cat "$1")" = "$3" ]; then
+        ok "$4 already in place: $1"
+        return 0
+    fi
+    if ! { mkdir -p "$(dirname "$1")" && printf '%s\n' "$3" > "$1" && chmod "$2" "$1"; }; then
+        return 1
+    fi
+    case "$1" in *.conf) : ;; *) sh -n "$1" 2>/dev/null || return 1 ;; esac
+    ok "$4 written: $1"
+}
+
 confirm() {
     [ "$ASSUME_YES" -eq 1 ] && return 0
     [ "$DRY_RUN" -eq 1 ] && return 0
@@ -706,6 +776,33 @@ confirm() {
 }
 
 have() { command -v "$1" >/dev/null 2>&1; }
+
+# Sections of one anonymous type in a UCI package: how many, and all gone
+# (deleted from the end, so the indices stay valid).
+uci_count() { # $1 = package, $2 = section type
+    _uc="$(uci show "$1" 2>/dev/null | grep -c "=$2\$")"
+    printf '%s\n' "${_uc:-0}"
+}
+uci_del_all() { # $1 = package, $2 = section type
+    _ud="$(uci_count "$1" "$2")"
+    while [ "$_ud" -gt 0 ]; do
+        _ud=$((_ud - 1))
+        uci -q delete "$1.@$2[$_ud]" 2>/dev/null || true
+    done
+}
+
+# The LAN's bridge device (br-lan on a stock router).
+lan_dev() {
+    _ld="$(uci -q get "network.$LAN.device" 2>/dev/null)"
+    printf '%s\n' "${_ld:-br-lan}"
+}
+
+# The remote URI of every established peer link, one per line. JSON, not the
+# table: 0.5.14 draws the table with box characters.
+ygg_up_peers() {
+    yggdrasilctl -json -endpoint="unix:///tmp/yggdrasil/${IFACE}.sock" getpeers 2>/dev/null \
+        | jsonfilter -e '@.peers[@.up=true].remote' 2>/dev/null
+}
 
 # The private key is the node identity: supplying the old one is the only way to
 # keep an existing Yggdrasil address when redeploying or moving to new hardware.
@@ -794,10 +891,14 @@ rollback() {
             rm -f "$DNS_CONF" "$DNS_HOSTS_DIR/yggdrasil-$IFACE" && warn "  removed $DNS_CONF and the generated names"
         fi
     fi
-    /etc/init.d/network reload  >/dev/null 2>&1 || true
-    /etc/init.d/odhcpd restart  >/dev/null 2>&1 || true
+    # Only the services whose configuration went back; odhcpd by reload, which
+    # keeps the bound DHCPv6 leases (see stage_lan).
+    [ "$CHANGED_NETWORK" -eq 1 ] && { /etc/init.d/network reload >/dev/null 2>&1 || true; }
+    if [ "$CHANGED_NETWORK$CHANGED_DHCP" != "00" ]; then
+        /etc/init.d/odhcpd reload >/dev/null 2>&1 || /etc/init.d/odhcpd restart >/dev/null 2>&1 || true
+    fi
     [ "$CHANGED_DHCP" -eq 1 ] && { /etc/init.d/dnsmasq restart >/dev/null 2>&1 || true; }
-    /etc/init.d/firewall reload >/dev/null 2>&1 || true
+    [ "$CHANGED_FIREWALL" -eq 1 ] && { /etc/init.d/firewall reload >/dev/null 2>&1 || true; }
     warn "rollback done — verify the router state manually"
 }
 
@@ -899,7 +1000,7 @@ stage_preflight() {
 
     if [ -n "$PEERS" ]; then
         info 'peers to configure (the existing set is replaced):'
-        printf '%s\n' "$PEERS" | while IFS= read -r _p; do [ -n "$_p" ] && info "    $_p"; done
+        printf '%s\n' "$PEERS" | while IFS= read -r _p; do [ -n "$_p" ] && info "    $(peer_shown "$_p")"; done
     else
         _have="$(uci show network 2>/dev/null | grep -c "=yggdrasil_${IFACE}_peer\$" || true)"
         if [ "${_have:-0}" -gt 0 ]; then
@@ -916,24 +1017,6 @@ stage_preflight() {
         warn "no --trusted given: the ygg zone will be created closed (no remote access)"
     fi
 
-    if [ "$DRY_RUN" -eq 0 ]; then
-        BACKUP_DIR="/root/ygg-deploy-backup-$(date +%Y%m%d-%H%M%S)"
-        mkdir -p "$BACKUP_DIR" || die "cannot create $BACKUP_DIR"
-        for _c in network dhcp firewall; do
-            [ -f "/etc/config/$_c" ] && cp "/etc/config/$_c" "$BACKUP_DIR/$_c"
-        done
-        # the DNS names' settings live beside UCI (stage 6); "absent" marks a first run
-        if [ -f "$DNS_CONF" ]; then
-            cp "$DNS_CONF" "$BACKUP_DIR/dns.conf"
-        else
-            : > "$BACKUP_DIR/dns.conf.absent"
-        fi
-        uci export network  > "$BACKUP_DIR/network.uciexport"  2>/dev/null || true
-        uci export dhcp     > "$BACKUP_DIR/dhcp.uciexport"     2>/dev/null || true
-        uci export firewall > "$BACKUP_DIR/firewall.uciexport" 2>/dev/null || true
-        ok "backup written to $BACKUP_DIR"
-    fi
-
     # refuse to run on top of uncommitted changes we would otherwise commit blindly
     if [ "$DRY_RUN" -eq 0 ]; then
         for _c in network dhcp firewall; do
@@ -947,6 +1030,23 @@ stage_preflight() {
 
     confirm "Apply this deployment to $(cat /tmp/sysinfo/model 2>/dev/null || echo 'this router')?" \
         || die "aborted by operator"
+
+    # The backup holds the node key: written only for a run that goes ahead,
+    # so a refused or declined run leaves no copy behind.
+    if [ "$DRY_RUN" -eq 0 ]; then
+        BACKUP_DIR="/root/ygg-deploy-backup-$(date +%Y%m%d-%H%M%S)"
+        mkdir -p "$BACKUP_DIR" || die "cannot create $BACKUP_DIR"
+        for _c in network dhcp firewall; do
+            [ -f "/etc/config/$_c" ] && cp "/etc/config/$_c" "$BACKUP_DIR/$_c"
+        done
+        # the DNS names' settings live beside UCI (stage 6); "absent" marks a first run
+        if [ -f "$DNS_CONF" ]; then
+            cp "$DNS_CONF" "$BACKUP_DIR/dns.conf"
+        else
+            : > "$BACKUP_DIR/dns.conf.absent"
+        fi
+        ok "backup written to $BACKUP_DIR"
+    fi
 }
 
 # =========================================================== stage 1: packages
@@ -985,13 +1085,74 @@ ygg_installed_version() {
     yggdrasil -version 2>/dev/null | sed -n 's/^Build version: *//p'
 }
 
+# Package versions as apk writes them (0.5.14-r1): the installed one, and the
+# one the feed offers.
+ygg_pkg_version() {
+    apk list -I yggdrasil 2>/dev/null | sed -n 's/^yggdrasil-\([0-9][^ ]*\) .*/\1/p' | head -n 1
+}
+ygg_feed_version() {
+    apk search -x yggdrasil 2>/dev/null | sed -n 's/^yggdrasil-\([0-9][^ ]*\)$/\1/p' | head -n 1
+}
+# The package index lives in RAM (/var/cache/apk) and is gone after a reboot:
+# refresh it once per run before anything reads or installs from the feed.
+apk_update() {
+    [ "${APK_UPDATED:-0}" -eq 1 ] && return 0
+    APK_UPDATED=1
+    apk update >/dev/null 2>&1 || warn "package index update failed — trying to install anyway"
+}
+ver_older() { # $1 is older than $2, in apk's ordering
+    [ "$(apk version -t "$1" "$2" 2>/dev/null)" = '<' ]
+}
+
+# A running daemon keeps its old binary until its interface restarts.
+ygg_restart_if_changed() { # $1 = sha256 of the binary before
+    _yr_new="$(ygg_binary_hash)"
+    if [ -n "$1" ] && [ "$1" != "$_yr_new" ] \
+        && [ "$(ifstatus "$IFACE" 2>/dev/null | jsonfilter -e '@.up' 2>/dev/null)" = true ]; then
+        ifup "$IFACE"
+        info "restarted '$IFACE' on the new binary"
+    fi
+}
+
+APK_WORLD='/etc/apk/world'
+
+# The feed's yggdrasil in place of whatever is installed: --ygg-feed, or
+# --ygg-edge once the feed has caught up. NAME=VERSION also downgrades; the
+# second add drops that version pin from /etc/apk/world again, so later
+# upgrades follow the feed.
+ygg_use_feed() {
+    [ "$DRY_RUN" -eq 1 ] || apk_update
+    yuf_feed="$(ygg_feed_version)"
+    yuf_inst="$(ygg_pkg_version)"
+    if [ "$DRY_RUN" -eq 1 ]; then
+        info "would install the feed's yggdrasil ${yuf_feed:-(version unknown until apk update)} (installed: ${yuf_inst:-none})"
+        return 0
+    fi
+    [ -n "$yuf_feed" ] || die "the package feed offers no yggdrasil (package index update failed?)"
+    yuf_old="$(ygg_binary_hash)"
+    if [ "$yuf_inst" != "$yuf_feed" ] || ! grep -qx 'yggdrasil' "$APK_WORLD" 2>/dev/null; then
+        if ! { apk add "yggdrasil=$yuf_feed" >/dev/null 2>&1 && apk add yggdrasil >/dev/null 2>&1; }; then
+            die "apk could not install the feed's yggdrasil $yuf_feed"
+        fi
+    fi
+    # a build of this project with the feed's very version stays: apk sees
+    # nothing to replace; the feed's next release takes over
+    ok "yggdrasil $yuf_feed, the feed's version; upgrades follow the feed"
+    ygg_restart_if_changed "$yuf_old"
+}
+
 # --ygg-edge / --ygg-pkg: replace the feed's yggdrasil with this project's own
 # build. It is signed with a throwaway OpenWrt SDK key, so apk is told
 # --allow-untrusted, but only after the bytes have matched the SHA-256 that is
 # published beside it (the same trust as the status module). A later run
-# without the switch keeps it: apk does not downgrade to the older feed version.
-# A running daemon keeps its old binary until its interface restarts.
+# without the switch keeps it (apk does not downgrade by itself); --ygg-feed
+# goes back. --ygg-edge takes the build only while it is newer than the feed's.
 install_ygg_build() {
+    if [ "$YGG_FEED" -eq 1 ]; then
+        FAILED_STAGE='Yggdrasil from the feed'
+        ygg_use_feed
+        return 0
+    fi
     [ -n "$YGG_PKG" ] || [ "$YGG_EDGE" -eq 1 ] || return 0
     FAILED_STAGE='Yggdrasil build'
     if [ "$DRY_RUN" -eq 1 ]; then
@@ -999,8 +1160,7 @@ install_ygg_build() {
         return 0
     fi
     # the binary itself: a new package revision may report the same version
-    iyb_bin="$(command -v yggdrasil 2>/dev/null)"
-    iyb_old="$([ -n "$iyb_bin" ] && sha256sum "$iyb_bin" 2>/dev/null | cut -d' ' -f1)"
+    iyb_old="$(ygg_binary_hash)"
     iyb_dir="$(mktemp -d "${TMPDIR:-/tmp}/ygg-build.XXXXXX")" || die "cannot create a temporary directory"
     # /tmp is RAM: no downloaded package stays behind, whatever happens
     iyb_fail() { rm -rf "$iyb_dir"; die "$@"; }
@@ -1012,6 +1172,17 @@ install_ygg_build() {
     else
         iyb_url="$(ygg_edge_url)" \
             || iyb_fail "no Yggdrasil build for $(pkg_arch) in the $STATUS_REPO releases (or GitHub unreachable) - run without --ygg-edge, or copy the .apk and .sha256 here and use --ygg-pkg"
+        iyb_ver="${iyb_url##*/yggdrasil-}"
+        iyb_ver="${iyb_ver%_"$(pkg_arch)".apk}"
+        apk_update
+        iyb_feed="$(ygg_feed_version)"
+        if [ -n "$iyb_feed" ] && ! ver_older "$iyb_feed" "$iyb_ver"; then
+            rm -rf "$iyb_dir"
+            info "the feed's yggdrasil $iyb_feed is not older than this project's build $iyb_ver"
+            YGG_EDGE=0
+            ygg_use_feed
+            return 0
+        fi
         info "downloading $iyb_url"
         iyb_file="$iyb_dir/${iyb_url##*/}"
         if ! status_fetch "$iyb_url" "$iyb_file" || ! status_fetch "$iyb_url.sha256" "$iyb_file.sha256"; then
@@ -1022,13 +1193,8 @@ install_ygg_build() {
     status_verify "$iyb_file" "$iyb_sum" || iyb_fail "Yggdrasil package not verified - nothing installed"
     apk add --allow-untrusted "$iyb_file" >/dev/null 2>&1 || iyb_fail "apk could not install $iyb_file"
     rm -rf "$iyb_dir"
-    iyb_new="$(sha256sum "$(command -v yggdrasil)" 2>/dev/null | cut -d' ' -f1)"
-    ok "yggdrasil $(ygg_installed_version) installed from this project's build"
-    if [ -n "$iyb_old" ] && [ "$iyb_old" != "$iyb_new" ] \
-        && [ "$(ifstatus "$IFACE" 2>/dev/null | jsonfilter -e '@.up' 2>/dev/null)" = true ]; then
-        ifup "$IFACE"
-        info "restarted '$IFACE' on the new binary"
-    fi
+    ok "yggdrasil $(ygg_pkg_version) installed from this project's build"
+    ygg_restart_if_changed "$iyb_old"
 }
 
 stage_packages() {
@@ -1060,8 +1226,7 @@ stage_packages() {
         return 0
     fi
 
-    # shellcheck disable=SC2086
-    apk update >/dev/null 2>&1 || warn "package index update failed — trying to install anyway"
+    apk_update
 
     for _p in $_missing; do
         # shellcheck disable=SC2086
@@ -1148,19 +1313,8 @@ EOF
 
 install_hotplug_guard() {
     FAILED_STAGE='hotplug guard'
-    if [ "$DRY_RUN" -eq 1 ]; then
-        info "would write $HOTPLUG_FILE (restart '$IFACE' if it is still pending 10 s after its TUN appears)"
-        return 0
-    fi
-    if [ -f "$HOTPLUG_FILE" ] && [ "$(cat "$HOTPLUG_FILE")" = "$(hotplug_guard_text)" ]; then
-        ok "hotplug guard already in place: $HOTPLUG_FILE"
-        return 0
-    fi
-    mkdir -p "$(dirname "$HOTPLUG_FILE")"
-    hotplug_guard_text > "$HOTPLUG_FILE" || die "cannot write $HOTPLUG_FILE"
-    chmod 644 "$HOTPLUG_FILE"
-    sh -n "$HOTPLUG_FILE" || die "$HOTPLUG_FILE does not parse"
-    ok "hotplug guard written: $HOTPLUG_FILE"
+    put_file "$HOTPLUG_FILE" 644 "$(hotplug_guard_text)" 'hotplug guard' \
+        || die "cannot write a working $HOTPLUG_FILE"
 }
 
 # Yggdrasil waits longer and longer between attempts to reach a peer it cannot
@@ -1208,19 +1362,8 @@ EOF
 
 install_peer_hook() {
     FAILED_STAGE='peer hook'
-    if [ "$DRY_RUN" -eq 1 ]; then
-        info "would write $PEER_HOOK (wake the peers when an uplink comes up)"
-        return 0
-    fi
-    if [ -f "$PEER_HOOK" ] && [ "$(cat "$PEER_HOOK")" = "$(peer_hook_text)" ]; then
-        ok "peer hook already in place: $PEER_HOOK"
-        return 0
-    fi
-    mkdir -p "$(dirname "$PEER_HOOK")"
-    peer_hook_text > "$PEER_HOOK" || die "cannot write $PEER_HOOK"
-    chmod 644 "$PEER_HOOK"
-    sh -n "$PEER_HOOK" || die "$PEER_HOOK does not parse"
-    ok "peer hook written: $PEER_HOOK"
+    put_file "$PEER_HOOK" 644 "$(peer_hook_text)" 'peer hook' \
+        || die "cannot write a working $PEER_HOOK"
 }
 
 # ================================================ stage 2: yggdrasil interface
@@ -1240,8 +1383,6 @@ pub_from_priv() {
 stage_yggdrasil() {
     FAILED_STAGE='yggdrasil interface'
     step "Stage 2 — Yggdrasil interface '$IFACE'"
-
-    CHANGED_NETWORK=1
 
     _priv="$EXISTING_KEY"
     if [ -n "$SUPPLIED_KEY" ]; then
@@ -1274,6 +1415,9 @@ stage_yggdrasil() {
     validate_private_key "$_priv" "the selected Yggdrasil identity"
     _pub="$(pub_from_priv "$_priv")"
 
+    # Only now: declining the identity prompt above writes nothing, so it must
+    # not send the rollback restoring and reloading an untouched network.
+    CHANGED_NETWORK=1
     uci_set "network.$IFACE" 'interface'
     uci_set "network.$IFACE.proto" 'yggdrasil'
     uci_set "network.$IFACE.private_key" "$_priv"
@@ -1302,8 +1446,8 @@ stage_yggdrasil() {
     _peer_type="yggdrasil_${IFACE}_peer"
     _n=0
     if [ -z "$PEERS" ]; then
-        _have="$(uci show network 2>/dev/null | grep -c "=$_peer_type\$" || true)"
-        if [ "${_have:-0}" -gt 0 ]; then
+        _have="$(uci_count network "$_peer_type")"
+        if [ "$_have" -gt 0 ]; then
             info "peers: $_have existing section(s) kept (no --peer given)"
         else
             warn "no peers configured: the node gets an address but stays isolated"
@@ -1311,53 +1455,38 @@ stage_yggdrasil() {
             warn "  and re-run with --peer URI [--peer URI ...]"
         fi
     elif [ "$DRY_RUN" -eq 0 ]; then
-        # delete from the end so indices stay valid
-        _count="$(uci show network 2>/dev/null | grep -c "=$_peer_type\$" || true)"
-        [ -z "$_count" ] && _count=0
-        while [ "$_count" -gt 0 ]; do
-            _count=$((_count - 1))
-            uci -q delete "network.@${_peer_type}[${_count}]" 2>/dev/null || true
-            _n=$((_n + 1))
-        done
+        _n="$(uci_count network "$_peer_type")"
+        uci_del_all network "$_peer_type"
     fi
     [ "$_n" -gt 0 ] && info "removed $_n existing peer section(s)"
 
-    _existing_peers=''
-
-    _added=0
     printf '%s\n' "$PEERS" | while IFS= read -r _p; do
         [ -n "$_p" ] || continue
-        if printf '%s\n' "$_existing_peers" | grep -qxF "$_p"; then
-            info "peer already present, skipping: $_p"
-            continue
-        fi
         if [ "$DRY_RUN" -eq 1 ]; then
-            printf '    would add peer: %s\n' "$_p" >&2
+            printf '    would add peer: %s\n' "$(peer_shown "$_p")" >&2
         else
             _s="$(uci add network "$_peer_type")" || exit 1
             uci set "network.$_s.address=$_p" || exit 1
-            printf '[+] peer added: %s\n' "$_p" >&2
+            printf '[+] peer added: %s\n' "$(peer_shown "$_p")" >&2
         fi
     done || die "failed while adding peer sections"
 
     # --- LAN multicast peering ----------------------------------------------
     _mc_type="yggdrasil_${IFACE}_interface"
-    _lan_dev="$(uci -q get "network.$LAN.device" 2>/dev/null)"
-    [ -n "$_lan_dev" ] || _lan_dev='br-lan'
+    _lan_dev="$(lan_dev)"
+    # The sections are rewritten on every run, so --no-multicast also turns
+    # off the peering an earlier run enabled.
+    [ "$DRY_RUN" -eq 1 ] || uci_del_all network "$_mc_type"
     if [ "$DO_MULTICAST" -eq 1 ]; then
         if [ "$DRY_RUN" -eq 0 ]; then
-            _count="$(uci show network 2>/dev/null | grep -c "=$_mc_type\$" || true)"
-            [ -z "$_count" ] && _count=0
-            while [ "$_count" -gt 0 ]; do
-                _count=$((_count - 1))
-                uci -q delete "network.@${_mc_type}[${_count}]" 2>/dev/null || true
-            done
             _s="$(uci add network "$_mc_type")"
             uci add_list "network.$_s.interface=$_lan_dev"
             uci set "network.$_s.beacon=1"
             uci set "network.$_s.listen=1"
         fi
         info "LAN multicast peering on '$_lan_dev' (beacon=1 listen=1)"
+    else
+        info "LAN multicast peering off (--no-multicast)"
     fi
 
     if [ "$DRY_RUN" -eq 0 ]; then
@@ -1454,10 +1583,7 @@ stage_wait() {
     YGG_SOCK="unix:///tmp/yggdrasil/${IFACE}.sock"
     _up=0
     if have yggdrasilctl && [ -S "/tmp/yggdrasil/${IFACE}.sock" ]; then
-        # JSON, not the table: 0.5.14 draws the table with box characters
-        _up="$(yggdrasilctl -json -endpoint="$YGG_SOCK" getpeers 2>/dev/null \
-               | jsonfilter -e '@.peers[@.up=true].remote' 2>/dev/null | wc -l | tr -d ' ')"
-        [ -z "$_up" ] && _up=0
+        _up="$(ygg_up_peers | wc -l | tr -d ' ')"
     fi
     if [ "$_up" -gt 0 ]; then
         ok "$_up peer link(s) established"
@@ -1469,36 +1595,41 @@ stage_wait() {
 
 # ================================================= stage 4: LAN routed /64 + RA
 
-# <prefix>::HOSTID as one canonical (RFC 5952) address. $1 = prefix like
-# 303:170f:3ab2:166e::/64, $2 = hostid hex digits. A hextet holds four digits, so
-# a wide hostid is split, not concatenated onto the prefix as a string.
-reserved_addr() {
-    _ra_pfx="${1%%/*}"
-    _ra_pfx="${_ra_pfx%%::*}"
-    _ra_id="$(printf '%016s' "$2" | tr ' ' '0')"
-    printf '%s %s\n' "$_ra_pfx" "$_ra_id" | awk '{
-        n = split($1, h, ":")
-        for (i = n + 1; i <= 4; i++) h[i] = "0"
-        for (i = 1; i <= 4; i++) h[4 + i] = substr($2, 4 * i - 3, 4)
-        for (i = 1; i <= 8; i++) { sub(/^0+/, "", h[i]); if (h[i] == "") h[i] = "0" }
-        best = 0; bs = 0
-        for (i = 1; i <= 8; i++) {
-            if (h[i] != "0") continue
-            j = i; while (j <= 8 && h[j] == "0") j++
-            if (j - i > best) { best = j - i; bs = i }
-            i = j
-        }
-        out = ""
-        if (best >= 2) {
-            for (i = 1; i < bs; i++) out = out h[i] ":"
-            out = out ":"
-            for (i = bs + best; i <= 8; i++) out = out (i == bs + best ? "" : ":") h[i]
-            if (bs == 1) out = ":" out
-        } else {
-            for (i = 1; i <= 8; i++) out = out (i > 1 ? ":" : "") h[i]
-        }
-        print out
-    }'
+# <prefix>::HOSTID as one canonical (RFC 5952) address, as the awk function
+# addr(prefix, hostid): prefix like 303:170f:3ab2:166e::/64, hostid hex digits.
+# A hextet holds four digits, so a wide hostid is split, not concatenated onto
+# the prefix as a string. One text for reserved_addr and the DNS generator.
+addr_awk() {
+    cat <<'EOF'
+		function addr(p, id,   h, n, i, j, best, bs, out) {
+			sub(/::.*/, "", p)
+			n = split(p, h, ":")
+			for (i = n + 1; i <= 4; i++) h[i] = "0"
+			id = tolower(id)
+			while (length(id) < 16) id = "0" id
+			for (i = 1; i <= 4; i++) h[4 + i] = substr(id, 4 * i - 3, 4)
+			for (i = 1; i <= 8; i++) { sub(/^0+/, "", h[i]); if (h[i] == "") h[i] = "0" }
+			best = 0; bs = 0
+			for (i = 1; i <= 8; i++) {
+				if (h[i] != "0") continue
+				j = i; while (j <= 8 && h[j] == "0") j++
+				if (j - i > best) { best = j - i; bs = i }
+				i = j
+			}
+			if (best < 2) { out = h[1]; for (i = 2; i <= 8; i++) out = out ":" h[i]; return out }
+			out = ""
+			for (i = 1; i < bs; i++) out = out h[i] ":"
+			if (bs == 1) out = ":"
+			out = out ":"
+			for (i = bs + best; i <= 8; i++) out = out (i == bs + best ? "" : ":") h[i]
+			return out
+		}
+EOF
+}
+
+reserved_addr() { # $1 = prefix, $2 = hostid
+    awk -v p="$1" -v id="$2" "$(addr_awk)"'
+		BEGIN { print addr(p, id) }'
 }
 
 # The suffix odhcpd derives for a config host that has an IPv4 address but no
@@ -1710,28 +1841,42 @@ lan_has_ygg_prefix() {
         | grep -qixF "$_want"
 }
 
+# dhcp is also the status module's file (Pin/Unpin edit config host under
+# this lock, and an open status page holds it shared for a few seconds on
+# every refresh). The first stage that edits dhcp takes it before staging
+# anything, so a busy lock means "nothing changed yet" rather than a rollback
+# over someone else's edit, and it is held until the last dhcp commit of the
+# run: no other writer can get in between, so a rollback never restores the
+# file over a change it did not make. BusyBox flock has no -w, so wait by
+# retrying.
+dhcp_lock() {
+    [ "$DHCP_LOCKED" -eq 0 ] || return 0
+    if ! have flock || [ "$DRY_RUN" -eq 1 ]; then return 0; fi
+    exec 9>>/var/lock/yggdrasil-status-dhcp.lock
+    _tries=0
+    until flock -n 9; do
+        _tries=$((_tries + 1))
+        [ "$_tries" -lt 30 ] || die "another process is editing DHCP configuration (lock busy for 30 s) — retry in a moment"
+        sleep 1
+    done
+    DHCP_LOCKED=1
+    if uci -q changes dhcp 2>/dev/null | grep -q .; then
+        die "uncommitted UCI changes appeared in 'dhcp' since preflight — commit or revert them first"
+    fi
+}
+
+dhcp_unlock() {
+    [ "$DHCP_LOCKED" -eq 1 ] || return 0
+    exec 9>&-
+    DHCP_LOCKED=0
+}
+
 stage_lan() {
     [ "$DO_LAN" -eq 1 ] || { info "skipping LAN stage (--no-lan)"; return 0; }
     FAILED_STAGE='LAN routed /64 and RA'
     step "Stage 4 — LAN routed /64 beside the existing prefixes"
 
-    # dhcp is also the status module's file (Pin/Unpin edit config host under
-    # this lock, and an open status page holds it shared for a few seconds on
-    # every refresh). Take it before staging anything, so a busy lock means
-    # "nothing changed yet" rather than a rollback over someone else's edit.
-    # BusyBox flock has no -w, so wait by retrying.
-    if have flock && [ "$DRY_RUN" -eq 0 ]; then
-        exec 9>>/var/lock/yggdrasil-status-dhcp.lock
-        _tries=0
-        until flock -n 9; do
-            _tries=$((_tries + 1))
-            [ "$_tries" -lt 30 ] || die "another process is editing DHCP configuration (lock busy for 30 s) — retry in a moment"
-            sleep 1
-        done
-        if uci -q changes dhcp 2>/dev/null | grep -q .; then
-            die "uncommitted UCI changes appeared in 'dhcp' since preflight — commit or revert them first"
-        fi
-    fi
+    dhcp_lock
 
     CHANGED_NETWORK=1
     CHANGED_DHCP=1
@@ -1777,7 +1922,8 @@ stage_lan() {
     if [ "$DRY_RUN" -eq 0 ]; then
         uci commit network || die "uci commit network failed"
         uci commit dhcp    || die "uci commit dhcp failed"
-        have flock && exec 9>&-
+        # stage 6 edits dhcp too: the lock stays until its commit
+        [ "$DO_DNS" -eq 1 ] || dhcp_unlock
         /etc/init.d/network reload >/dev/null 2>&1 || die "network reload failed"
         # reload (SIGHUP) re-reads the configuration but keeps the bound DHCPv6
         # leases; a restart would drop every lease from the router's record
@@ -1822,18 +1968,20 @@ lan_zone() {
     fi
 }
 
+# Restrict an ACCEPT rule to the trusted sources ($1 = section; the caller sets
+# the rest). Its old src_ip list goes first, so a failed write would leave the
+# rule open to every Yggdrasil node: that ends the run, and the rollback puts
+# the previous firewall configuration back.
 fw_rule_trusted() {
-    # $1 = section name, $2 = human name, and the caller pre-sets the specifics
     _sec="$1"
     uci_del "firewall.$_sec.src_ip"
-    printf '%s\n' "$TRUSTED" | while IFS= read -r _t; do
+    while IFS= read -r _t; do
         [ -n "$_t" ] || continue
-        if [ "$DRY_RUN" -eq 1 ]; then
-            printf '    would run: uci add_list firewall.%s.src_ip=%s\n' "$_sec" "$_t" >&2
-        else
-            uci add_list "firewall.$_sec.src_ip=$_t"
-        fi
-    done
+        uci_add_list "firewall.$_sec.src_ip" "$_t" \
+            || die "could not restrict firewall.$_sec to $_t - refusing to leave an unrestricted ACCEPT rule"
+    done <<TRUSTED_EOF
+$TRUSTED
+TRUSTED_EOF
 }
 
 stage_firewall() {
@@ -1911,9 +2059,9 @@ stage_firewall() {
 
 # ================================================ stage 6: DNS over Yggdrasil
 
-# Part III of the design (AI_CONTEXT.md section 10, REFERENCE_CONFIG.md 6-7).
-# One 'config domain' record serves two roles at once: persistent canonical Ygg
-# metadata for the status page, and a plain dnsmasq answer. No extra daemon.
+# The DNS module (docs/architecture.md). The generated names serve two roles
+# at once: canonical Ygg metadata for the status page, and plain dnsmasq
+# answers. No extra daemon.
 
 # The names are not static UCI records: they would keep the addresses of the key
 # the deployer ran with. A generator of ours writes them as a hosts file into
@@ -1946,7 +2094,8 @@ DNS_EOF
 }
 
 dns_gen_text() {
-    cat <<'EOF'
+    # the generated file carries its own copy of addr(): it runs without us
+    cat <<'EOF' | awk -v fn="$(addr_awk)" '$0 == "@ADDR_AWK@" { print fn; next } { print }'
 #!/bin/sh
 # Written by Yggdrasil-OpenWRT (deploy-openwrt-yggdrasil.sh). Publishes this
 # router's Yggdrasil names (the router, --host reservations, --dns-host) as a
@@ -1975,29 +2124,7 @@ else
 	# dnsmasq skips dot files, so it never reads a half-written one
 	tmp="$dir/.yggdrasil-$iface.$$"
 	awk -v node="$node" -v pfx="$pfx" '
-		function addr(p, id,   h, n, i, j, best, bs, out) {
-			sub(/::.*/, "", p)
-			n = split(p, h, ":")
-			for (i = n + 1; i <= 4; i++) h[i] = "0"
-			id = tolower(id)
-			while (length(id) < 16) id = "0" id
-			for (i = 1; i <= 4; i++) h[4 + i] = substr(id, 4 * i - 3, 4)
-			for (i = 1; i <= 8; i++) { sub(/^0+/, "", h[i]); if (h[i] == "") h[i] = "0" }
-			best = 0; bs = 0
-			for (i = 1; i <= 8; i++) {
-				if (h[i] != "0") continue
-				j = i; while (j <= 8 && h[j] == "0") j++
-				if (j - i > best) { best = j - i; bs = i }
-				i = j
-			}
-			if (best < 2) { out = h[1]; for (i = 2; i <= 8; i++) out = out ":" h[i]; return out }
-			out = ""
-			for (i = 1; i < bs; i++) out = out h[i] ":"
-			if (bs == 1) out = ":"
-			out = out ":"
-			for (i = bs + best; i <= 8; i++) out = out (i == bs + best ? "" : ":") h[i]
-			return out
-		}
+@ADDR_AWK@
 		$1 == "zone"   { zone = $2 }
 		$1 == "router" { router = $2 }
 		$1 == "host"   { hn[++nh] = $2; hid[nh] = $3 }
@@ -2033,21 +2160,7 @@ EOF
 }
 
 # $1 = path, $2 = mode, $3 = content (without the final newline)
-dns_put_file() {
-    if [ "$DRY_RUN" -eq 1 ]; then
-        info "would write $1"
-        return 0
-    fi
-    if [ -f "$1" ] && [ "$(cat "$1")" = "$3" ]; then
-        info "$1 unchanged"
-        return 0
-    fi
-    mkdir -p "$(dirname "$1")"
-    printf '%s\n' "$3" > "$1" || die "cannot write $1"
-    chmod "$2" "$1"
-    case "$1" in *.conf) : ;; *) sh -n "$1" || die "$1 does not parse" ;; esac
-    info "$1 written"
-}
+
 
 # Up to 2.2 the names were UCI 'config domain' records (ygg_dns_*, ygg_rsv_*)
 # holding the addresses of the key at install time. Prints the sections.
@@ -2065,6 +2178,7 @@ stage_dns() {
     uci -q get 'dhcp.@dnsmasq[0]' >/dev/null 2>&1 \
         || die "no dnsmasq section in /etc/config/dhcp"
 
+    dhcp_lock
     CHANGED_DHCP=1
 
     # The zones this router answered before: the one in dns.conf, or (up to
@@ -2117,9 +2231,9 @@ stage_dns() {
     esac
 
     CHANGED_DNS=1
-    dns_put_file "$DNS_CONF" 644 "$(dns_conf_text)"
-    dns_put_file "$DNS_GEN"  755 "$(dns_gen_text)"
-    dns_put_file "$DNS_HOOK" 644 "$(dns_hook_text)"
+    put_file "$DNS_CONF" 644 "$(dns_conf_text)" 'DNS settings' || die "cannot write $DNS_CONF"
+    put_file "$DNS_GEN"  755 "$(dns_gen_text)"  'DNS generator' || die "cannot write a working $DNS_GEN"
+    put_file "$DNS_HOOK" 644 "$(dns_hook_text)" 'DNS hook' || die "cannot write a working $DNS_HOOK"
 
     # Trusted nodes reach port 53 through the router rule of stage_firewall.
     if [ "$DO_FIREWALL" -eq 0 ]; then
@@ -2130,6 +2244,7 @@ stage_dns() {
 
     if [ "$DRY_RUN" -eq 0 ]; then
         uci commit dhcp || die "uci commit dhcp failed"
+        dhcp_unlock
         /etc/init.d/dnsmasq restart >/dev/null 2>&1 || die "dnsmasq restart failed"
 
         # A dnsmasq that cannot parse its config exits without a word, taking
@@ -2170,10 +2285,6 @@ status_fetch() { # $1 = HTTPS URL, $2 = destination, $3 = optional request heade
         [ "$sf_try" -lt 3 ] || return 1
         sleep 2
     done
-}
-
-status_valid_version() { # $1 = candidate version label
-    printf '%s\n' "$1" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(\.(0|[1-9][0-9]*))?$'
 }
 
 # Read exactly one digest from a checksum file. A file naming several artifacts
@@ -2297,7 +2408,7 @@ stage_status() {
         return 0
     fi
 
-    # Isolated cleanup traps must not replace the parent deployer's rollback traps.
+    # A subshell, so the cleanup trap of this workspace stays local to it.
     (
         ss_tmp="$(mktemp -d "${TMPDIR:-/tmp}/ygg-status-deploy.XXXXXX")" \
             || { warn "cannot create private status workspace"; exit 0; }
@@ -2395,7 +2506,7 @@ HOSTS_EOF
         # A lease proves the DHCPv6 path end to end, but odhcpd forgets leases
         # on restart and a client asks again only on renew/reconnect, so an
         # empty list right after a run is information, not a failed invariant.
-        _leases="$(ubus call dhcp ipv6leases 2>/dev/null | jsonfilter -e '@.device[*].leases[*]["ipv6-addr"][*].address' 2>/dev/null | grep -i "^${YGG_PREFIX%%::*}" | tr '\n' ' ')"
+        _leases="$(ubus call dhcp ipv6leases 2>/dev/null | jsonfilter -e '@.device[*].leases[*]["ipv6-addr"][*].address' 2>/dev/null | grep -i "^${YGG_PREFIX%%::*}:" | tr '\n' ' ')"
         if [ -n "$_leases" ]; then
             ok "bound DHCPv6 leases in the routed /64: $_leases"
         else
@@ -2441,17 +2552,16 @@ HOSTS_EOF
 
     if [ -S "/tmp/yggdrasil/${IFACE}.sock" ]; then
         printf '\nPeers:\n' >&2
-        yggdrasilctl -json -endpoint="unix:///tmp/yggdrasil/${IFACE}.sock" getpeers 2>/dev/null \
-            | jsonfilter -e '@.peers[@.up=true].remote' 2>/dev/null | sed 's/^/  Up  /' >&2
+        ygg_up_peers | sed 's/?.*//; s|://[^/@]*@|://...@|; s/^/  Up  /' >&2
     fi
 
     printf '\nLAN state:\n' >&2
-    _lan_dev="$(uci -q get "network.$LAN.device" 2>/dev/null)"; [ -n "$_lan_dev" ] || _lan_dev='br-lan'
+    _lan_dev="$(lan_dev)"
     ip -6 addr show dev "$_lan_dev" 2>/dev/null | sed -n 's/^ *inet6 /  /p' >&2
 
-    _pfx="${YGG_PREFIX%%/*}"
-    _pfx="${_pfx%::}"
-    if ip -6 addr show dev "$_lan_dev" 2>/dev/null | grep -q "${_pfx%%:*}:"; then
+    if [ "$DO_LAN" -eq 0 ]; then
+        info "LAN left as it was (--no-lan)"
+    elif ip -6 addr show dev "$_lan_dev" 2>/dev/null | grep -qi "inet6 ${YGG_PREFIX%%::*}:"; then
         ok "LAN carries an address from the delegated prefix"
     else
         warn "LAN does not yet carry an address from $YGG_PREFIX — give odhcpd a moment, then re-check"
@@ -2468,15 +2578,21 @@ HOSTS_EOF
     fi
 
     printf '\n%s%s%s\n' "$C_OK" "$RULE" "$C_RST" >&2
-    printf '%s%s SUCCESS — Yggdrasil is up and this router is reachable%s\n' \
-        "$C_OK" "$C_BLD" "$C_RST" >&2
+    if [ -n "$TRUSTED" ] && [ "$DO_FIREWALL" -eq 1 ]; then
+        printf '%s%s SUCCESS — Yggdrasil is up, trusted nodes can reach this router%s\n' \
+            "$C_OK" "$C_BLD" "$C_RST" >&2
+    else
+        printf '%s%s SUCCESS — Yggdrasil is up%s\n' "$C_OK" "$C_BLD" "$C_RST" >&2
+    fi
     printf '%s%s%s\n\n' "$C_OK" "$RULE" "$C_RST" >&2
 
     printf '  Router Yggdrasil address\n' >&2
     printf '      %s%s%s%s\n\n' "$C_OK" "$C_BLD" "$NODE_ADDR" "$C_RST" >&2
 
-    printf '  Routed prefix advertised to the LAN\n' >&2
-    printf '      %s  (beside the LAN'"'"'s own prefixes; SLAAC and DHCPv6 as configured)\n\n' "$YGG_PREFIX" >&2
+    if [ "$DO_LAN" -eq 1 ]; then
+        printf '  Routed prefix advertised to the LAN\n' >&2
+        printf '      %s  (beside the LAN'"'"'s own prefixes; SLAAC and DHCPv6 as configured)\n\n' "$YGG_PREFIX" >&2
+    fi
     if [ -n "$HOSTS" ]; then
         printf '  Reserved LAN addresses\n' >&2
         while IFS=' ' read -r _hn _hkt _hk _hid; do
@@ -2488,7 +2604,9 @@ HOSTS_EOF
         printf '\n' >&2
     fi
 
-    if [ -n "$TRUSTED" ]; then
+    if [ "$DO_FIREWALL" -eq 0 ]; then
+        printf '  %sThe firewall was left as it was (--no-firewall).%s\n' "$C_WRN" "$C_RST" >&2
+    elif [ -n "$TRUSTED" ]; then
         printf '  Reachable over Yggdrasil from\n' >&2
         printf '%s\n' "$TRUSTED" | while IFS= read -r _t; do
             [ -n "$_t" ] && printf '      %s\n' "$_t" >&2
@@ -2544,10 +2662,19 @@ keep_on_sysupgrade() {
         grep -qxF "$_k" "$SYSUPGRADE_CONF" 2>/dev/null && continue
         if [ "$DRY_RUN" -eq 1 ]; then
             info "would add $_k to $SYSUPGRADE_CONF"
-        else
-            printf '%s\n' "$_k" >> "$SYSUPGRADE_CONF" || die "cannot write $SYSUPGRADE_CONF"
-            info "kept on sysupgrade: $_k"
+            continue
         fi
+        # an operator's last line without its newline would swallow ours
+        if [ -s "$SYSUPGRADE_CONF" ] && [ -n "$(tail -c 1 "$SYSUPGRADE_CONF")" ]; then
+            printf '\n' >> "$SYSUPGRADE_CONF"
+        fi
+        # The deployment itself is complete by now: a write failure (a full
+        # overlay) costs the keep list, it must not roll the router back.
+        if ! printf '%s\n' "$_k" >> "$SYSUPGRADE_CONF"; then
+            warn "cannot write $SYSUPGRADE_CONF: $_k will not survive a sysupgrade"
+            return 0
+        fi
+        info "kept on sysupgrade: $_k"
     done
 }
 
@@ -2594,10 +2721,12 @@ case "$INTERFACE" in '@IFACE@'|'@LAN@'|loopback) exit 0 ;; esac
 	need=''
 	for p in $(get packages | tr ',' ' '); do apk info -e "$p" >/dev/null 2>&1 || need=1; done
 	[ "$(get status)" = 1 ] && [ ! -f '@VIEW@' ] && need=1
-	h="$(get edge_hash)"
-	if [ -n "$h" ]; then
-		b="$(command -v yggdrasil)"
-		[ -n "$b" ] && [ "$(sha256sum "$b" | cut -d' ' -f1)" = "$h" ] || need=1
+	# our build is back only when what is installed is older than it (a
+	# sysupgrade put the feed's back); a newer feed version is kept
+	v="$(get edge_version)"
+	if [ -n "$v" ]; then
+		i="$(apk list -I yggdrasil 2>/dev/null | sed -n 's/^yggdrasil-\([0-9][^ ]*\) .*/\1/p')"
+		if [ -z "$i" ] || [ "$(apk version -t "$i" "$v")" = '<' ]; then need=1; fi
 	fi
 	[ -n "$need" ] || exit 0
 	logger -t yggdrasil-restore "$INTERFACE up: restoring what a sysupgrade removed"
@@ -2642,16 +2771,22 @@ install_restore() {
         return 0
     fi
     chmod 600 "$RESTORE_COPY"
-    # The edge build is remembered by its binary: set by --ygg-edge/--ygg-pkg,
-    # kept by a later run without them while that binary is still installed.
+    # Our build is remembered by its package version: set by --ygg-edge or
+    # --ygg-pkg, kept by a later run without them while it is still installed
+    # (2.x recorded the binary's hash instead), dropped by --ygg-feed.
     # edge_src: 'release' can be fetched again, 'local' (--ygg-pkg) cannot
-    _eh=''; _es=''
+    _ev=''; _es=''
     if [ -n "$YGG_PKG" ]; then
-        _eh="$(ygg_binary_hash)"; _es='local'
+        _ev="$(ygg_pkg_version)"; _es='local'
     elif [ "$YGG_EDGE" -eq 1 ]; then
-        _eh="$(ygg_binary_hash)"; _es='release'
-    elif [ "$(restore_conf_get edge_hash)" = "$(ygg_binary_hash)" ]; then
-        _eh="$(restore_conf_get edge_hash)"; _es="$(restore_conf_get edge_src)"
+        _ev="$(ygg_pkg_version)"; _es='release'
+    elif [ "$YGG_FEED" -eq 0 ]; then
+        _old_ev="$(restore_conf_get edge_version)"
+        _old_eh="$(restore_conf_get edge_hash)"
+        if { [ -n "$_old_ev" ] && [ "$_old_ev" = "$(ygg_pkg_version)" ]; } \
+            || { [ -n "$_old_eh" ] && [ "$_old_eh" = "$(ygg_binary_hash)" ]; }; then
+            _ev="$(ygg_pkg_version)"; _es="$(restore_conf_get edge_src)"
+        fi
     fi
     # status_src: newest release, a pinned version, or a local build (not refetchable)
     _ss='newest'
@@ -2662,14 +2797,13 @@ install_restore() {
     [ "$DO_STATUS" -eq 1 ] && _pk="$_pk,iputils-arping"
     {
         printf '# Written by Yggdrasil-OpenWRT (deploy-openwrt-yggdrasil.sh): what %s --restore puts back.\n' "$RESTORE_COPY"
-        printf 'iface %s\nlan %s\npackages %s\njumper %s\nstatus %s\nstatus_src %s\nedge_hash %s\nedge_src %s\n' \
-            "$IFACE" "$LAN" "$_pk" "$DO_JUMPER" "$DO_STATUS" "$_ss" "$_eh" "$_es"
-    } > "$RESTORE_CONF" || die "cannot write $RESTORE_CONF"
-    if [ ! -f "$RESTORE_HOOK" ] || [ "$(cat "$RESTORE_HOOK")" != "$(restore_hook_text)" ]; then
-        restore_hook_text > "$RESTORE_HOOK" || die "cannot write $RESTORE_HOOK"
-        chmod 644 "$RESTORE_HOOK"
-        sh -n "$RESTORE_HOOK" || die "$RESTORE_HOOK does not parse"
-    fi
+        printf 'iface %s\nlan %s\npackages %s\njumper %s\nstatus %s\nstatus_src %s\nedge_version %s\nedge_src %s\n' \
+            "$IFACE" "$LAN" "$_pk" "$DO_JUMPER" "$DO_STATUS" "$_ss" "$_ev" "$_es"
+    } > "$RESTORE_CONF" || { restore_disable "cannot write $RESTORE_CONF"; return 0; }
+    # Like the copy above, a failure here costs the restore hook, not the
+    # deployment that is already in place.
+    put_file "$RESTORE_HOOK" 644 "$(restore_hook_text)" 'restore hook' \
+        || { restore_disable "cannot write a working $RESTORE_HOOK"; return 0; }
     ok "restore hook in place: packages and the status module come back after a sysupgrade"
 }
 
@@ -2687,17 +2821,27 @@ restore_run() {
     # an optional package the feed no longer has is dropped from the list, so
     # the hook does not come back for it on every uplink
     [ "$DRY_RUN" -eq 1 ] || sed -i "s|^packages .*|packages yggdrasil,luci-proto-yggdrasil$([ "$DO_JUMPER" -eq 1 ] && apk info -e yggdrasil-jumper >/dev/null 2>&1 && printf ',yggdrasil-jumper')$(apk info -e iputils-arping >/dev/null 2>&1 && printf ',iputils-arping')|" "$RESTORE_CONF"
-    _eh="$(restore_conf_get edge_hash)"
-    if [ -n "$_eh" ] && [ "$(ygg_binary_hash)" != "$_eh" ]; then
+    _ev="$(restore_conf_get edge_version)"
+    _iv="$(ygg_pkg_version)"
+    if [ -n "$_ev" ] && { [ -z "$_iv" ] || ver_older "$_iv" "$_ev"; }; then
         if [ "$(restore_conf_get edge_src)" = local ]; then
             # a --ygg-pkg build cannot be fetched again: keep the feed's
             warn "the local Yggdrasil build (--ygg-pkg) is gone; keeping the feed's - rerun with --ygg-pkg to put it back"
-            [ "$DRY_RUN" -eq 1 ] || sed -i 's|^edge_hash .*|edge_hash |; s|^edge_src .*|edge_src |' "$RESTORE_CONF"
+            _ev=''
         else
             YGG_EDGE=1
             install_ygg_build
-            [ "$DRY_RUN" -eq 1 ] || sed -i "s|^edge_hash .*|edge_hash $(ygg_binary_hash)|" "$RESTORE_CONF"
+            # the feed may have caught up meanwhile: then that is what stays
+            _ev=''
+            [ "$YGG_EDGE" -eq 1 ] && _ev="$(ygg_pkg_version)"
         fi
+    elif [ -n "$_ev" ] && [ "$_iv" != "$_ev" ]; then
+        info "yggdrasil $_iv is newer than this project's build $_ev: keeping it"
+        _ev=''
+    fi
+    if [ "$DRY_RUN" -eq 0 ] && [ "$_ev" != "$(restore_conf_get edge_version)" ]; then
+        sed -i "s|^edge_version .*|edge_version $_ev|" "$RESTORE_CONF"
+        [ -n "$_ev" ] || sed -i 's|^edge_src .*|edge_src |' "$RESTORE_CONF"
     fi
     if [ "$DO_STATUS" -eq 1 ] && [ ! -f "$STATUS_VIEW" ]; then
         case "$(restore_conf_get status_src)" in

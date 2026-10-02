@@ -21,7 +21,7 @@ extract_function() {
         found && /^}$/ { exit }
     ' "$SCRIPT"
 }
-for f in lower_str dns_conf_text dns_gen_text dns_hook_text; do
+for f in addr_awk lower_str dns_conf_text dns_gen_text dns_hook_text; do
     body="$(extract_function "$f")"
     [ -n "$body" ] || { echo "FAIL: function $f not found in deployer" >&2; exit 1; }
     eval "$body"

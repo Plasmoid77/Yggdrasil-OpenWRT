@@ -22,9 +22,9 @@ pointers for older links/comments, not competing sources of truth.
 
 ## Invariants and change boundaries
 
-1. Preserve Ygg identity/private keys, the configured LAN addressing mode
-   (SLAAC by default; router-managed DHCPv6 only where `--dhcpv6` chose it -
-   a rerun must never flip it) and trusted `/128` access. No NAT66 or blanket
+1. Preserve Ygg identity/private keys, the LAN's own RA/DHCPv6 configuration
+   (the deployer never writes `dhcpv6`, `ra_slaac`, `ra_flags` or the ULA; a
+   rerun must never change them) and trusted `/128` access. No NAT66 or blanket
    forwarding. Keep native-node and routed-LAN addresses distinct. Do not
    rename a working remote management interface.
 2. Active DHCPv4 leases and bound DHCPv6 leases with a known MAC create

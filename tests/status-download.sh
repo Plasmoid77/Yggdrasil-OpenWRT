@@ -14,8 +14,8 @@ extract() {
         found && /^}/ { exit }
     ' "$SCRIPT"
 }
-# Load actual distribution pins, then real functions. Missing new helpers are
-# tolerated here so the first regression also runs against the old deployer.
+# Load the deployer's STATUS_* settings, then its real functions. Missing
+# helpers are tolerated, so this test can also run against an older deployer.
 eval "$(sed -n '/^STATUS_[A-Z0-9_]*=/p' "$SCRIPT")"
 for fn in status_valid_version status_expected_digest status_resolve_version \
     status_fetch status_verify status_acquire stage_status; do

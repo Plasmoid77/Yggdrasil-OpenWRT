@@ -80,29 +80,49 @@ grep -qE '@(IFACE|LAN|CONF|COPY|VIEW)@' "$TMP/hook" && fail 'unexpanded placehol
 printf 'echo restore "$@" >> %s/ran\n' "$TMP" > "$RESTORE_COPY"
 : > "$STATUS_VIEW"
 printf '#!/bin/sh\nexit 0\n' > "$TMP/bin/logger"
-printf '#!/bin/sh\ncase "$*" in *missing*) exit 1 ;; esac\nexit 0\n' > "$TMP/bin/apk"
-printf '#!/bin/sh\necho /usr/sbin/yggdrasil\n' > "$TMP/bin/yggdrasil"
+# apk: "info -e" fails for a package named missing*; "list -I yggdrasil" shows
+# the version in $TMP/inst; "version -t" compares dotted numbers and -rN.
+cat > "$TMP/bin/apk" <<'EOF'
+#!/bin/sh
+case "$1" in
+	info) case "$*" in *missing*) exit 1 ;; esac ;;
+	list) [ -s "$APK_INST" ] && echo "yggdrasil-$(cat "$APK_INST") aarch64_cortex-a53 {feeds} (LGPL-3.0-only) [installed]" ;;
+	version) awk -v a="$3" -v b="$4" 'BEGIN {
+		n = split(a, x, /[^0-9]+/); m = split(b, y, /[^0-9]+/)
+		for (i = 1; i <= (n > m ? n : m); i++) {
+			if (x[i] + 0 < y[i] + 0) { print "<"; exit }
+			if (x[i] + 0 > y[i] + 0) { print ">"; exit }
+		}
+		print "=" }' ;;
+esac
+exit 0
+EOF
 chmod 755 "$TMP/bin/"*
 sed -e "s|/var/lock/yggdrasil-restore.lock|$TMP/lock|" -e 's|^\tsleep 10$|\t:|' \
     -e 's|) </dev/null >/dev/null 2>&1 &$|)|' -e "s|/tmp/yggdrasil-restore.log|$TMP/log|" "$TMP/hook" > "$TMP/hook.t"
-conf() { printf 'iface ygg0\nlan lan\npackages %s\nstatus %s\nedge_hash %s\n' "$1" "$2" "$3" > "$RESTORE_CONF"; }
-hook() { rm -f "$TMP/ran"; PATH="$TMP/bin:$PATH" ACTION="${2:-ifup}" INTERFACE="${1:-wan}" sh "$TMP/hook.t"; }
-# the real hash of the stub binary (BusyBox ash runs its own sha256sum applet)
-H="$(sha256sum "$TMP/bin/yggdrasil" | cut -d' ' -f1)"
-conf yggdrasil,luci-proto-yggdrasil 1 "$H"; hook
+conf() { printf 'iface ygg0\nlan lan\npackages %s\nstatus %s\nedge_version %s\n' "$1" "$2" "$3" > "$RESTORE_CONF"; }
+hook() { rm -f "$TMP/ran"; APK_INST="$TMP/inst" PATH="$TMP/bin:$PATH" ACTION="${2:-ifup}" INTERFACE="${1:-wan}" sh "$TMP/hook.t"; }
+echo 0.5.14-r1 > "$TMP/inst"
+conf yggdrasil,luci-proto-yggdrasil 1 0.5.14-r1; hook
 [ ! -e "$TMP/ran" ] || fail 'restore ran although everything is there'
-conf yggdrasil,missing-pkg 1 "$H"; hook
+conf yggdrasil,missing-pkg 1 0.5.14-r1; hook
 [ "$(cat "$TMP/ran" 2>/dev/null)" = 'restore --restore' ] || fail 'a missing package did not trigger --restore'
-conf yggdrasil 1 "$H"; rm -f "$STATUS_VIEW"; hook
+conf yggdrasil 1 0.5.14-r1; rm -f "$STATUS_VIEW"; hook
 [ -e "$TMP/ran" ] || fail 'a missing status module did not trigger --restore'
-: > "$STATUS_VIEW"; conf yggdrasil 1 def; hook
-[ -e "$TMP/ran" ] || fail 'a replaced Yggdrasil binary did not trigger --restore'
+# a sysupgrade put the feed's older version back: our build is restored
+: > "$STATUS_VIEW"; echo 0.5.12-r1 > "$TMP/inst"; conf yggdrasil 1 0.5.14-r1; hook
+[ -e "$TMP/ran" ] || fail 'an older feed Yggdrasil did not trigger --restore'
+# the feed has caught up (or overtaken): nothing to restore
+echo 0.5.14-r2 > "$TMP/inst"; hook
+[ ! -e "$TMP/ran" ] || fail 'a newer feed Yggdrasil was replaced by the older build'
+echo 0.5.15-r1 > "$TMP/inst"; hook
+[ ! -e "$TMP/ran" ] || fail 'a newer feed Yggdrasil was replaced by the older build'
 conf yggdrasil 0 ''; rm -f "$STATUS_VIEW"; hook
 [ ! -e "$TMP/ran" ] || fail 'status not chosen, feed Yggdrasil: restore should stay quiet'
-conf yggdrasil,missing-pkg 1 "$H"; for ev in 'ifdown wan' 'ifup ygg0' 'ifup lan'; do
+conf yggdrasil,missing-pkg 1 0.5.14-r1; for ev in 'ifdown wan' 'ifup ygg0' 'ifup lan'; do
     # shellcheck disable=SC2086
     set -- $ev; hook "$2" "$1"; [ ! -e "$TMP/ran" ] || fail "reacted to $ev"
 done
-echo 'PASS: restore hook quiet when complete, --restore on a missing package, module or build'
+echo 'PASS: restore hook quiet when complete, --restore on a missing package, module or an older Yggdrasil'
 
 echo 'deploy-keep-edge: all checks passed'

@@ -39,10 +39,39 @@ sh tests/deploy-peer-hook.sh
 busybox ash tests/deploy-peer-hook.sh
 sh tests/deploy-keep-edge.sh
 busybox ash tests/deploy-keep-edge.sh
+sh tests/deploy-cli.sh
+busybox ash tests/deploy-cli.sh
+sh tests/deploy-restore.sh
+busybox ash tests/deploy-restore.sh
 sh tests/status-inventory.sh
 busybox ash tests/status-inventory.sh
 sh tests/status-download.sh
 busybox ash tests/status-download.sh
+sh tests/status-writes.sh
+busybox ash tests/status-writes.sh
+sh tests/status-install.sh
+busybox ash tests/status-install.sh
+node tests/status-view.mjs
+# The router runs BusyBox's awk, sed, grep and friends, not the host's gawk or
+# GNU tools: run the shell tests once more with those applets first on PATH.
+APPLETS="$(mktemp -d)"
+trap 'rm -rf "$APPLETS"' EXIT HUP INT TERM
+applets='sed tr grep cut head tail date sort uniq wc'
+# OpenWrt builds BusyBox awk with math (^, exp); some distribution builds,
+# Ubuntu's among them, do not and would fail where the router works.
+if busybox awk 'BEGIN { exit !(2 ^ 3 == 8) }' 2>/dev/null; then
+    applets="awk $applets"
+else
+    echo 'NOTE: this BusyBox awk has no math support; the applet pass keeps the host awk.' >&2
+fi
+for applet in $applets; do
+    printf '#!/bin/sh\nexec busybox %s "$@"\n' "$applet" > "$APPLETS/$applet"
+    chmod +x "$APPLETS/$applet"
+done
+for test in tests/deploy-*.sh tests/status-inventory.sh tests/status-writes.sh tests/status-install.sh; do
+    PATH="$APPLETS:$PATH" busybox ash "$test" >/dev/null \
+        || { echo "FAIL with BusyBox applets: $test" >&2; exit 1; }
+done
 python3 tests/repository.py
 (
     cd packages

@@ -105,11 +105,10 @@ until clients renew.
 
 The deployer targets a stock router. A router deployed with 1.x (its LAN
 replaced by the routed /64: `ip6class`, no ULA, a deployer-owned RA mode) is
-brought to 2.0 by reinstalling: reset to stock, install 2.0 with the same
-peers, trusted addresses and reservations, and the old identity via
-`--private-key-file` (the node address and the routed /64 follow the key).
-`--dhcpv6`, `--slaac` and the `[flags]` entries of the same name are refused
-with an explanation rather than ignored, so an old settings file is updated
+reinstalled, not migrated - the procedure is in
+[installation](installation.md#a-router-deployed-with-1x). `--dhcpv6`,
+`--slaac` and the `[flags]` entries of the same name are refused with an
+explanation rather than ignored, so an old settings file is updated
 consciously. There is no in-place migration logic and no watchdog: the
 deployer's own backup + rollback on a fatal error is the recovery path, and
 a router reached only over the LAN being changed is what the second
@@ -170,9 +169,10 @@ known address answers.
 
 A randomized Wi-Fi MAC is a new identity. Its previous dynamic identity expires
 with its old lease; an explicitly pinned old MAC remains until changed/unpinned.
-A pure IPv6-only client without DHCPv4 or `config host` is not discovered as a
-dynamic row. That is the consequence of the chosen DHCP lifetime model, not a
-reason to silently turn NDP into a permanent inventory.
+A client with neither a DHCPv4 lease, a bound DHCPv6 lease with a known MAC
+nor a `config host` is not a row: NDP alone never creates one. That is the
+consequence of the chosen lease lifetime model, not a reason to silently turn
+NDP into a permanent inventory (IPv6-only clients below).
 
 ### IPv6 selection
 
@@ -182,7 +182,7 @@ its first published prefix. It does not choose an arbitrary global LAN `/64`.
 The v5.1 fix removed the assumption that the interface must be named `ygg`.
 
 For a persistent host, canonical metadata is matched case-insensitively by
-`<config-host-name>.home.arpa`. A DHCP-only client cannot claim another host's
+`<config-host-name>.<zone>` (the deployer's zone, `home.arpa` without one). A DHCP-only client cannot claim another host's
 canonical record by sending the same hostname. A canonical record records an
 address the client already uses; it does not assign or stabilize SLAAC.
 
@@ -410,8 +410,9 @@ Existing persistent identities are not duplicated.
 
 Unpin removes only a simple single-MAC host section. A static reservation
 requires `confirm_static=true`; removing that section also removes its
-reservation. Multiple MACs, duplicate sections for one MAC, or options beyond
-`name`, `mac`, `ip` prevent automatic deletion. Both named and anonymous UCI
+reservation. Multiple MACs, duplicate sections for one MAC, several DUIDs, or
+options beyond `name`, `mac`, `ip`, `hostid` and one `duid` prevent automatic
+deletion; a hand-made `hostid` (not written by Pin) protects the section too. Both named and anonymous UCI
 sections must work. An active lease leaves a formerly pinned row Dynamic;
 without a lease it disappears. Neither operation deletes `config domain`.
 
@@ -441,7 +442,7 @@ The rpcd object is `luci.yggdrasil-status`:
 | `ipv6_source` | String; `canonical`, `dhcpv6`, `eui64`, `observed`, `remembered` or empty |
 | `ipv6_lease_match` | String; with `ipv6_source` `dhcpv6`: `host`, `duid` or `neighbor` - how the lease was tied to this MAC (status 6.1); empty otherwise |
 | `reserved_ipv6` | Integer 0/1; the row's `config host` carries a DHCPv6 `hostid`, or an IPv4 `ip` whose implicit suffix the bound lease sits on |
-| `dhcpv6_served` | Integer 0/1; some interface has `dhcpv6=server` (the page offers an IPv6 suffix in Pin only then) |
+| `dhcpv6_served` | Integer 0/1; the LAN has `dhcpv6=server` and does not disable addresses with `dhcpv6_na=0` (the page offers an IPv6 suffix in Pin only then) |
 | `ygg_node_ipv6` | String; primary native node address, empty when the device runs no daemon |
 | `ygg_node_addresses` | Array of strings; all native node addresses seen for that MAC |
 | `ygg_node` | Integer 0/1; the device is a self-contained Yggdrasil node |

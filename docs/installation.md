@@ -57,7 +57,10 @@ empty again after a restart.
 
 Piping works too, but then `stdin` is the pipe: the script cannot ask for the
 trusted addresses interactively, so pass `--trusted` explicitly for remote access, and there is
-no local copy to check a checksum against.
+no local copy to check a checksum against. A piped run fetches its copy for
+the restore hook (see [Surviving a sysupgrade](#surviving-a-sysupgrade)) from
+`main`, and goes without the hook, with a warning, when `main` already
+carries another version.
 
 ```sh
 wget -qO- https://raw.githubusercontent.com/Plasmoid77/Yggdrasil-OpenWRT/main/deploy/deploy-openwrt-yggdrasil.sh \
@@ -103,7 +106,7 @@ laptop=<MAC>+duid:<HEX>=20  # DUID for odhcpd, MAC for the status page
 bmc=duid:<HEX>%<IAID>=21  # by DUID (and IAID) alone
 
 [status-version]        # as --status-version
-v5.4
+v6.5.2
 [status-pkg]            # as --status-pkg
 /root/yggdrasil-status.tar.gz
 [ygg-pkg]               # as --ygg-pkg (or the flag ygg-edge below)
@@ -113,6 +116,7 @@ v5.4
 no-jumper
 no-dns
 no-lan-forward          # LAN hosts may not initiate connections into Yggdrasil
+# also: no-multicast no-lan no-firewall no-status dns ygg-edge ygg-feed
 # dhcpv6 / slaac        # 1.x only: 2.0 refuses them, delete the line
 ```
 
@@ -139,7 +143,7 @@ Read [startup precautions and recovery](operations.md#startup-precautions)
 for the recorded rare pending-interface race, Wi-Fi bootstrap and detached
 execution. Do not assume every SSH path survives the restart.
 
-One run covers all three parts, section 5 included: it publishes
+One run covers the core, the status module and the DNS module (section 5): it publishes
 `router.<zone>` for the router, `<name>.<zone>` for every `--host` reservation
 and `--dns-host NAME=ADDR` for anything else, and opens port 53 to the trusted
 addresses only. The zone is `--dns-domain` (default `home.arpa`; one per site,
@@ -148,9 +152,17 @@ from the node's current address and routed /64 into `/tmp/hosts` on every
 ifup of the Ygg interface, so they follow a node key changed later in LuCI; a
 Linux client's split DNS still names the router's address and needs updating
 after such a change. `--no-dns` skips that part, the way
-`--no-lan`, `--no-firewall` and `--no-status` skip theirs. Only the client side
-of section 6 stays manual — the script runs on the router and cannot reach the
-client.
+`--no-lan`, `--no-firewall` and `--no-status` skip theirs; `--no-jumper` leaves
+yggdrasil-jumper off and `--no-multicast` turns LAN multicast peering off. A
+skip leaves what an earlier run set up as it is - `--no-dns` does not remove an
+existing DNS module (see [operations](operations.md#removing-the-setup)). Only
+the client side of section 6 stays manual — the script runs on the router and
+cannot reach the client.
+
+Every run applies its whole description of the node; only the peers and the
+key are kept when not given. A rerun without `--dns-domain` therefore moves the
+zone back to `home.arpa`, and one without the `--host` lines drops their names.
+Keep the description in one `--config` file and rerun with it.
 
 To keep an existing Yggdrasil address on a redeployment or on new hardware, hand
 the old private key over in a file rather than on the command line, which is
@@ -188,16 +200,18 @@ and `--host` reservations and the old identity via `--private-key-file`
 migration.
 
 The rest of this document is the manual equivalent, and remains the reference for
-what the script does and why.
+the configuration the script produces and why. Where the script works
+differently - generated DNS names, its hotplug hooks, the restore copy - the
+section says so.
 
 ### Package source and integrity
 
 The automated installer follows the **newest published status release**. It asks
-GitHub for that release, accepts the answer only when it is a `status-vX.Y` tag
+GitHub for that release, accepts the answer only when it is a `status-vX.Y[.Z]` tag
 in the expected shape, then downloads that release's archive together with the
 `.sha256` published beside it and refuses anything whose bytes disagree. A local
 checkout copy of the same version is preferred when it carries its own checksum
-file. `--status-version vX.Y` installs a specific release instead of the newest.
+file. `--status-version vX.Y[.Z]` installs a specific release instead of the newest.
 
 The published checksum protects against a truncated or corrupted download. It
 travels in the same release as the archive, so it is **not** a defence against a
@@ -208,7 +222,7 @@ is skipped with a warning; the routing stages remain independent.
 Release discovery calls `api.github.com`, which limits anonymous requests per
 source IP. A shared address — a CI runner, or a router behind CGNAT — can
 exhaust that budget through no fault of its own, and discovery then fails until
-the window resets. `--status-version vX.Y` keeps working, because it skips the
+the window resets. `--status-version vX.Y[.Z]` keeps working, because it skips the
 lookup entirely. Setting `GITHUB_TOKEN` in the environment raises the limit; it
 is attached only to that one fixed lookup and never to a release download, which
 redirects to a different host. The token reaches `wget` as a process argument
@@ -226,11 +240,19 @@ and installs it with `apk add --allow-untrusted`, since the build key is not one
 the router knows. The checksum carries the same limit as the status module's:
 it travels in the same release. `--ygg-pkg PATH` does the same from a local file
 (`PATH.sha256` required), for a router that cannot reach GitHub. A running node
-is restarted onto the new binary when the version changed. A later run without
-the switch keeps the installed build: apk does not downgrade to the feed's
-older version. Back to the feed's build: `apk update && apk add
-yggdrasil=<feed version>` (e.g. `0.5.12-r1`), then `ifup ygg0`, and rerun the
-deployer without `--ygg-edge` so the restore hook stops bringing the build back.
+is restarted onto the new binary when the version changed.
+
+`--ygg-edge` takes the build only while it is newer than the feed's version
+(`apk version -t`); once the feed has caught up, the same switch installs the
+feed's version instead, so rerunning with `--ygg-edge` never holds a router on
+an older build. A later run without either switch keeps what is installed: apk
+does not downgrade by itself, and the build stays pinned in `/etc/apk/world`.
+`--ygg-feed` (`ygg-feed` under `[flags]`) goes back to the feed's version, as a
+downgrade if need be, drops that pin so a later `apk upgrade` follows the feed,
+restarts the node on the new binary, and the restore hook stops bringing the
+build back. When the feed offers the build's very version, apk keeps the
+installed build until the feed's next release: it cannot tell two builds of
+one version apart.
 
 ### Surviving a sysupgrade
 
@@ -374,7 +396,7 @@ host running dhcpcd sent DUID-LLT and a NetworkManager laptop sent DUID-UUID
 read its DUID from `ubus call dhcp ipv6leases`, and reserve by DUID,
 optionally `%IAID` in hex. Give the MAC as well (`MAC+duid:HEX`): odhcpd
 matches the lease by the DUID, while the status page and its canonical
-`home.arpa` record find the row by the MAC - without it the device shows up
+`<name>.<zone>` record find the row by the MAC - without it the device shows up
 as a dynamic row with an observed address rather than as the named,
 reserved host:
 
@@ -546,6 +568,12 @@ uci commit dhcp
 No separate firewall rule is needed: `YGG-Trusted-to-Router` already admits
 TCP and UDP from the trusted sources, so port 53 is reachable for them and for
 no one else.
+
+These hand-written records hold fixed addresses. The deployer does not write
+them: it generates the same names from `/etc/yggdrasil-openwrt/dns.conf` into
+`/tmp/hosts/yggdrasil-<iface>` on every `ifup` of the Ygg interface, so they
+follow a node key changed later. Delete hand-written records like these before
+running the deployer, or the old answers stay beside the generated ones.
 
 ```sh
 dig +short AAAA mydevice.home.arpa @<ROUTER_YGG_IPV6>

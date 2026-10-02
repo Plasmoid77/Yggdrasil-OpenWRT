@@ -23,6 +23,7 @@ extract_function() {
 # defaults block, then the helpers and the option loop the parser relies on
 eval "$(sed -n '/^set -u$/,/^VERSION=/p' "$SCRIPT" | sed '/^set -u$/d')"
 eval "$(sed -n '/^# -* defaults -*$/,/^usage() {$/p' "$SCRIPT" | sed '$d')"
+eval "$(extract_function peer_shown)"
 eval "$(extract_function add_peer)"
 eval "$(extract_function add_trusted)"
 eval "$(extract_function add_dns_host)"

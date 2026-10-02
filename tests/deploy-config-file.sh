@@ -25,7 +25,7 @@ extract_function() {
 
 eval "$(sed -n '/^set -u$/,/^VERSION=/p' "$SCRIPT" | sed '/^set -u$/d')"
 eval "$(sed -n '/^# -* defaults -*$/,/^usage() {$/p' "$SCRIPT" | sed '$d')"
-for f in add_peer add_trusted add_dns_host status_valid_version read_config validate_private_key load_supplied_key; do
+for f in peer_shown add_peer add_trusted add_dns_host status_valid_version read_config validate_private_key load_supplied_key; do
     body="$(extract_function "$f")"
     [ -n "$body" ] || { echo "FAIL: function $f not found in deployer" >&2; exit 1; }
     eval "$body"
