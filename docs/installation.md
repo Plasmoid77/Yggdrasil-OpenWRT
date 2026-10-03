@@ -23,8 +23,8 @@ through the router (`--no-lan-forward` turns that off). NAT66 is not used.
 Remote access is limited to trusted Ygg `/128`s. See
 [architecture](architecture.md) for the reasoning.
 
-Optional modules provide a LuCI inventory, `home.arpa` names, and route-only
-Linux split DNS.
+Optional modules provide a LuCI inventory, private DNS names (`home.arpa`
+by default, or a zone such as `spb.internal`), and route-only Linux split DNS.
 
 ## Automated path
 
@@ -106,7 +106,7 @@ laptop=<MAC>+duid:<HEX>=20  # DUID for odhcpd, MAC for the status page
 bmc=duid:<HEX>%<IAID>=21  # by DUID (and IAID) alone
 
 [status-version]        # as --status-version
-v7.0
+v7.0.1
 [status-pkg]            # as --status-pkg
 /root/yggdrasil-status.tar.gz
 [ygg-pkg]               # as --ygg-pkg (or the flag ygg-edge below)
@@ -154,15 +154,77 @@ Linux client's split DNS still names the router's address and needs updating
 after such a change. `--no-dns` skips that part, the way
 `--no-lan`, `--no-firewall` and `--no-status` skip theirs; `--no-jumper` leaves
 yggdrasil-jumper off and `--no-multicast` turns LAN multicast peering off. A
-skip leaves what an earlier run set up as it is - `--no-dns` does not remove an
+stage skip leaves what an earlier run set up as it is - `--no-dns` does not remove an
 existing DNS module (see [operations](operations.md#removing-the-setup)). Only
 the client side of section 6 stays manual — the script runs on the router and
 cannot reach the client.
 
-Every run applies its whole description of the node; only the peers and the
-key are kept when not given. A rerun without `--dns-domain` therefore moves the
-zone back to `home.arpa`, and one without the `--host` lines drops their names.
-Keep the description in one `--config` file and rerun with it.
+Every full run reapplies its selected profile. Peers and the existing key are
+kept when omitted; trusted sources, DNS names and feature switches follow
+that run's arguments/defaults. Existing operator LAN settings and host
+records have their own preservation rules. A rerun without `--dns-domain`
+returns the generated zone to `home.arpa`; omitting a `--host` removes its
+generated DNS name but leaves its native DHCP reservation. Keep the complete
+description in one `--config` file and rerun with it.
+
+### Scope switches on a rerun
+
+These options do not all mean uninstall:
+
+| Option | Effect |
+| --- | --- |
+| `--no-lan`, `--no-firewall`, `--no-dns` | Skip their configuration stage; earlier configuration is left in place. Skipping firewall writes does not close previously allowed access. |
+| `--no-status` | Skip status installation; the installed page and native pins remain. The next restore settings no longer request status recovery. |
+| `--no-jumper` | Disable Jumper on the configured Ygg interface and skip installing it; do not uninstall its package. |
+| `--no-multicast` | Remove the configured multicast peering sections, including those from an earlier run. |
+| `--no-lan-forward` | Remove the project's LAN-to-Ygg initiation rule when the firewall stage runs. Other operator rules and established flows have their own behavior. |
+| `--iface`, `--lan` | Select the core UCI interfaces; the status backend still uses the logical `lan` and one Ygg prefix. |
+
+An unattended `--yes` run without `--trusted` supplies an empty trusted list
+to the firewall stage. Repeat the complete list, especially if connected
+through Ygg. To remove a module, use [the removal guide](operations.md#removing-the-setup).
+`--wait SECONDS` controls the prefix wait (default 90); use
+`sh deploy-openwrt-yggdrasil.sh --help` for the complete argument reference.
+
+### Choose a private DNS zone
+
+Use one zone per independent site. `home.arpa` is the default;
+`spb.home.arpa`, `spb.internal` and `blg.internal` are supported examples.
+The [ICANN reservation of .internal](https://www.icann.org/en/board-activities-and-meetings/materials/approved-resolutions-special-meeting-of-the-icann-board-29-07-2024-en#section2.a)
+keeps that top-level name out of public delegation. A client still needs a
+resolver that knows where your private zone is served.
+
+For SPb, put this section in the existing node settings file, keeping its
+trusted addresses and host definitions. Remove `no-dns` from `[flags]` if
+DNS should be configured:
+
+```ini
+[dns-domain]
+spb.internal
+```
+
+Then rerun with the complete settings file on the router:
+
+```sh
+sh deploy-openwrt-yggdrasil.sh --yes --config /root/ygg.conf
+```
+
+The equivalent command-line option is `--dns-domain spb.internal`.
+`router.spb.internal` resolves to the router's Ygg node address;
+`--host nas=<MAC>=10` generates `nas.spb.internal` under the router's
+routed `/64` with suffix `::10`. `--dns-host` can name another explicit
+address. The generated hosts file follows the router's current key; a remote
+client's configured DNS-server address must be updated after a key change.
+
+For another site, use `blg.internal` in its own settings. Each router serves
+its configured zone locally; `home.arpa` also remains local, but changing the
+zone does not create aliases for the old generated names. Match the Linux
+helper's `zones` to the chosen zone. With several routers use the
+[per-zone client forwarder](#several-routers-a-local-dnsmasq).
+
+Changing a zone does not add trusted clients or configure their DNS.
+`--no-dns` skips DNS configuration and leaves an existing DNS module intact;
+see [removal](operations.md#remove-only-the-dns-module) to actually remove it.
 
 To keep an existing Yggdrasil address on a redeployment or on new hardware, hand
 the old private key over in a file rather than on the command line, which is
@@ -275,10 +337,11 @@ deployer and its choices in `/etc/yggdrasil-openwrt` (`deploy.sh`,
 `restore.conf`), and `/etc/hotplug.d/iface/80-yggdrasil-restore` checks on every
 uplink `ifup` whether the packages, the build and the status module are still
 there. When something is missing it runs the copy with `--restore`, which only
-installs (feed packages, the build, the status module) and touches no
-configuration; the log is `/tmp/yggdrasil-restore.log`, and a failed attempt is
-retried at the next uplink. So after a sysupgrade everything comes back by
-itself as soon as the router is online. After a stock image the packages are
+installs (feed packages, the build, the status module) without reapplying the
+network/DHCP/firewall profile; it may update `restore.conf` as choices become
+unavailable. The log is `/tmp/yggdrasil-restore.log`, and a failed attempt is
+retried at the next uplink. Recovery requires reachable package/release
+sources and the retained settings/hooks. After a stock image the packages are
 installed first and netifd is restarted to load the Yggdrasil protocol (the
 same as a first deployment). A router whose uplink itself needs packages from
 outside the official feeds (a modem stack) has to get those back first.
@@ -298,6 +361,16 @@ Running the attended sysupgrade with `owut` (validated on a real 25.12.5 →
   another uplink; with a second one (a Wi-Fi station) it restored everything
   within about three minutes of that uplink coming up, with no network restart.
 
+Local builds are not automatically downloadable after a sysupgrade.
+`status_src newest` follows the latest published status release when recovery
+is needed; a pinned `--status-version` records that version. For
+`status_src local`, recovery warns and disables further status restoration
+attempts; rerun with the original archive and checksum. A missing local
+`--ygg-pkg` build likewise cannot be refetched: recovery keeps the feed build
+and clears the saved local-build choice. Keep these archives separately.
+`--restore` is missing-component recovery, not a routine upgrade of a present
+status module and not replay of the full deployment settings file.
+
 For offline or custom builds, use `--status-pkg PATH` and provide the generated
 single-entry `PATH.sha256` beside it. Both must be readable. Missing, malformed
 or mismatched checksums now refuse the status installation; older deployers
@@ -307,7 +380,8 @@ to silence a verification failure.
 
 ## Requirements
 
-- OpenWrt 25.12+ with `apk`, firewall4, odhcpd, dnsmasq, rpcd and LuCI;
+- OpenWrt 25.12+ with `apk`, netifd, firewall4, odhcpd and dnsmasq;
+- rpcd and LuCI for the optional status page;
 - working Internet access and a correct system clock for HTTPS package downloads;
 - root shell access and backups of network, DHCP and firewall configuration;
 - current Yggdrasil peers;
@@ -556,6 +630,13 @@ defaults to no IPv4 reservation.
 
 ## 5. Add optional `home.arpa` DNS
 
+This is the manual setup with fixed records. For an automated deployment,
+use [the generated private zone](#choose-a-private-dns-zone) instead. The
+example below uses `home.arpa`; for a custom manual zone, replace the record
+suffixes and its `server` entry consistently, and still keep `home.arpa`
+local. The status module gets a custom suffix from the deployer's `dns.conf`;
+manual DNS records alone do not change that suffix.
+
 ```sh
 uci set dhcp.ygg_router='domain'
 uci set dhcp.ygg_router.name='router.home.arpa'
@@ -646,6 +727,9 @@ ygg0             -> DNS Domain: ~home.arpa, Default Route: no
 
 A router with another zone (`--dns-domain spb.internal`): set
 `zones='spb.internal'` in `/usr/local/libexec/yggdrasil-split-dns`.
+Apply the helper after editing it, respecting the VPN timing below, and
+verify `resolvectl query router.spb.internal` uses `ygg0` and that
+`resolvectl status ygg0` shows `~spb.internal` with `Default Route: no`.
 systemd-resolved (v261 checked) keeps `home.arpa` and `internal` out of DNSSEC
 validation by itself. Only the zones go to the router (`ygg0` is not a default
 route), so every other name keeps working when the router is down.
@@ -666,8 +750,9 @@ all DNS depend on the router.)
 
 systemd-resolved sends a link's queries to that link's current server; it
 cannot send one zone to one server and another zone to another server on the
-same link (`ygg0`). A router asked for a zone that is not its own answers
-NXDOMAIN, and resolved does not try the next server. Each router answers only
+same link (`ygg0`). Listing both router addresses is not a per-zone routing
+table: a negative answer from the wrong router is not a reason to retry the
+other server. Each router answers only
 its own zone (no forwarding between routers, so none depends on another);
 the per-zone choice is made on the client by a dnsmasq that forwards only
 those zones:
@@ -679,7 +764,7 @@ grep -q '^conf-dir=/etc/dnsmasq.d/,\*.conf' /etc/dnsmasq.conf \
   || echo 'conf-dir=/etc/dnsmasq.d/,*.conf' | sudo tee -a /etc/dnsmasq.conf
 sudo systemctl enable dnsmasq
 sudo systemctl restart dnsmasq               # also after every later edit: it rereads its config only on restart
-sudo sed -i "s|^router_dns=.*|router_dns='127.0.0.2'|; s|^zones=.*|zones='home.arpa internal'|" \
+sudo sed -i "s|^router_dns=.*|router_dns='127.0.0.2'|; s|^zones=.*|zones='spb.internal blg.internal'|" \
   /usr/local/libexec/yggdrasil-split-dns
 sudo /usr/local/libexec/yggdrasil-split-dns apply
 ```
@@ -687,7 +772,14 @@ sudo /usr/local/libexec/yggdrasil-split-dns apply
 It listens on 127.0.0.2 only (`bind-interfaces`), next to systemd-resolved's
 127.0.0.53 and any libvirt instance, and has no upstream: names outside the
 zones are never sent to it. A router that is unreachable only makes its own
-zone time out. Checked on a laptop with systemd 261, dnsmasq 2.93 and
+zone time out. The supplied forwarder has entries for `spb.internal` and
+`blg.internal`; replace both address placeholders before starting it. Add
+each extra zone to both the forwarder and the helper's `zones`. Routing the
+parent `internal` would also send every other `.internal` name to this local
+resolver, which has no upstream; use the exact site zones when that is not
+intended.
+
+The earlier integration was checked on a laptop with systemd 261, dnsmasq 2.93 and
 AmneziaVPN up: `home.arpa` answered by the SPb router through the local
 dnsmasq, an unreachable second zone timing out alone, `example.com` through
 the VPN.

@@ -703,6 +703,7 @@ Current code only attaches canonical `config domain` records when a matching per
 | TEST_PLAN, AI_CONTEXT release/pitfall sections | This development guide |
 | AI_CONTEXT working constraints | AGENTS; CLAUDE imports it |
 | SLAAC_ADDRESS_FIX | Unabridged incident under docs/history, links adjusted |
+| Completed 1.9.0 managed-LAN implementation plan | Current contracts in architecture and release history in changelog; [original plan in Git history](https://github.com/Plasmoid77/Yggdrasil-OpenWRT/blob/101f4e0f386014058ac0c0aa86cfed8c420b1bd5/docs/history/dhcpv6-managed-lan-plan.md) |
 | MANIFEST and repository-wide checksums | Git tree for source; generated package provenance/manifest; unchanged historical checksums retained with archives |
 
 Published root-level QUICKSTART, AI_CONTEXT and REFERENCE_CONFIG paths remain
