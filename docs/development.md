@@ -727,3 +727,8 @@ matrix on a test router with backups and another management path. Record the
 actual firmware, commit/archive digest and observed result, rather than
 copying an earlier hardware claim. A Git revert restores repository files;
 it does not restore a router that has already been reconfigured.
+
+The [2026-10-03 hardware validation](history/hardware-validation-2026-10-03.md)
+records the deployer 3.0.1 / status v7.0.1 upgrade, native UCI fixture, browser
+refresh failure/recovery, reboot and published-latest rerun on a dual-stack
+Cudy router. Its stated limits do not replace the remaining manual matrix.
