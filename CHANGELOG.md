@@ -1,6 +1,6 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
-## 2026-10-03 — status v7.0.1 released and SPb validated
+## 2026-10-03 — status v7.0.1 released, SPb and BLG validated
 
 - Published `status-v7.0.1` as latest from runtime source commit `383ce818`.
   Deployer 3.0.1 is available from `main`; the status archive is a separate
@@ -11,8 +11,18 @@
   configuration and identity/RA/reservation invariants were preserved.
 - Authenticated LuCI refresh failure/recovery and isolated native-UCI
   Pin/Unpin/rollback were checked. Real client reservations, fresh installs,
-  IPv4-only deployment, sysupgrade and BLG were outside this validation.
+  IPv4-only deployment and sysupgrade were outside the SPb validation.
   See the [hardware report](docs/history/hardware-validation-2026-10-03.md).
+- Remote BLG upgraded to deployer 3.0.1 / published status v7.0.1 in guarded
+  phases: core with `--no-lan` completed with 16 OK / 0 FAIL, then explicit
+  legacy LAN reconstruction and full deployment with 23 OK / 0 FAIL.
+  Operator preparation added ULA/SLAAC and removed the old sole `ip6class`
+  restriction; this is not an automatic migration feature. Key, peers,
+  trusted access, DHCPv6 server mode and RA flags/default were preserved.
+  Reboot recovered Ygg SSH, exact final configuration hashes, IPv4/Ygg,
+  DNS over UDP/TCP and
+  clients RPC. Physical LAN client address acquisition and full emergency
+  rollback were not tested; protected recovery snapshots were retained.
 - Router BusyBox test portability corrections merged in PR #34; they do not
   change the runtime payload. Full host checks and main CI passed.
 - Documentation now explains private per-site DNS zones, resolver routing,

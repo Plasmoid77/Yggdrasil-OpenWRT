@@ -43,9 +43,56 @@ recovery watchdog; acceptance was recorded only after checking the result.
 
 ## Limits
 
-No fresh-router installation, IPv4-only deployment, sysupgrade or BLG migration
-was performed. Pin/Unpin was exercised with native UCI in an isolated fixture,
+The SPb checks did not cover a fresh-router installation, IPv4-only deployment,
+sysupgrade or the BLG reconstruction described below. Pin/Unpin was exercised with native UCI in an isolated fixture,
 not by changing a real client's DHCP record or observing a DHCP renewal.
 Stub service recovery does not establish how every possible real service
 failure behaves. A successful reboot verifies this router and configuration,
 not the complete manual deployment matrix in the development guide.
+
+## BLG legacy LAN reconstruction and upgrade
+
+The remote BLG router is also a Cudy WBR3000UAX v1 running OpenWrt 25.12.5.
+Its existing feed packages were Yggdrasil 0.5.12-r1, luci-proto-yggdrasil
+1.1.1-r1 and yggdrasil-jumper 0.3.1-r1. Its legacy LAN had `ip6assign 64`,
+`ip6class ygg0`, DHCPv6 server mode, `ra_slaac 0`, managed/other RA flags and
+no ULA. There were four configured peers, two trusted sources and no native
+host/domain records. No saved deployer or restore hook was present.
+
+This was an explicit operator reconstruction on a working router, not an
+automatic migration feature or a firmware upgrade. Management was through
+Ygg only; the host's VPN uplink remained independent through the phone.
+Private keys, peer settings, trusted sources and full recovery snapshots
+stayed on the router in a protected directory, outside Git.
+
+Before mutation, isolated native-UCI rehearsal on SPb verified the exact LAN
+preparation and rejection of a repeated preparation, with live configuration
+hashes unchanged. BusyBox guard rehearsals covered acceptance before timeout,
+termination of an owned worker group, stale PID recovery without signalling
+an unrelated process, serialization of acceptance against recovery, and a
+boot watchdog that never signals a pre-boot PID. Initial independent plan
+review found recovery defects; those were corrected before these rehearsals
+and before BLG mutation.
+
+Each installation phase had an integrity-checked snapshot, a detached
+600-second recovery watchdog and temporary boot recovery after 180 seconds.
+Acceptance occurred only after separate live checks. Reboot recovery was
+armed with the original working pre-upgrade snapshot. The temporary boot
+hook was removed after successful verification and all guardians exited;
+protected backups and complete node settings were retained.
+
+| Operation | Verified result |
+| --- | --- |
+| Core upgrade with `--no-lan` | Deployer 3.0.1 / published status v7.0.1 completed with 16 OK / 0 FAIL. Legacy LAN settings were preserved. The node key, node address, routed prefix, exact peer settings and both trusted sources matched the original baseline. Non-project network/firewall configuration was preserved. |
+| Explicit LAN preparation and full deployment | Created a random ULA `/48`, removed the old sole `ip6class ygg0` restriction and enabled SLAAC. DHCPv6 server mode, `ip6assign 64`, RA flags and default were retained. Full deployment completed with 23 OK / 0 FAIL; netifd assigned both ULA and routed Ygg prefixes to LAN. Identity, peers and trusted sources still matched. |
+| Installed components | All four status payload files matched tracked release source. The saved deployer matched the tested 3.0.1 file; cold-boot, peer, DNS and restore hooks were present. `restore.conf` records the pinned public `status_src v7.0.1`. |
+| Live services and reachability | Router IPv4 and Ygg probes, independent Ygg SSH/ICMP and local internal DNS succeeded. `router.blg.internal` resolved to the node address through the router over both UDP and TCP from the trusted remote host. Clients RPC returned valid inventory: six rows before reboot. |
+| Controlled reboot | The kernel boot ID changed and Ygg SSH returned. Network, DHCP and firewall hashes matched the final pre-reboot snapshot. Identity, peers, trusted access, ULA/SLAAC, LAN prefix assignments, payload and hooks passed again. IPv4/Ygg probes and external UDP/TCP internal DNS succeeded; clients RPC returned three rows. |
+
+The row counts above are observed inventory snapshots, not proof of client
+renewal or stability across a reboot. No physical BLG LAN client was used to
+verify newly acquired SLAAC/DHCPv6 addresses or end-to-end LAN forwarding.
+Native IPv6 uplink connectivity, firmware sysupgrade and a fresh installation
+were not tested on BLG. The emergency full live rollback was not triggered;
+the isolated guard rehearsals do not prove every service recovery scenario.
+No real client reservation was changed.
