@@ -1,5 +1,24 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## 2026-10-03 — status v7.0.1 released and SPb validated
+
+- Published `status-v7.0.1` as latest from runtime source commit `383ce818`.
+  Deployer 3.0.1 is available from `main`; the status archive is a separate
+  distribution and does not contain the deployer.
+- Existing SPb dual-stack router upgraded from 3.0.0 / v7.0. Candidate and
+  public-latest reruns each completed with 28 OK / 0 FAIL; controlled reboot
+  recovered LAN/Ygg access, IPv4/native IPv6/Ygg and internal DNS. Critical
+  configuration and identity/RA/reservation invariants were preserved.
+- Authenticated LuCI refresh failure/recovery and isolated native-UCI
+  Pin/Unpin/rollback were checked. Real client reservations, fresh installs,
+  IPv4-only deployment, sysupgrade and BLG were outside this validation.
+  See the [hardware report](docs/history/hardware-validation-2026-10-03.md).
+- Router BusyBox test portability corrections merged in PR #34; they do not
+  change the runtime payload. Full host checks and main CI passed.
+- Documentation now explains private per-site DNS zones, resolver routing,
+  reservations, rerun/scope switches, status-only updates and limits of
+  saved recovery choices, including local custom archives.
+
 ## Deployer 3.0.1 and status source safety fixes
 
 - Required configuration backups fail closed and replace recovery images only
@@ -25,9 +44,11 @@
 - Documentation describes address memory, lock and rollback boundaries,
   reserved section ownership, BusyBox coverage and the unknown-feed-version
   edge fallback. Released archives and the `status-v7.0` tag are unchanged;
-  these status changes are source changes pending a new release.
+  these changes were initially source-only and are now in status v7.0.1
+  (release and hardware validation recorded above).
 - Regression checks cover the failure paths on the host under sh and BusyBox
-  ash. No router deployment or hardware validation is claimed for this patch.
+  ash. At initial source review no router deployment or hardware validation
+  was claimed; the subsequent hardware results are recorded above.
 
 ## Deployer 3.0.0 - remastered
 

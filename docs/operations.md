@@ -241,6 +241,40 @@ See also [BusyBox and UCI pitfalls](development.md#busybox-and-uci-pitfalls).
 
 Do not "clean up" that line back to the earlier form without testing it on the target BusyBox/OpenWrt environment.
 
+### Check the configured zone and client resolver
+
+For a deployer-managed router, read the actual zone from
+`/etc/yggdrasil-openwrt/dns.conf`; the default is `home.arpa`, but a site may
+use `spb.internal` or `blg.internal`. Do not assume a name ending in
+`home.arpa` still exists after changing that zone. On the router:
+
+```sh
+awk '$1 == "zone" { print $2 }' /etc/yggdrasil-openwrt/dns.conf
+```
+
+For a router serving `spb.internal`, test from a trusted Linux Ygg client:
+
+```sh
+dig +short AAAA router.spb.internal @<ROUTER_YGG_IPV6>
+dig +tcp +short AAAA router.spb.internal @<ROUTER_YGG_IPV6>
+resolvectl status ygg0
+resolvectl query router.spb.internal
+resolvectl query example.com
+```
+
+Direct `dig` tests the router without relying on client suffix routing. If
+that succeeds but normal resolution fails, check the helper's `router_dns`
+and `zones`, its service drop-in and VPN reconnect behavior in
+[Linux split DNS](installation.md#6-optional-linux-split-dns). Private queries
+should use the selected site route; public queries should use the normal
+connection or VPN. With the local multi-router forwarder, the helper points
+at `127.0.0.2` and its zone list must match the per-zone dnsmasq entries.
+
+A zone change must be kept in the router settings file and applied on its
+clients too. Adding router DNS as a second entry in `resolv.conf` does not
+provide suffix routing. Choosing `.internal` does not configure a resolver
+or create public DNS records.
+
 ### DNS timeout over Ygg may be firewall, not dnsmasq
 
 During development, local `home.arpa` records already worked and `dnsmasq` was listening, but direct DNS queries over Yggdrasil timed out.
@@ -322,6 +356,7 @@ Before an upgrade, back up the network configuration and private key securely.
 For example:
 
 ```sh
+umask 077
 uci export network > /root/network-before-ygg-update.conf
 ```
 
@@ -332,6 +367,7 @@ Do not regenerate the Yggdrasil keypair during an ordinary update unless you int
 If the status module is installed:
 
 ```sh
+umask 077
 tar -czf /root/yggdrasil-status-backup.tar.gz \
         /usr/libexec/rpcd/luci.yggdrasil-status \
         /usr/share/rpcd/acl.d/yggdrasil-status.json \
@@ -354,6 +390,22 @@ apk upgrade yggdrasil luci-proto-yggdrasil yggdrasil-jumper
 
 Do not assume every future package keeps the exact same UCI options.
 
+The status module is installed from a release archive, not managed by
+`apk upgrade`. To update only the page/backend, download and verify the chosen
+archive and its published checksum, then run its installer from the extracted
+directory on the router, following
+[status installation](installation.md#4-install-the-optional-luci-status-module).
+It restarts rpcd and validates the module; core network services are not
+restarted. Native pins and address-memory files are separate from the four
+module files and remain in place. Publication alone does not update a router.
+
+For a full deployer update, obtain the current script and use the complete
+node settings file, including trusted sources, zone and reservations. A bare
+rerun is not a status-only update and may change those choices to defaults.
+The saved `deploy.sh --restore` restores missing components; it is not a
+general update command. Local custom archives need manual restoration after
+sysupgrade; see [saved recovery choices](installation.md#surviving-a-sysupgrade).
+
 On a router installed with `--ygg-edge` (or `--ygg-pkg`), `apk upgrade` leaves
 this project's build alone: apk pinned the package to that file in
 `/etc/apk/world`. A rerun with `--ygg-edge` moves to the feed by itself once the
@@ -363,8 +415,9 @@ the restore hook below brings the build back only over an older version (see
 [installation](installation.md#yggdrasil-version-the-feeds-or-this-projects-build)).
 
 The deployer's own files live outside any package, survive package upgrades and
-are listed in `/etc/sysupgrade.conf`; a rerun rewrites one only if its text
-changed:
+are listed in `/etc/sysupgrade.conf`; a rerun atomically replaces own scripts
+when their text changes and repairs their permissions even when text is
+unchanged:
 
 | File | Runs on | Does | Log |
 | --- | --- | --- | --- |

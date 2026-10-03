@@ -35,7 +35,8 @@ that routed prefix without a local Yggdrasil daemon.
 Full Yggdrasil nodes may coexist on the LAN and multicast-peer with the router.
 The two address kinds stay distinct: a node's router-prefix Wi-Fi/Ethernet SLAAC
 address is its LAN address, and its native TUN/node address remains peer-table
-data. The LAN table reports that native address in its own column, attributed
+data. The LAN table reports that native address labelled "node" in the
+Yggdrasil column, attributed
 by MAC, so a self-contained node is distinguishable from a device that reaches
 Yggdrasil only through the router. An NDP `router` flag does not change the MAC
 identity or create another device.
@@ -645,7 +646,7 @@ config rule
 | MAC-centric identity | Changing IP/privacy addresses do not create separate device identities; randomized MACs still do |
 | NDP enrichment, not `getHostHints` authority | Neighbor churn must not erase persistent identities or preserve expired guests |
 | Native `config domain` | Shared canonical address/DNS metadata for operator records without custom `option ygg_ipv6`, a new UCI inventory file or resolver (the deployer's own key-derived names are generated since 2.3, below) |
-| `home.arpa` rather than `.lan` | RFC 8375 reserves a locally served home namespace |
+| Private DNS zone | `home.arpa` is the RFC 8375 default; per-site zones such as `spb.internal` use ICANN's private-use reservation. A zone name does not provide client resolver routing; that is configured separately |
 | Generated names, not static records (2.3) | The router's names derive from the node key (node address, routed /64 + `hostid`). Static `config domain` records kept the addresses of the key the deployer ran with; a key changed in LuCI left them stale. `/etc/yggdrasil-openwrt/dns-hosts` writes them into dnsmasq's hosts directory (as odhcpd does for its leases) and sends SIGHUP; a hook on the Ygg interface runs it. Nothing is written to flash at run time |
 | One zone per router, no forwarding between routers | `--dns-domain` (default `home.arpa`; per site e.g. `spb.home.arpa`, or a name under `.internal`) is answered locally, and `home.arpa` always stays local. Routers do not forward each other's zones, so none depends on another; a client that needs several routers' zones needs a resolver of its own that routes each zone to its router |
 | On-page RPC polling | Operational dashboard, not permanent monitoring or traffic accounting |
@@ -665,7 +666,8 @@ config rule
 | `list server '/home.arpa/'` | Avoid the observed invalid joined dnsmasq `list local` output |
 
 DNS names do not require replacing client-wide DNS. The Linux reference uses
-systemd-resolved route-only `~home.arpa` with a fixed Ygg `IfName: ygg0` and a
+systemd-resolved route-only `~home.arpa` (or `~spb.internal` for that site)
+with a fixed Ygg `IfName: ygg0` and a
 service drop-in after the interface exists. Resolver order in resolv.conf is
 failover, not suffix routing. A persistent NetworkManager TUN profile may
 occupy the desired TUN before Yggdrasil. Keep Android's normal DNS stack and
@@ -709,6 +711,7 @@ it does not install or copy every referenced project's complete stack.
 | [luci-app-wrtbwmon](https://github.com/brvphoenix/luci-app-wrtbwmon) | IPv6-aware MAC identity; traffic accounting is outside scope |
 | [OpenWrt](https://openwrt.org/), [odhcpd](https://github.com/openwrt/odhcpd), [LuCI](https://github.com/openwrt/luci) | Native network/configuration/UI stack, with dnsmasq, firewall4 and rpcd |
 | [RFC 8375](https://datatracker.ietf.org/doc/html/rfc8375) | The home.arpa namespace |
+| [ICANN resolution 2024.07.29.06](https://www.icann.org/en/board-activities-and-meetings/materials/approved-resolutions-special-meeting-of-the-icann-board-29-07-2024-en#section2.a) | Permanent reservation of .internal for private-use applications |
 
 The project's contribution is this particular routed-LAN profile, native
 state/lifetime model, safe Pin/Unpin workflow and optional integration, not a

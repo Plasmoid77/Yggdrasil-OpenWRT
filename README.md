@@ -12,7 +12,7 @@ Yggdrasil through the router, Yggdrasil reaches the LAN only from trusted nodes.
 Yggdrasil peers -> OpenWrt -> routed /64 -> LAN clients
                      |                       no Ygg daemon needed
                      +-- optional LuCI inventory
-                     +-- optional home.arpa DNS
+                     +-- optional private DNS (home.arpa / site.internal)
 ```
 
 ## Start here
@@ -38,17 +38,62 @@ installation. Do not run it merely to update documentation or LuCI.
 | Core | Routed Ygg `/64` overlaid on the LAN's own IPv6, DHCPv6 reservations, trusted-source firewall policy, LAN-to-Yggdrasil egress | [Standalone router deployer](deploy/deploy-openwrt-yggdrasil.sh) |
 | Status | DHCP-lifetime inventory, persistent pins and safe Pin/Unpin | [LuCI/rpcd source](source/yggdrasil-status/) |
 | DNS | Optional names and trusted DNS access over Ygg | Native dnsmasq configuration in the deployer |
-| Linux client | Route only the routers' zones (`home.arpa` by default) to the router | [Client helper and systemd drop-in](client/linux/) |
+| Linux client | Route only the routers' zones (`home.arpa` by default, or e.g. `spb.internal`) to the router | [Client helper and systemd drop-in](client/linux/) |
 
 Core routing works without status or DNS. The automated **default** deploy
 includes both; `--no-status` and `--no-dns` opt out. Architectural optionality
 is not the same thing as the default installation profile.
 
 The design has no NAT66, custom inventory database, background inventory
-daemon or unsolicited `ygg -> lan` forwarding; the LAN's RA/DHCPv6 and ULA
-settings are the operator's and the deployer never rewrites them (2.0; a 1.x
-router is reinstalled, not migrated). Remote access is limited to explicitly
+daemon or unsolicited `ygg -> lan` forwarding. The deployer preserves the
+LAN's DHCPv6 mode, SLAAC flags and ULA; it sets `ra=server` and `ra_default=2`
+so routed replies work without a native uplink. A 1.x router is reinstalled,
+not migrated automatically. Remote access is limited to explicitly
 trusted source addresses; reachability does not imply trust.
+
+## Private DNS zones
+
+The deployer enables DNS by default and serves `home.arpa` unless
+`--dns-domain` selects another zone. Give independent sites distinct names,
+for example `--dns-domain spb.internal` and `--dns-domain blg.internal`.
+`.internal` is [reserved by ICANN for private use](https://www.icann.org/en/board-activities-and-meetings/materials/approved-resolutions-special-meeting-of-the-icann-board-29-07-2024-en#section2.a);
+it does not provide public DNS resolution.
+
+With `spb.internal`, generated names include `router.spb.internal` for the
+router's Ygg node address and `<host>.spb.internal` for a `--host` reservation
+under the routed LAN prefix. `--dns-host NAME=ADDR` adds an explicit address.
+Only trusted Ygg sources can query the router remotely.
+
+Choosing a zone on the router does not configure a remote client's resolver.
+Use split DNS to send only `spb.internal` queries to that router and keep
+Internet DNS on the normal connection or VPN. For several routers, the
+Linux example uses a local dnsmasq to send each zone to its own router;
+the routers do not forward each other's zones. Persist the zone and host
+definitions in the deployer's settings file: an ordinary rerun that omits
+`--dns-domain` returns to `home.arpa`.
+
+See [choosing a zone](docs/installation.md#choose-a-private-dns-zone),
+[Linux split DNS](docs/installation.md#6-optional-linux-split-dns) and
+[DNS diagnosis](docs/operations.md#check-the-configured-zone-and-client-resolver).
+
+## Reservations, status and recovery
+
+`--host` reserves an IPv6 suffix through native odhcpd, in every LAN prefix;
+it does not reserve an IPv4 address. Use a DUID for clients whose DUID does
+not carry their MAC, and include the MAC when the status page should identify
+the device. DHCPv6-capable clients can use the reservation; SLAAC-only clients
+continue using SLAAC. See [reservation setup](docs/installation.md).
+
+LuCI pins are normal `config host` records. Pin defaults to name + MAC;
+address reservations are optional, and Unpin protects existing reservations.
+The page reports current DHCP-backed clients and persistent hosts, not a
+permanent device history. See [the inventory contract](docs/architecture.md#inventory-data-model).
+
+Publishing a status release does not upgrade an installed router. Follow
+[updates](docs/operations.md#update-deliberately) for status-only installation
+or a full deployer rerun. The uplink recovery hook restores missing components
+from saved choices; local custom archives cannot be downloaded again
+automatically. Keep the complete deployment settings and a separate backup.
 
 ## Documentation
 
