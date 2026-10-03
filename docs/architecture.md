@@ -62,7 +62,8 @@ the stock ULA (`network.globals.ula_prefix`, a `/48` carved to `ip6assign`).
 An IPv4-only site therefore ends up with Yggdrasil + ULA on the LAN, a
 dual-stack site with native + ULA + Yggdrasil. Stock IPv6 keeps working as it
 did before the deployer ran; that is the premise, verified on a dual-stack LTE
-router on 2026-09-18 (`docs/history` keeps the 1.x replacement design).
+router on 2026-09-18 (the [changelog](../CHANGELOG.md) records the superseded
+1.x replacement design).
 
 The LAN's RA/DHCPv6 configuration is the operator's. Stock OpenWrt runs the
 hybrid `dhcpv6=server`, `ra=server`, `ra_slaac=1`, `ra_flags` =

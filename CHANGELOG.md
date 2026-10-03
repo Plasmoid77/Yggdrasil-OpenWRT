@@ -18,6 +18,10 @@
 - Documentation now explains private per-site DNS zones, resolver routing,
   reservations, rerun/scope switches, status-only updates and limits of
   saved recovery choices, including local custom archives.
+- Removed the completed 1.9.0 implementation plan from the current tree.
+  Its original remains in Git history; current contracts and release history
+  are in architecture and this changelog. Compatibility downloads and the
+  incident/hardware evidence remain available.
 
 ## Deployer 3.0.1 and status source safety fixes
 
