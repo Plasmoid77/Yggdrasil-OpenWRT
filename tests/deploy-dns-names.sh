@@ -194,6 +194,14 @@ rollback
 grep -qx 'gen 1' "$TMP/init.log" || fail 'names not rebuilt on rollback'
 [ "$(grep -n . "$TMP/init.log" | grep 'gen 1' | cut -d: -f1)" -lt "$(grep -n 'dnsmasq restart' "$TMP/init.log" | cut -d: -f1)" ] \
     || fail 'names rebuilt after the dnsmasq restart'
+# a failed upgrade: the generator of the restored dns.conf comes back with it
+BACKUP_DIR="$TMP/bk3"; mkdir -p "$BACKUP_DIR"; echo 'zone home.arpa' > "$BACKUP_DIR/dns.conf"
+printf 'original dhcp\n' > "$BACKUP_DIR/dhcp"
+printf '#!/bin/sh\necho "old gen $YGG_DNS_NOSIGNAL" >> "%s/init.log"\n' "$TMP" > "$BACKUP_DIR/dns-hosts"; chmod 755 "$BACKUP_DIR/dns-hosts"
+cp "$DNS_GEN" "$TMP/gen.new"; : > "$TMP/init.log"
+rollback
+grep -qx 'old gen 1' "$TMP/init.log" || fail "rollback ran the new generator on the old settings: $(cat "$TMP/init.log")"
+cp "$TMP/gen.new" "$DNS_GEN"; chmod 755 "$DNS_GEN"
 # a first run (no dns.conf before): settings and generated names removed
 BACKUP_DIR="$TMP/bk2"; mkdir -p "$BACKUP_DIR"; : > "$BACKUP_DIR/dns.conf.absent"
 printf 'original dhcp\n' > "$BACKUP_DIR/dhcp"
@@ -317,6 +325,18 @@ done
 grep -qE 'cfg0d1e2f|cfg0f0f0f' "$TMP/skip.log" && fail "an entry without name or suffix was reported: $(cat "$TMP/skip.log")"
 gen 2> "$TMP/skip.log"
 [ -s "$TMP/skip.log" ] && fail "an unchanged state reported again: $(cat "$TMP/skip.log")"
+# a new invalid lease alone, then that lease changed: reported although no
+# published name changes; the same state again stays quiet
+printf '%s\n' 'dhcp.cfg8=host' "dhcp.cfg8.name='bad name'" "dhcp.cfg8.hostid='44'" >> "$TMP/uci.show"
+cp "$OUT" "$TMP/out.before"
+gen 2> "$TMP/skip.log"
+grep -q 'cfg8:' "$TMP/skip.log" || fail "a new invalid lease alone was not reported: $(cat "$TMP/skip.log")"
+cmp -s "$OUT" "$TMP/out.before" || fail 'an invalid lease changed the published names'
+sed -i "s/^dhcp.cfg8.name='bad name'$/dhcp.cfg8.name='bad_name'/" "$TMP/uci.show"
+gen 2> "$TMP/skip.log"
+grep -q "cfg8: hostname 'bad_name'" "$TMP/skip.log" || fail "a changed invalid lease was not reported: $(cat "$TMP/skip.log")"
+gen 2> "$TMP/skip.log"
+[ -s "$TMP/skip.log" ] && fail "the same skipped set reported again: $(cat "$TMP/skip.log")"
 echo 'PASS: names from Static Leases'
 
 # 13. the init script: no instance, a reload trigger on dhcp, runs the generator

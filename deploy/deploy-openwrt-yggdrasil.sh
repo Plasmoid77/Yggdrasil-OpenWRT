@@ -920,6 +920,9 @@ rollback() {
         if [ -f "$BACKUP_DIR/dns.conf" ]; then
             if backup_file "$BACKUP_DIR/dns.conf" "$DNS_CONF"; then
                 warn "  restored $DNS_CONF"
+                if [ -f "$BACKUP_DIR/dns-hosts" ]; then
+                    backup_file "$BACKUP_DIR/dns-hosts" "$DNS_GEN" || _rb_failed=1
+                fi
                 if [ -x "$DNS_GEN" ]; then YGG_DNS_NOSIGNAL=1 "$DNS_GEN" || _rb_failed=1; fi
             else
                 _rb_failed=1
@@ -1090,6 +1093,10 @@ stage_preflight() {
         # the DNS names' settings live beside UCI (stage 6); "absent" marks a first run
         if [ -f "$DNS_CONF" ]; then
             backup_file "$DNS_CONF" "$BACKUP_DIR/dns.conf" || die "cannot back up $DNS_CONF"
+            # its generator too: dns.conf and the generator change format together (3.1)
+            if [ -f "$DNS_GEN" ]; then
+                backup_file "$DNS_GEN" "$BACKUP_DIR/dns-hosts" || die "cannot back up $DNS_GEN"
+            fi
         else
             : > "$BACKUP_DIR/dns.conf.absent" || die "cannot record absent DNS configuration"
         fi
@@ -2166,6 +2173,7 @@ st="$(ifstatus "$iface" 2>/dev/null)"
 node="$(printf '%s' "$st" | jsonfilter -e '@["ipv6-address"][0].address' 2>/dev/null)"
 pfx="$(printf '%s' "$st" | jsonfilter -e '@["ipv6-prefix"][0].address' 2>/dev/null)"
 if [ -z "$node" ]; then
+	rm -f "$dir/.yggdrasil-$iface.skipped"
 	[ -e "$out" ] || exit 0
 	rm -f "$out"
 else
@@ -2173,6 +2181,7 @@ else
 	# dnsmasq skips dot files, so it never reads a half-written one
 	tmp="$dir/.yggdrasil-$iface.$$"
 	skip="$dir/.yggdrasil-$iface.skip.$$"
+	seen="$dir/.yggdrasil-$iface.skipped"
 	# dns.conf first, then 'uci show dhcp' on stdin: section rows
 	# "dhcp.<s>=host", option rows "dhcp.<s>.<option>='<value>'"
 	uci -q show dhcp 2>/dev/null | awk -v node="$node" -v pfx="$pfx" -v skip="$skip" '
@@ -2218,14 +2227,15 @@ else
 				print addr(pfx, id), name "." zone
 			}
 		}' "$conf" - > "$tmp" && chmod 644 "$tmp" || { rm -f "$tmp" "$skip"; exit 1; }
-	if cmp -s "$tmp" "$out"; then rm -f "$tmp" "$skip"; exit 0; fi
-	mv -f "$tmp" "$out"
-	# reported once, when the published names change
-	if [ -s "$skip" ]; then
+	# skipped entries are reported when their set changes (tmpfs state, a dot
+	# file dnsmasq does not read), independent of the published names
+	if [ -s "$skip" ] && ! cmp -s "$skip" "$seen"; then
 		if [ -n "${YGG_DNS_NOSIGNAL:-}" ]; then sed 's/^/yggdrasil-dns: skipped /' "$skip" >&2
 		else sed 's/^/skipped /' "$skip" | logger -t yggdrasil-dns; fi
 	fi
-	rm -f "$skip"
+	if [ -s "$skip" ]; then mv -f "$skip" "$seen"; else rm -f "$skip" "$seen"; fi
+	if cmp -s "$tmp" "$out"; then rm -f "$tmp"; exit 0; fi
+	mv -f "$tmp" "$out"
 fi
 [ -z "${YGG_DNS_NOSIGNAL:-}" ] || exit 0
 # dnsmasq rereads its hosts files on SIGHUP, as odhcpd's lease trigger asks it
