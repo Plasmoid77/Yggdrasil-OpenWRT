@@ -144,9 +144,9 @@ for the recorded rare pending-interface race, Wi-Fi bootstrap and detached
 execution. Do not assume every SSH path survives the restart.
 
 One run covers the core, the status module and the DNS module (section 5): it publishes
-`router.<zone>` for the router, `<name>.<zone>` for every `--host` reservation
-and `--dns-host NAME=ADDR` for anything else, and opens port 53 to the trusted
-addresses only. The zone is `--dns-domain` (default `home.arpa`; one per site,
+`router.<zone>` for the router, `<name>.<zone>` for every reservation with an
+IPv6 suffix (`--host`, LuCI Static Leases, Pin) and `--dns-host NAME=ADDR` for
+anything else, and opens port 53 to the trusted addresses only. The zone is `--dns-domain` (default `home.arpa`; one per site,
 e.g. `spb.home.arpa`, or a name under `.internal`). The names are generated
 from the node's current address and routed /64 into `/tmp/hosts` on every
 ifup of the Ygg interface, so they follow a node key changed later in LuCI; a
@@ -210,11 +210,26 @@ sh deploy-openwrt-yggdrasil.sh --yes --config /root/ygg.conf
 ```
 
 The equivalent command-line option is `--dns-domain spb.internal`.
-`router.spb.internal` resolves to the router's Ygg node address;
-`--host nas=<MAC>=10` generates `nas.spb.internal` under the router's
-routed `/64` with suffix `::10`. `--dns-host` can name another explicit
-address. The generated hosts file follows the router's current key; a remote
-client's configured DNS-server address must be updated after a key change.
+`router.spb.internal` resolves to the router's Ygg node address. Every
+reservation with a hostname and an IPv6 suffix is named under the router's
+routed `/64` — `nas.<zone>` -> `<routed /64>::10` — whichever way it was
+made (since deployer 3.1):
+
+| Record | Where to manage it | Result |
+| --- | --- | --- |
+| A LAN device | LuCI **Network → DHCP and DNS → Static Leases**: Hostname, MAC, IPv6-Suffix, then Save & Apply; or `--host nas=<MAC>=10`; or Pin on the status page | `nas.<zone>` at `<routed /64>::10`, rebuilt seconds after Apply and on every key or prefix change |
+| A fixed address (another node's `200::/7` address) | LuCI **Hostnames** with the full name `nas.<zone>`; or `--dns-host nas=<ADDR>` (kept there as `ygg_name_N`) | a plain dnsmasq record |
+| The router | — | `router.<zone>` at the node address |
+
+A lease without an IPv6 suffix (an IPv4-only reservation) gets no Ygg name.
+A hostname that is not one DNS label (`my_tv`), suffix `0`, a suffix over 64
+bits and a second lease with an already used name are skipped and logged
+(`logread -e yggdrasil-dns`). Clients that do not use DHCPv6 — Android, usually
+iOS — never take the reserved suffix and cannot get a stable Ygg name. The
+`ygg_name_N` records are rewritten from `--dns-host` on every run; keep your
+own fixed records under other names. The generated names follow the router's
+current key; a remote client's configured DNS-server address must be updated
+after a key change.
 
 For another site, use `blg.internal` in its own settings. Each router serves
 its configured zone locally; `home.arpa` also remains local, but changing the
@@ -341,7 +356,8 @@ one version apart.
 `/etc/config` survives a sysupgrade; the deployer's own files elsewhere do not
 by themselves. Every run lists them in `/etc/sysupgrade.conf` (the hotplug
 guard, the peer and restore hooks, `/etc/yggdrasil-openwrt`, and with the DNS
-module `/etc/hotplug.d/iface/60-yggdrasil-dns`); `sysupgrade -l` shows them.
+module `/etc/hotplug.d/iface/60-yggdrasil-dns`, `/etc/init.d/yggdrasil-dns`
+and its `/etc/rc.d` link); `sysupgrade -l` shows them.
 
 Packages installed by hand are not carried into a new image: an attended
 sysupgrade rebuilds it with the feed packages (so a `--ygg-edge` build falls
@@ -671,9 +687,9 @@ TCP and UDP from the trusted sources, so port 53 is reachable for them and for
 no one else.
 
 These hand-written records hold fixed addresses. The deployer does not write
-them: it generates the same names from `/etc/yggdrasil-openwrt/dns.conf` into
-`/tmp/hosts/yggdrasil-<iface>` on every `ifup` of the Ygg interface, so they
-follow a node key changed later. Delete hand-written records like these before
+them: it generates the same names from the router's node address and the
+reservations into `/tmp/hosts/yggdrasil-<iface>`, so they follow a node key
+changed later. Delete hand-written records like these before
 running the deployer, or the old answers stay beside the generated ones.
 
 ```sh

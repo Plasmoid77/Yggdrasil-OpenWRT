@@ -32,18 +32,20 @@ HOTPLUG_FILE='/etc/hotplug.d/net/50-yggdrasil-pending'
 PEER_HOOK='/etc/hotplug.d/iface/70-yggdrasil-peers'
 DNS_HOOK='/etc/hotplug.d/iface/60-yggdrasil-dns'
 DNS_DIR='/etc/yggdrasil-openwrt'
+DNS_INIT='/etc/init.d/yggdrasil-dns'
+DNS_INIT_LINK='/etc/rc.d/S95yggdrasil-dns'
 RESTORE_HOOK='/etc/hotplug.d/iface/80-yggdrasil-restore'
 SYSUPGRADE_CONF="$TMP/sysupgrade.conf"
 printf '## This file contains files and directories that should\n/etc/example\n' > "$SYSUPGRADE_CONF"
 DRY_RUN=0; DO_DNS=1
 keep_on_sysupgrade
 keep_on_sysupgrade
-for k in "$HOTPLUG_FILE" "$PEER_HOOK" "$RESTORE_HOOK" "$DNS_HOOK" "$DNS_DIR"; do
+for k in "$HOTPLUG_FILE" "$PEER_HOOK" "$RESTORE_HOOK" "$DNS_HOOK" "$DNS_INIT" "$DNS_INIT_LINK" "$DNS_DIR"; do
     [ "$(grep -cxF "$k" "$SYSUPGRADE_CONF")" = 1 ] || fail "$k not listed exactly once: $(cat "$SYSUPGRADE_CONF")"
 done
 grep -qxF '/etc/example' "$SYSUPGRADE_CONF" || fail "an operator's own line was lost"
 DO_DNS=0; printf '/etc/example\n' > "$SYSUPGRADE_CONF"; keep_on_sysupgrade
-grep -q 60-yggdrasil-dns "$SYSUPGRADE_CONF" && fail 'DNS hook listed with --no-dns'
+grep -q yggdrasil-dns "$SYSUPGRADE_CONF" && fail 'DNS hook or init script listed with --no-dns'
 grep -qxF "$DNS_DIR" "$SYSUPGRADE_CONF" || fail 'the project directory (restore copy) not listed with --no-dns'
 DO_DNS=1; printf '/etc/example\n' > "$SYSUPGRADE_CONF"; DRY_RUN=1; keep_on_sysupgrade
 [ "$(cat "$SYSUPGRADE_CONF")" = '/etc/example' ] || fail 'dry run wrote the keep list'
