@@ -3,7 +3,7 @@
 ## Unreleased — deployer 3.0.2: private zones in dnsmasq `local`
 
 - Stage 6 keeps `home.arpa` and the configured zone in dnsmasq's single
-  **Local server** value (`local '/lan/home.arpa/spb.internal/'`) instead of
+  **Local server** value (`local '/lan/home.arpa/<zone>/'`) instead of
   `server=/zone/` list entries, and a rerun moves the old entries there. Answers
   are unchanged (same dnsmasq directive; compared on the SPb router with an
   isolated dnsmasq 2.93), but proxy add-ons such as Forkop, which replace the

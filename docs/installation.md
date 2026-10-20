@@ -224,9 +224,9 @@ helper's `zones` to the chosen zone. With several routers use the
 
 The router answers both zones itself and never forwards them: since deployer
 3.0.2 they live in dnsmasq's **Local server** value beside OpenWrt's own
-domain — LuCI **Network → DHCP and DNS**, `option local '/lan/home.arpa/spb.internal/'`.
+domain — LuCI **Network → DHCP and DNS**, `option local '/lan/home.arpa/<zone>/'`.
 It is one value, not a list; keep these domains in it when you edit the field.
-Up to 3.0.1 they were `server` entries (`/home.arpa/`, `/spb.internal/`); a
+Up to 3.0.1 they were `server` entries (`/home.arpa/`, `/<zone>/`); a
 rerun moves them. Proxy add-ons such as Forkop replace the whole server list
 with their own resolver but leave **Local server** alone, so the zones stay
 private while such an add-on runs. Forkop restores the server list it saved at its
