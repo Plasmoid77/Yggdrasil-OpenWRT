@@ -16,7 +16,7 @@
 set -u
 umask 077
 
-VERSION='3.0.2'
+VERSION='3.1.0'
 SELF="${0##*/}"
 # Piped straight from a URL — wget -qO- ... | sh -s -- ... — $0 is the shell, so
 # the banner and the usage text would announce themselves as "sh".
@@ -162,8 +162,9 @@ Trusted remote access (firewall src_ip allow-list):
 DNS module (on by default — see also --dns / --no-dns):
   --dns-domain NAME     Private namespace (default: $DNS_DOMAIN)
   --dns-router NAME     Hostname for this router (default: $DNS_ROUTER)
-  --dns-host NAME=ADDR  Extra record. Repeatable; repeat a NAME to give it
-                        several addresses.
+  --dns-host NAME=ADDR  Extra record, kept as a LuCI Hostnames entry
+                        (config domain ygg_name_N). Repeatable; repeat a NAME
+                        to give it several addresses.
 
 LAN (the routed /64 is added beside the LAN's existing IPv6 prefixes; the
 stock RA/DHCPv6 mode is kept - the router is made RA server and default router
@@ -2118,26 +2119,24 @@ stage_firewall() {
 # and signals dnsmasq to reread it. A hotplug script runs it whenever the Ygg
 # interface comes up, changes its addresses (a node key changed in LuCI or
 # with uci) or goes down; nothing is written to flash at run time.
+# Since 3.1 the device names come from every 'config host' with a hostname and
+# an IPv6 suffix (hostid): LuCI Static Leases, --host and Pin all write that,
+# so one list in Network -> DHCP and DNS is the source. An init script without
+# a daemon reruns the generator when the dhcp configuration changes (LuCI
+# Save & Apply), the way /etc/init.d/system follows its own config.
 DNS_DIR='/etc/yggdrasil-openwrt'
 DNS_CONF="$DNS_DIR/dns.conf"
 DNS_GEN="$DNS_DIR/dns-hosts"
 DNS_HOOK='/etc/hotplug.d/iface/60-yggdrasil-dns'
+DNS_INIT='/etc/init.d/yggdrasil-dns'
+DNS_INIT_LINK='/etc/rc.d/S95yggdrasil-dns'
 DNS_HOSTS_DIR='/tmp/hosts'
 
 dns_conf_text() {
     printf '# Written by Yggdrasil-OpenWRT (deploy-openwrt-yggdrasil.sh) on every run.\n'
-    printf '# Read by %s: "iface", "zone", "router", "host NAME HOSTID", "static NAME ADDRESS".\n' "$DNS_GEN"
+    printf '# Read by %s: "iface", "zone", "router". Device names come from\n' "$DNS_GEN"
+    printf '# config host (Static Leases), extra records are config domain (Hostnames).\n'
     printf 'iface %s\nzone %s\nrouter %s\n' "$IFACE" "$DNS_DOMAIN" "$DNS_ROUTER"
-    while IFS=' ' read -r _hn _hkt _hk _hid; do
-        [ -n "$_hn" ] && printf 'host %s %s\n' "$(lower_str "$_hn")" "$_hid"
-    done <<HOSTS_EOF
-$HOSTS
-HOSTS_EOF
-    while IFS= read -r _dh; do
-        [ -n "$_dh" ] && printf 'static %s %s\n' "$(lower_str "${_dh%%=*}")" "${_dh#*=}"
-    done <<DNS_EOF
-$DNS_HOSTS
-DNS_EOF
     return 0
 }
 
@@ -2146,11 +2145,13 @@ dns_gen_text() {
     cat <<'EOF' | awk -v fn="$(addr_awk)" '$0 == "@ADDR_AWK@" { print fn; next } { print }'
 #!/bin/sh
 # Written by Yggdrasil-OpenWRT (deploy-openwrt-yggdrasil.sh). Publishes this
-# router's Yggdrasil names (the router, --host reservations, --dns-host) as a
-# hosts file in dnsmasq's hosts directory, built from the node's current
-# address and routed /64, so the names follow a node key changed by hand.
-# Settings: /etc/yggdrasil-openwrt/dns.conf. Run by
-# /etc/hotplug.d/iface/60-yggdrasil-dns and by the deployer.
+# router's Yggdrasil names as a hosts file in dnsmasq's hosts directory: the
+# router at its node address, and every 'config host' with a hostname and an
+# IPv6 suffix (LuCI Static Leases, --host, Pin) at <routed /64>::<suffix>,
+# so the names follow a node key changed by hand. An entry that cannot be a
+# name is skipped and logged. Settings: /etc/yggdrasil-openwrt/dns.conf. Run by
+# /etc/hotplug.d/iface/60-yggdrasil-dns, /etc/init.d/yggdrasil-dns (dhcp
+# changes) and the deployer.
 conf="${YGG_DNS_CONF:-/etc/yggdrasil-openwrt/dns.conf}"
 dir="${YGG_HOSTS_DIR:-/tmp/hosts}"
 [ -r "$conf" ] || exit 0
@@ -2171,20 +2172,60 @@ else
 	mkdir -p "$dir"
 	# dnsmasq skips dot files, so it never reads a half-written one
 	tmp="$dir/.yggdrasil-$iface.$$"
-	awk -v node="$node" -v pfx="$pfx" '
+	skip="$dir/.yggdrasil-$iface.skip.$$"
+	# dns.conf first, then 'uci show dhcp' on stdin: section rows
+	# "dhcp.<s>=host", option rows "dhcp.<s>.<option>='<value>'"
+	uci -q show dhcp 2>/dev/null | awk -v node="$node" -v pfx="$pfx" -v skip="$skip" '
 @ADDR_AWK@
-		$1 == "zone"   { zone = $2 }
-		$1 == "router" { router = $2 }
-		$1 == "host"   { hn[++nh] = $2; hid[nh] = $3 }
-		$1 == "static" { sn[++ns] = $2; sa[ns] = $3 }
+		function unq(s) {
+			if (substr(s, 1, 1) == SQ) s = substr(s, 2)
+			if (substr(s, length(s)) == SQ) s = substr(s, 1, length(s) - 1)
+			return s
+		}
+		BEGIN { SQ = sprintf("%c", 39) }
+		FNR == NR {
+			if ($1 == "zone") zone = $2
+			if ($1 == "router") router = $2
+			next
+		}
+		{
+			e = index($0, "="); k = substr($0, 1, e - 1); v = substr($0, e + 1)
+			n = split(k, p, ".")
+			if (n == 2 && v == "host") { sec[++ns] = p[2]; next }
+			if (n != 3) next
+			if (p[3] == "name") nm[p[2]] = unq(v)
+			else if (p[3] == "hostid") hid[p[2]] = unq(v)
+		}
 		END {
 			if (zone == "") exit
-			if (router != "") print node, router "." zone
-			if (pfx != "") for (i = 1; i <= nh; i++) print addr(pfx, hid[i]), hn[i] "." zone
-			for (i = 1; i <= ns; i++) print sa[i], sn[i] "." zone
-		}' "$conf" > "$tmp" && chmod 644 "$tmp" || { rm -f "$tmp"; exit 1; }
-	if cmp -s "$tmp" "$out"; then rm -f "$tmp"; exit 0; fi
+			if (router != "") { print node, router "." zone; used[router] = 1 }
+			if (pfx == "") exit
+			for (i = 1; i <= ns; i++) {
+				s = sec[i]; name = tolower(nm[s]); id = tolower(hid[s])
+				# no hostname or no suffix: an IPv4-only lease, nothing to name
+				if (name == "" || id == "") continue
+				if (length(name) > 63 || name !~ /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/) {
+					print s ": hostname " SQ nm[s] SQ " is not one DNS label (letters, digits, -)" > skip; continue
+				}
+				# odhcpd reads the suffix with strtoull(.., 16): an optional 0x
+				sub(/^0x/, "", id)
+				if (id !~ /^[0-9a-f]+$/) { print s ": IPv6 suffix " SQ hid[s] SQ " is not hexadecimal" > skip; continue }
+				sub(/^0+/, "", id)
+				if (id == "") { print s ": IPv6 suffix 0 is the subnet anycast address" > skip; continue }
+				if (length(id) > 16) { print s ": IPv6 suffix " SQ hid[s] SQ " is longer than 64 bits" > skip; continue }
+				if (name in used) { print s ": " name "." zone " is already taken" > skip; continue }
+				used[name] = 1
+				print addr(pfx, id), name "." zone
+			}
+		}' "$conf" - > "$tmp" && chmod 644 "$tmp" || { rm -f "$tmp" "$skip"; exit 1; }
+	if cmp -s "$tmp" "$out"; then rm -f "$tmp" "$skip"; exit 0; fi
 	mv -f "$tmp" "$out"
+	# reported once, when the published names change
+	if [ -s "$skip" ]; then
+		if [ -n "${YGG_DNS_NOSIGNAL:-}" ]; then sed 's/^/yggdrasil-dns: skipped /' "$skip" >&2
+		else sed 's/^/skipped /' "$skip" | logger -t yggdrasil-dns; fi
+	fi
+	rm -f "$skip"
 fi
 [ -z "${YGG_DNS_NOSIGNAL:-}" ] || exit 0
 # dnsmasq rereads its hosts files on SIGHUP, as odhcpd's lease trigger asks it
@@ -2205,6 +2246,56 @@ dns_hook_text() {
 case "$ACTION" in ifup|ifupdate|ifdown) ;; *) exit 0 ;; esac
 [ -x '@GEN@' ] && '@GEN@'
 EOF
+}
+
+dns_init_text() {
+    sed -e "s|@GEN@|$DNS_GEN|g" <<'EOF'
+#!/bin/sh /etc/rc.common
+# Written by Yggdrasil-OpenWRT (deploy-openwrt-yggdrasil.sh). No daemon: it
+# rebuilds this router's Yggdrasil DNS names at boot and whenever the dhcp
+# configuration changes (LuCI Save & Apply on Static Leases, or uci commit
+# dhcp + reload_config), so a reservation's name follows at once.
+START=95
+USE_PROCD=1
+
+start_service() { [ -x '@GEN@' ] && '@GEN@'; return 0; }
+reload_service() { [ -x '@GEN@' ] && '@GEN@'; return 0; }
+service_triggers() { procd_add_reload_trigger dhcp; }
+EOF
+}
+
+# --dns-host records are plain dnsmasq records, the ones LuCI lists under
+# Hostnames: config domain sections ygg_name_<n> with NAME.<zone> and the
+# address. Rewritten only when they differ from this run's set, so a rerun
+# leaves dhcp alone; every other domain record belongs to the operator.
+dns_name_records() {
+    _want="$(_n=0
+        printf '%s\n' "$DNS_HOSTS" | while IFS= read -r _dh; do
+            [ -n "$_dh" ] || continue
+            _n=$((_n + 1))
+            printf "dhcp.ygg_name_%s=domain\n" "$_n"
+            printf "dhcp.ygg_name_%s.name='%s.%s'\n" "$_n" "$(lower_str "${_dh%%=*}")" "$DNS_DOMAIN"
+            printf "dhcp.ygg_name_%s.ip='%s'\n" "$_n" "${_dh#*=}"
+        done | sort)"
+    _have="$(uci -q show dhcp 2>/dev/null | grep '^dhcp\.ygg_name_' | sort)"
+    if [ "$_want" = "$_have" ]; then
+        [ -n "$_want" ] && info "Hostnames records for --dns-host unchanged"
+        return 0
+    fi
+    for _s in $(uci -q show dhcp 2>/dev/null | sed -n 's/^dhcp\.\(ygg_name_[^.=]*\)=.*/\1/p'); do
+        uci_del "dhcp.$_s"
+    done
+    _n=0
+    while IFS= read -r _dh; do
+        [ -n "$_dh" ] || continue
+        _n=$((_n + 1))
+        uci_set "dhcp.ygg_name_$_n" 'domain'
+        uci_set "dhcp.ygg_name_$_n.name" "$(lower_str "${_dh%%=*}").$DNS_DOMAIN"
+        uci_set "dhcp.ygg_name_$_n.ip" "${_dh#*=}"
+    done <<DNS_EOF
+$DNS_HOSTS
+DNS_EOF
+    info "Hostnames records for --dns-host: $_n"
 }
 
 # $1 = path, $2 = mode, $3 = content (without the final newline)
@@ -2340,10 +2431,13 @@ stage_dns() {
         *) warn "zone '$DNS_DOMAIN' is not under home.arpa or .internal: an invented top-level name may become a public one" ;;
     esac
 
+    dns_name_records
+
     CHANGED_DNS=1
     put_file "$DNS_CONF" 644 "$(dns_conf_text)" 'DNS settings' || die "cannot write $DNS_CONF"
     put_file "$DNS_GEN"  755 "$(dns_gen_text)"  'DNS generator' || die "cannot write a working $DNS_GEN"
     put_file "$DNS_HOOK" 644 "$(dns_hook_text)" 'DNS hook' || die "cannot write a working $DNS_HOOK"
+    put_file "$DNS_INIT" 755 "$(dns_init_text)" 'DNS init script' || die "cannot write a working $DNS_INIT"
 
     # Trusted nodes reach port 53 through the router rule of stage_firewall.
     if [ "$DO_FIREWALL" -eq 0 ]; then
@@ -2366,6 +2460,10 @@ stage_dns() {
         done
         pidof dnsmasq >/dev/null 2>&1 || die "dnsmasq is not running after restart"
         "$DNS_GEN" || die "$DNS_GEN failed"
+        # start registers the dhcp reload trigger with procd (and runs the
+        # generator again); enable keeps it across reboots
+        "$DNS_INIT" enable >/dev/null 2>&1 || warn "cannot enable $DNS_INIT: names follow Static Leases only after a rerun"
+        "$DNS_INIT" start >/dev/null 2>&1 || warn "cannot start $DNS_INIT: names follow Static Leases only after a reboot"
         ok "DNS module applied"
     fi
 }
@@ -2645,6 +2743,9 @@ HOSTS_EOF
         check 'DNS router name' "$NODE_ADDR" \
             "$(awk -v n="${DNS_ROUTER}.${DNS_DOMAIN}" '$2 == n { print $1; exit }' "$DNS_HOSTS_DIR/yggdrasil-$IFACE" 2>/dev/null)"
         check 'DNS name hook' 'yes' "$([ -f "$DNS_HOOK" ] && [ -x "$DNS_GEN" ] && echo yes || echo no)"
+        check 'DNS reload trigger' 'yes' \
+            "$(ubus call service list '{"name":"yggdrasil-dns","verbose":true}' 2>/dev/null \
+                | tr -d ' \t\n' | grep -q '"package","dhcp"' && echo yes || echo no)"
         check 'no static records' '' "$(dns_uci_records)"
         check 'zone answered locally' 'yes' "$(dns_zone_is_local "$DNS_DOMAIN")"
         check 'dnsmasq running'   'yes' \
@@ -2762,7 +2863,7 @@ SYSUPGRADE_CONF='/etc/sysupgrade.conf'
 
 keep_list() {
     printf '%s\n' "$HOTPLUG_FILE" "$PEER_HOOK" "$RESTORE_HOOK" "$DNS_DIR"
-    [ "$DO_DNS" -eq 1 ] && printf '%s\n' "$DNS_HOOK"
+    [ "$DO_DNS" -eq 1 ] && printf '%s\n' "$DNS_HOOK" "$DNS_INIT" "$DNS_INIT_LINK"
     return 0
 }
 

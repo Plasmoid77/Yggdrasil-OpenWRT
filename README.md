@@ -60,8 +60,10 @@ for example `--dns-domain spb.internal` and `--dns-domain blg.internal`.
 it does not provide public DNS resolution.
 
 With `spb.internal`, generated names include `router.spb.internal` for the
-router's Ygg node address and `<host>.spb.internal` for a `--host` reservation
-under the routed LAN prefix. `--dns-host NAME=ADDR` adds an explicit address.
+router's Ygg node address and `<host>.spb.internal` for every reservation with
+an IPv6 suffix — LuCI Static Leases, `--host` or Pin — under the routed LAN
+prefix. `--dns-host NAME=ADDR` adds an explicit address as a LuCI Hostnames
+record.
 Only trusted Ygg sources can query the router remotely.
 
 Choosing a zone on the router does not configure a remote client's resolver.

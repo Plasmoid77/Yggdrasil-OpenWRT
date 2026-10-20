@@ -422,7 +422,8 @@ unchanged:
 | File | Runs on | Does | Log |
 | --- | --- | --- | --- |
 | `/etc/hotplug.d/net/50-yggdrasil-pending` | the TUN device's `add` | restarts the Ygg interface if it is still pending 10 s later (cold-boot race), at most 5 times per boot | `logread -e yggdrasil-hotplug` |
-| `/etc/hotplug.d/iface/60-yggdrasil-dns` | `ifup`/`ifupdate`/`ifdown` of the Ygg interface | regenerates the names in `/tmp/hosts/yggdrasil-<iface>` (DNS module) | - |
+| `/etc/hotplug.d/iface/60-yggdrasil-dns` | `ifup`/`ifupdate`/`ifdown` of the Ygg interface | regenerates the names in `/tmp/hosts/yggdrasil-<iface>` (DNS module) | `logread -e yggdrasil-dns` (skipped leases) |
+| `/etc/init.d/yggdrasil-dns` (3.1) | boot, and every change of `/etc/config/dhcp` (procd reload trigger: LuCI Save & Apply, `reload_config`); no daemon | the same regeneration, so a Static Lease's name follows at once | as above |
 | `/etc/hotplug.d/iface/70-yggdrasil-peers` | `ifup` of any other interface (an uplink) | sends `addpeer` for every configured peer, so backed-off peers retry at once | `logread -e yggdrasil-peers` |
 | `/etc/hotplug.d/iface/80-yggdrasil-restore` | `ifup` of an uplink | after a sysupgrade, reinstalls missing packages, the project build and the status module with `/etc/yggdrasil-openwrt/deploy.sh --restore` | `logread -e yggdrasil-restore`, `/tmp/yggdrasil-restore.log` |
 
@@ -537,10 +538,12 @@ settings and its hook, stop answering the zone, and give later deployer runs
 of setting it up again:
 
 ```sh
-rm -f /etc/hotplug.d/iface/60-yggdrasil-dns \
+/etc/init.d/yggdrasil-dns disable; /etc/init.d/yggdrasil-dns stop
+rm -f /etc/hotplug.d/iface/60-yggdrasil-dns /etc/init.d/yggdrasil-dns \
       /etc/yggdrasil-openwrt/dns.conf /etc/yggdrasil-openwrt/dns-hosts \
       /tmp/hosts/yggdrasil-*
-sed -i '\|^/etc/hotplug.d/iface/60-yggdrasil-dns$|d' /etc/sysupgrade.conf
+sed -i '\|^/etc/hotplug.d/iface/60-yggdrasil-dns$|d; \|yggdrasil-dns$|d' /etc/sysupgrade.conf
+for s in $(uci -q show dhcp | sed -n 's/^dhcp\.\(ygg_name_[^.=]*\)=.*/\1/p'); do uci delete "dhcp.$s"; done
 uci set dhcp.@dnsmasq[0].local='/lan/home.arpa/'   # the value without /<zone>/
 uci -q del_list dhcp.@dnsmasq[0].server='/<zone>/'  # where a pre-3.0.2 run left it
 uci commit dhcp
@@ -585,9 +588,10 @@ the packages back at the next uplink - and their lines in
 `/etc/sysupgrade.conf`:
 
 ```sh
+/etc/init.d/yggdrasil-dns disable 2>/dev/null; /etc/init.d/yggdrasil-dns stop 2>/dev/null
 rm -f /etc/hotplug.d/iface/80-yggdrasil-restore \
       /etc/hotplug.d/iface/70-yggdrasil-peers \
-      /etc/hotplug.d/iface/60-yggdrasil-dns \
+      /etc/hotplug.d/iface/60-yggdrasil-dns /etc/init.d/yggdrasil-dns \
       /etc/hotplug.d/net/50-yggdrasil-pending \
       /tmp/hosts/yggdrasil-*
 rm -rf /etc/yggdrasil-openwrt

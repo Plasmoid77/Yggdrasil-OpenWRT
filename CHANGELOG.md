@@ -1,5 +1,24 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## Unreleased — deployer 3.1.0: device names from LuCI Static Leases
+
+- The DNS generator publishes `<hostname>.<zone>` at `<routed /64>::<hostid>`
+  for every `config host` with a hostname and an IPv6 suffix, so a reservation
+  made in LuCI Static Leases, with `--host` or with Pin gets its name the same
+  way. Invalid hostnames, suffix 0, suffixes over 64 bits and duplicate names
+  are skipped and logged (`yggdrasil-dns`). The `host` and `static` lines of
+  `dns.conf` are gone: a name no longer outlives its reservation.
+- `/etc/init.d/yggdrasil-dns` (no daemon, procd reload trigger on `dhcp`)
+  regenerates the names after LuCI Save & Apply; it is enabled, kept on
+  sysupgrade and checked by the verification stage.
+- `--dns-host NAME=ADDR` is written as LuCI Hostnames records
+  (`config domain ygg_name_N`, rewritten only when they differ, following a
+  zone change); other domain records stay the operator's.
+- A reservation removed by hand (LuCI, Unpin) now takes its name with it; up
+  to 3.0.x its `dns.conf` line kept publishing the name until the next rerun
+  without that `--host`. Not yet run on a router; the generator was run
+  read-only on a router's BusyBox against its live configuration.
+
 ## Unreleased — deployer 3.0.2: private zones in dnsmasq `local`
 
 - Stage 6 keeps `home.arpa` and the configured zone in dnsmasq's single
