@@ -1,6 +1,19 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
-## Unreleased — deployer 3.1.0: device names from LuCI Static Leases
+## 2026-10-20 — both routers on OpenWrt 25.12.6
+
+- SPb and BLG were upgraded 25.12.5 → 25.12.6 with `owut`, keeping settings,
+  on deployer 3.1.0. The restore hook put back what the stock image lacked
+  (this project's Yggdrasil build, the status module) within minutes; names,
+  trusted access and peers came back unchanged. BLG, reachable only over
+  Yggdrasil, was flashed from an image downloaded and verified first
+  (`owut download`, `owut verify`, `sysupgrade -T`) and was back over
+  Yggdrasil about a minute after the flash.
+- `owut` sends the feeds in `customfeeds.list` to the build server, which
+  refuses third-party repositories ("Repository not allowed"): see the owut
+  notes in the installation guide.
+
+## 2026-10-20 — deployer 3.1.0: device names from LuCI Static Leases
 
 - The DNS generator publishes `<hostname>.<zone>` at `<routed /64>::<hostid>`
   for every `config host` with a hostname and an IPv6 suffix, so a reservation
@@ -19,9 +32,11 @@
   without that `--host`. Run on the SPb router (OpenWrt 25.12.5, upgrade from
   3.0.1, zones moved to `local` on the way): verification 27 OK / 0 FAIL; a
   lease added and then deleted through ubus `uci` commit, as LuCI's Apply does,
-  got and lost its name in about 2 s.
+  got and lost its name in about 2 s. Then BLG (Yggdrasil-only access) from
+  3.0.1 under a detached recovery watchdog: 25 OK / 0 FAIL, network and
+  firewall byte-identical, the same trigger test in about 3 s.
 
-## Unreleased — deployer 3.0.2: private zones in dnsmasq `local`
+## 2026-10-20 — deployer 3.0.2: private zones in dnsmasq `local`
 
 - Stage 6 keeps `home.arpa` and the configured zone in dnsmasq's single
   **Local server** value (`local '/lan/home.arpa/<zone>/'`) instead of
@@ -31,7 +46,8 @@
   whole server list with their own resolver, no longer drop the zones and send
   their unknown names upstream. A value that is not a plain domain list is left
   alone with a warning and the zones stay in the server list. Verification
-  checks that the zone is answered locally. Not yet run on a router.
+  checks that the zone is answered locally. Run on both routers as part of the
+  3.1.0 upgrade: the old server entries moved to `local`, answers unchanged.
 
 ## 2026-10-03 — status v7.0.1 released, SPb and BLG validated
 

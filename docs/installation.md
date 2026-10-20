@@ -377,7 +377,8 @@ same as a first deployment). A router whose uplink itself needs packages from
 outside the official feeds (a modem stack) has to get those back first.
 
 Running the attended sysupgrade with `owut` (validated on a real 25.12.5 →
-25.12.5 rebuild on 2026-10-01):
+25.12.5 rebuild on 2026-10-01 and 25.12.5 → 25.12.6 on two routers on
+2026-10-20):
 
 - after a `--ygg-edge` run, `owut check` reports the feed's Yggdrasil as a
   downgrade and refuses; `owut upgrade --force` is correct here, the restore
@@ -387,6 +388,15 @@ Running the attended sysupgrade with `owut` (validated on a real 25.12.5 →
   feed line in `/etc/apk/repositories.d/customfeeds.list` survives (a package
   conffile), but its signing key in `/etc/apk/keys/` does not: list the key in
   `/etc/sysupgrade.conf`, or every later `apk update` fails on that feed;
+  `-r` takes the top-level package (removing a dependency has no effect);
+- `owut` passes the active feed lines of `customfeeds.list` to the build
+  server, which refuses third-party repositories ("Repository not allowed",
+  status 400) before building anything. Comment those lines out for the
+  build and uncomment them after the flash, before reinstalling the
+  packages;
+- on a router reachable only through Yggdrasil, download and check the image
+  first (`owut download`, `owut verify`, `sysupgrade -T /tmp/firmware.bin`)
+  and flash it with `owut install`;
 - if that package is the uplink (a modem protocol), the restore hook waits for
   another uplink; with a second one (a Wi-Fi station) it restored everything
   within about three minutes of that uplink coming up, with no network restart.
