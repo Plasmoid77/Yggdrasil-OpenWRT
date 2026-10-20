@@ -1,5 +1,17 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## Unreleased — deployer 3.0.2: private zones in dnsmasq `local`
+
+- Stage 6 keeps `home.arpa` and the configured zone in dnsmasq's single
+  **Local server** value (`local '/lan/home.arpa/<zone>/'`) instead of
+  `server=/zone/` list entries, and a rerun moves the old entries there. Answers
+  are unchanged (same dnsmasq directive; compared on the SPb router with an
+  isolated dnsmasq 2.93), but proxy add-ons such as Forkop, which replace the
+  whole server list with their own resolver, no longer drop the zones and send
+  their unknown names upstream. A value that is not a plain domain list is left
+  alone with a warning and the zones stay in the server list. Verification
+  checks that the zone is answered locally. Not yet run on a router.
+
 ## 2026-10-03 — status v7.0.1 released, SPb and BLG validated
 
 - Published `status-v7.0.1` as latest from runtime source commit `383ce818`.

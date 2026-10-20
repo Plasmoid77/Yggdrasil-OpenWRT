@@ -541,12 +541,13 @@ rm -f /etc/hotplug.d/iface/60-yggdrasil-dns \
       /etc/yggdrasil-openwrt/dns.conf /etc/yggdrasil-openwrt/dns-hosts \
       /tmp/hosts/yggdrasil-*
 sed -i '\|^/etc/hotplug.d/iface/60-yggdrasil-dns$|d' /etc/sysupgrade.conf
-uci del_list dhcp.@dnsmasq[0].server='/<zone>/'
+uci set dhcp.@dnsmasq[0].local='/lan/home.arpa/'   # the value without /<zone>/
+uci -q del_list dhcp.@dnsmasq[0].server='/<zone>/'  # where a pre-3.0.2 run left it
 uci commit dhcp
 /etc/init.d/dnsmasq restart
 ```
 
-`/home.arpa/` may stay in that list: RFC 8375 keeps the name local anyway.
+`home.arpa` may stay local: RFC 8375 keeps the name local anyway.
 There is no DNS rule of its own to delete since deployer 2.0.4: trusted nodes
 reach port 53 through `YGG-Trusted-to-Router`, which also serves SSH and LuCI
 (an `ygg_dns` rule left by an older run can simply be deleted). A record set
