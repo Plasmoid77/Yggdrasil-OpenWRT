@@ -222,6 +222,20 @@ zone does not create aliases for the old generated names. Match the Linux
 helper's `zones` to the chosen zone. With several routers use the
 [per-zone client forwarder](#several-routers-a-local-dnsmasq).
 
+The router answers both zones itself and never forwards them: since deployer
+3.0.2 they live in dnsmasq's **Local server** value beside OpenWrt's own
+domain — LuCI **Network → DHCP and DNS**, `option local '/lan/home.arpa/spb.internal/'`.
+It is one value, not a list; keep these domains in it when you edit the field.
+Up to 3.0.1 they were `server` entries (`/home.arpa/`, `/spb.internal/`); a
+rerun moves them. Proxy add-ons such as Forkop replace the whole server list
+with their own resolver but leave **Local server** alone, so the zones stay
+private while such an add-on runs. Forkop restores the server list it saved at its
+first start when it stops; if you changed the zone while it ran, that copy may
+bring the old zone back as a harmless extra local domain — delete it from the
+server list by hand. When the value is not a plain domain list
+(an address after the last `/`), the deployer leaves it untouched, warns and
+keeps the zones in the server list as before.
+
 Changing a zone does not add trusted clients or configure their DNS.
 `--no-dns` skips DNS configuration and leaves an existing DNS module intact;
 see [removal](operations.md#remove-only-the-dns-module) to actually remove it.
@@ -633,7 +647,7 @@ defaults to no IPv4 reservation.
 This is the manual setup with fixed records. For an automated deployment,
 use [the generated private zone](#choose-a-private-dns-zone) instead. The
 example below uses `home.arpa`; for a custom manual zone, replace the record
-suffixes and its `server` entry consistently, and still keep `home.arpa`
+suffixes and its **Local server** domain consistently, and still keep `home.arpa`
 local. The status module gets a custom suffix from the deployer's `dns.conf`;
 manual DNS records alone do not change that suffix.
 
@@ -646,8 +660,8 @@ uci set dhcp.ygg_mydevice='domain'
 uci set dhcp.ygg_mydevice.name='mydevice.home.arpa'
 uci set dhcp.ygg_mydevice.ip='<DEVICE_CANONICAL_YGG_IPV6>'
 
-uci -q del_list dhcp.@dnsmasq[0].server='/home.arpa/'
-uci add_list dhcp.@dnsmasq[0].server='/home.arpa/'
+# one value beside the stock '/lan/', never a list
+uci set dhcp.@dnsmasq[0].local='/lan/home.arpa/'
 uci commit dhcp
 /etc/init.d/dnsmasq restart
 ```

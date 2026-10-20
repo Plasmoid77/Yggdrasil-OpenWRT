@@ -180,4 +180,73 @@ rollback
 [ "$(cat "$DNS_CONF")" = 'zone x.internal' ] || fail 'dns.conf touched although stage 6 did not run'
 echo 'PASS: rollback restores the DNS settings and names'
 
+# 10. the zones go into dnsmasq's single 'local' value, beside OpenWrt's '/lan/'
+eval "$(extract_function dns_local_merge)" || fail 'dns_local_merge not found'
+lm() { dns_local_merge "$@" || echo REFUSED; }
+[ "$(lm '/lan/' '' 'home.arpa spb.internal')" = '/lan/home.arpa/spb.internal/' ] || fail "stock /lan/: $(lm '/lan/' '' 'home.arpa spb.internal')"
+[ "$(lm '' '' 'home.arpa')" = '/home.arpa/' ] || fail "no local value: $(lm '' '' 'home.arpa')"
+[ "$(lm '/lan/home.arpa/spb.internal/' 'spb.internal' 'home.arpa blg.internal')" = '/lan/home.arpa/blg.internal/' ] \
+    || fail "zone change: $(lm '/lan/home.arpa/spb.internal/' 'spb.internal' 'home.arpa blg.internal')"
+[ "$(lm '/LAN/Home.Arpa/office/' '' 'home.arpa')" = '/LAN/Home.Arpa/office/' ] || fail "case/other domains: $(lm '/LAN/Home.Arpa/office/' '' 'home.arpa')"
+[ "$(lm '/lan/home.arpa/.spb.internal./' 'spb.internal' 'home.arpa blg.internal')" = '/lan/home.arpa/blg.internal/' ] \
+    || fail "dotted spelling of a retired zone kept: $(lm '/lan/home.arpa/.spb.internal./' 'spb.internal' 'home.arpa blg.internal')"
+[ "$(lm '/lan/.home.arpa/' '' 'home.arpa')" = '/lan/.home.arpa/' ] || fail "dotted spelling duplicated: $(lm '/lan/.home.arpa/' '' 'home.arpa')"
+for bad in '/lan/192.168.1.1' '/lan/ /home.arpa/' 'lan' '/lan//' '/lan/#'; do
+    [ "$(lm "$bad" '' 'home.arpa')" = REFUSED ] || fail "not refused: '$bad' -> $(lm "$bad" '' 'home.arpa')"
+done
+echo 'PASS: local value merge'
+
+# 11. stage 6 against a fake UCI: upgrade, rerun, zone change, odd 'local'
+UCIDB="$TMP/uci.db"
+uci() {
+    [ "$1" = -q ] && shift
+    _c="$1"; shift
+    case "$_c" in
+        get) awk -v k="$1" 'index($0, k "=") == 1 { print substr($0, length(k) + 2); f = 1 } END { exit !f }' "$UCIDB" ;;
+        set) awk -v k="${1%%=*}" 'index($0, k "=") != 1' "$UCIDB" > "$UCIDB.n"
+             printf '%s\n' "$1" >> "$UCIDB.n"; mv "$UCIDB.n" "$UCIDB" ;;
+        delete) awk -v k="$1" 'index($0, k "=") != 1' "$UCIDB" > "$UCIDB.n"; mv "$UCIDB.n" "$UCIDB" ;;
+        add_list) _o="$(uci get "${1%%=*}" 2>/dev/null || true)"; uci set "${1%%=*}=${_o:+$_o }${1#*=}" ;;
+        del_list) _n="$(uci get "${1%%=*}" 2>/dev/null | tr ' ' '\n' | grep -vxF "${1#*=}" | tr '\n' ' ' | sed 's/ $//')"
+                  if [ -n "$_n" ]; then uci set "${1%%=*}=$_n"; else uci delete "${1%%=*}"; fi ;;
+        show|commit) : ;;
+    esac
+}
+ST="$(extract_function stage_dns | sed 's|/etc/init.d/dnsmasq|dnsmasq_init|g')"
+[ -n "$ST" ] || fail 'stage_dns not found'
+eval "$ST"
+for f in dns_uci_records uci_del uci_set uci_add_list uci_del_list dns_zone_is_local; do
+    body="$(extract_function "$f")"; [ -n "$body" ] || fail "function $f not found in deployer"; eval "$body"
+done
+dnsmasq_init() { :; }; pidof() { return 0; }; put_file() { return 0; }; dhcp_lock() { :; }
+step() { :; }; info() { :; }; ok() { :; }; warn() { echo "$*" >> "$TMP/warn.log"; }; die() { fail "die: $*"; }
+DO_DNS=1; DO_FIREWALL=1; TRUSTED='x'; DRY_RUN=0; DNS_GEN=true; DNS_CONF="$TMP/s6.conf"; DNS_HOOK="$TMP/s6.hook"
+run6() { # $1 old dns.conf zone ('' = none), $2 new zone, then 'key=value' rows
+    _old="$1"; DNS_DOMAIN="$2"; shift 2
+    if [ -n "$_old" ]; then echo "zone $_old" > "$DNS_CONF"; else rm -f "$DNS_CONF"; fi
+    : > "$TMP/warn.log"; printf '%s\n' "dhcp.@dnsmasq[0]=dnsmasq" "$@" > "$UCIDB"
+    stage_dns
+}
+loc() { uci -q get 'dhcp.@dnsmasq[0].local' || echo '<unset>'; }
+srv() { uci -q get 'dhcp.@dnsmasq[0].server' || echo '<unset>'; }
+run6 '' spb.internal 'dhcp.@dnsmasq[0].local=/lan/'
+[ "$(loc)|$(srv)" = '/lan/home.arpa/spb.internal/|<unset>' ] || fail "fresh install: $(loc)|$(srv)"
+run6 spb.internal spb.internal 'dhcp.@dnsmasq[0].local=/lan/' 'dhcp.@dnsmasq[0].server=/home.arpa/ 9.9.9.9 /spb.internal/'
+[ "$(loc)|$(srv)" = '/lan/home.arpa/spb.internal/|9.9.9.9' ] || fail "upgrade from the server list: $(loc)|$(srv)"
+cp "$UCIDB" "$TMP/uci.before"; stage_dns
+cmp -s "$UCIDB" "$TMP/uci.before" || fail "rerun changed UCI: $(cat "$UCIDB")"
+run6 spb.internal blg.internal 'dhcp.@dnsmasq[0].local=/lan/home.arpa/spb.internal/'
+[ "$(loc)|$(srv)" = '/lan/home.arpa/blg.internal/|<unset>' ] || fail "zone change: $(loc)|$(srv)"
+run6 spb.internal home.arpa 'dhcp.@dnsmasq[0].local=/lan/home.arpa/spb.internal/'
+[ "$(loc)" = '/lan/home.arpa/' ] || fail "back to home.arpa: $(loc)"
+[ "$(dns_zone_is_local home.arpa)" = yes ] || fail 'home.arpa not reported local'
+run6 '' spb.internal 'dhcp.@dnsmasq[0].local=/lan/192.168.1.1'
+[ "$(loc)|$(srv)" = '/lan/192.168.1.1|/home.arpa/ /spb.internal/' ] || fail "odd local value: $(loc)|$(srv)"
+grep -q 'server list' "$TMP/warn.log" || fail 'odd local value: no warning'
+[ "$(dns_zone_is_local spb.internal)" = yes ] || fail 'server-list zone not reported local'
+[ "$(dns_zone_is_local blg.internal)" = no ] || fail 'absent zone reported local'
+printf '%s\n' 'dhcp.@dnsmasq[0].local=/spb.internal/9.9.9.9' 'dhcp.@dnsmasq[0].server=127.0.0.42' > "$UCIDB"
+[ "$(dns_zone_is_local spb.internal)" = no ] || fail 'a forwarding local value reported local'
+echo 'PASS: stage 6 keeps the zones in local'
+
 echo 'deploy-dns-names: all checks passed'

@@ -16,7 +16,7 @@
 set -u
 umask 077
 
-VERSION='3.0.1'
+VERSION='3.0.2'
 SELF="${0##*/}"
 # Piped straight from a URL — wget -qO- ... | sh -s -- ... — $0 is the shell, so
 # the banner and the usage text would announce themselves as "sh".
@@ -740,6 +740,11 @@ uci_set() {
 uci_add_list() {
     [ "$DRY_RUN" -eq 1 ] && { printf '    would run: uci add_list %s=%s\n' "$1" "$2" >&2; return 0; }
     uci add_list "$1=$2"
+}
+
+uci_del_list() {
+    [ "$DRY_RUN" -eq 1 ] && { printf '    would run: uci del_list %s=%s\n' "$1" "$2" >&2; return 0; }
+    uci del_list "$1=$2"
 }
 
 uci_changes_redacted() {
@@ -2213,6 +2218,50 @@ dns_uci_records() {
         | sed 's/^dhcp\.\([^=]*\)=domain$/\1/'
 }
 
+# The new value of dnsmasq's UCI 'local' option: $1 the current value
+# ('/lan/' on a stock router), $2 zones to drop, $3 zones to add (both
+# whitespace-separated). Every other domain stays, in its order; domains compare
+# case-insensitively and without leading/trailing dots (dnsmasq reads
+# '/.spb.internal/' as '/spb.internal/'). Fails, printing nothing, when $1 is not a plain domain
+# list: an address after the last '/', or a UCI list (values joined by spaces).
+dns_local_merge() {
+    case "$1" in
+        '') ;;
+        *//*|*[!A-Za-z0-9._/-]*) return 1 ;;
+        /*/) ;;
+        *) return 1 ;;
+    esac
+    printf '%s\n' "$1" | awk -v drop="$2" -v add="$3" '
+        function key(s) { s = tolower(s); sub(/^\.+/, "", s); sub(/\.+$/, "", s); return s }
+        {
+            nd = split(drop, d, " "); for (i = 1; i <= nd; i++) gone[key(d[i])] = 1
+            nf = split($0, f, "/")
+            for (i = 2; i < nf; i++) {
+                k = key(f[i])
+                if (k in gone || k in seen) continue
+                seen[k] = 1; out = out "/" f[i]
+            }
+            na = split(add, a, " ")
+            for (i = 1; i <= na; i++) {
+                k = key(a[i])
+                if (k in seen) continue
+                seen[k] = 1; out = out "/" a[i]
+            }
+            print (out == "" ? "" : out "/")
+        }'
+}
+
+# yes/no: is zone $1 answered locally — in a plain 'local' domain list (one with
+# a target after the last '/' forwards instead) or, as up to 3.0.1 and in the
+# fallback below, as a targetless 'server=/zone/' entry?
+dns_zone_is_local() {
+    _l="$(uci -q get 'dhcp.@dnsmasq[0].local' 2>/dev/null)"
+    dns_local_merge "$_l" '' '' >/dev/null || _l=''
+    { printf '%s\n' "$_l" | tr '/' '\n'
+      uci -q get 'dhcp.@dnsmasq[0].server' 2>/dev/null | tr ' ' '\n' | sed -n 's|^/\([^/]*\)/$|\1|p'
+    } | sed 's/^\.*//; s/\.*$//' | grep -qixF "$1" && echo yes || echo no
+}
+
 stage_dns() {
     [ "$DO_DNS" -eq 1 ] || { info "skipping DNS module (--no-dns)"; return 0; }
     FAILED_STAGE='DNS over Yggdrasil'
@@ -2239,35 +2288,53 @@ stage_dns() {
         info "static record $_s dropped (the names are generated now)"
     done
 
-    # Answer the namespace locally instead of forwarding it to the WAN resolver.
-    # NB: the documented equivalent, 'local=/domain/', must NOT be turned into a
-    # UCI list — /etc/init.d/dnsmasq emits a single 'local=' line and joins list
-    # values with spaces, which is invalid and stops dnsmasq from starting.
-    # 'server' is emitted as one line per value, and 'server=/domain/' with no
-    # target is dnsmasq's exact equivalent of 'local=/domain/'. home.arpa stays
-    # local even with a zone elsewhere (RFC 8375: never forwarded upstream).
-    _servers="$(uci -q get 'dhcp.@dnsmasq[0].server' 2>/dev/null | tr ' ' '\n')"
+    # Answer the namespace locally instead of forwarding it to the WAN resolver:
+    # home.arpa (RFC 8375: never forwarded upstream, even with a zone elsewhere)
+    # and the zone go into dnsmasq's 'local' option beside OpenWrt's own '/lan/',
+    # as ONE value: '/lan/home.arpa/spb.internal/'. dnsmasq takes several
+    # domains in one directive and /etc/init.d/dnsmasq emits the option as a
+    # single 'local=' line; a UCI *list* there is joined with spaces, which is
+    # invalid and stops dnsmasq from starting. Up to 3.0.1 the zones were
+    # 'server=/zone/' entries — the same directive — but proxy add-ons such as
+    # Forkop replace the whole server list with their own resolver and leave
+    # 'local' alone, so the zones moved; our old entries are removed here.
+    _drop=''
     for _z in $_old_zones; do
-        [ "$_z" = "$DNS_DOMAIN" ] || [ "$_z" = 'home.arpa' ] && continue
-        if printf '%s\n' "$_servers" | grep -qxF "/$_z/"; then
-            if [ "$DRY_RUN" -eq 1 ]; then
-                printf '    would run: uci del_list dhcp.@dnsmasq[0].server=/%s/\n' "$_z" >&2
-            else
-                uci del_list "dhcp.@dnsmasq[0].server=/$_z/"
-            fi
-            info "dnsmasq no longer answers the previous zone $_z"
-        fi
+        [ "$_z" = "$DNS_DOMAIN" ] || [ "$_z" = 'home.arpa' ] || _drop="$_drop $_z"
     done
-    for _z in $(printf '%s\n' home.arpa "$DNS_DOMAIN" | sort -u); do
-        if printf '%s\n' "$_servers" | grep -qxF "/$_z/"; then
-            info "dnsmasq already authoritative for $_z"
+    _want="$(printf '%s\n' home.arpa "$DNS_DOMAIN" | sort -u | tr '\n' ' ')"
+    _servers="$(uci -q get 'dhcp.@dnsmasq[0].server' 2>/dev/null | tr ' ' '\n')"
+    _local="$(uci -q get 'dhcp.@dnsmasq[0].local' 2>/dev/null)"
+    if _new="$(dns_local_merge "$_local" "$_drop" "$_want")"; then
+        if [ "$_new" = "$_local" ]; then
+            info "dnsmasq already answers locally: $_local"
         else
-            uci_add_list 'dhcp.@dnsmasq[0].server' "/$_z/"
-            _servers="$_servers
-/$_z/"
-            info "dnsmasq made authoritative for $_z"
+            uci_set 'dhcp.@dnsmasq[0].local' "$_new"
+            info "dnsmasq local domains: ${_local:-none} -> $_new"
         fi
-    done
+        for _z in $_drop $_want; do
+            printf '%s\n' "$_servers" | grep -qxF "/$_z/" || continue
+            uci_del_list 'dhcp.@dnsmasq[0].server' "/$_z/"
+            info "server entry /$_z/ removed (now in local)"
+        done
+    else
+        # Not a plain domain list (an address after the last '/', or a list):
+        # leave it to its owner and keep the pre-3.0.2 server entries.
+        warn "dnsmasq 'local' is '$_local', not a plain /domain/.../ value: zones kept in the server list (a proxy add-on that rewrites that list drops them)"
+        for _z in $_drop; do
+            printf '%s\n' "$_servers" | grep -qxF "/$_z/" || continue
+            uci_del_list 'dhcp.@dnsmasq[0].server' "/$_z/"
+            info "dnsmasq no longer answers the previous zone $_z"
+        done
+        for _z in $_want; do
+            if printf '%s\n' "$_servers" | grep -qxF "/$_z/"; then
+                info "dnsmasq already authoritative for $_z"
+            else
+                uci_add_list 'dhcp.@dnsmasq[0].server' "/$_z/"
+                info "dnsmasq made authoritative for $_z"
+            fi
+        done
+    fi
     case "$DNS_DOMAIN" in
         home.arpa|*.home.arpa|*.internal) : ;;
         *) warn "zone '$DNS_DOMAIN' is not under home.arpa or .internal: an invented top-level name may become a public one" ;;
@@ -2579,6 +2646,7 @@ HOSTS_EOF
             "$(awk -v n="${DNS_ROUTER}.${DNS_DOMAIN}" '$2 == n { print $1; exit }' "$DNS_HOSTS_DIR/yggdrasil-$IFACE" 2>/dev/null)"
         check 'DNS name hook' 'yes' "$([ -f "$DNS_HOOK" ] && [ -x "$DNS_GEN" ] && echo yes || echo no)"
         check 'no static records' '' "$(dns_uci_records)"
+        check 'zone answered locally' 'yes' "$(dns_zone_is_local "$DNS_DOMAIN")"
         check 'dnsmasq running'   'yes' \
             "$(pidof dnsmasq >/dev/null 2>&1 && echo yes || echo no)"
         # Resolve it for real. nslookup output varies between BusyBox builds, so

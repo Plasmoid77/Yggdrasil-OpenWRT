@@ -591,7 +591,8 @@ config host 'ygg_status_aabbccddeeff'
 config domain
     option name 'laptop.home.arpa'
     option ip '<STABLE_YGG_ROUTED_IPV6>'
-# Add list server '/home.arpa/' to the existing dnsmasq section for DNS.
+# For DNS, add home.arpa to the existing dnsmasq section's single
+# 'local' value: option local '/lan/home.arpa/'.
 ```
 
 ```uci
@@ -664,7 +665,7 @@ config rule
 | Own files in `/etc/sysupgrade.conf` (2.6) | The OpenWrt place for keeping non-package files across a sysupgrade; `/lib/upgrade/keep.d` belongs to packages. A package of our own would not survive either: neither attended nor manual sysupgrade carries hand-installed packages |
 | Follow the newest release, no baked-in version | A new status module must not require a new deployer; the resolved tag is strictly validated before it reaches a URL |
 | Restart netifd after new proto packages | Reload alone did not register the new handler in the recorded hardware test |
-| `list server '/home.arpa/'` | Avoid the observed invalid joined dnsmasq `list local` output |
+| Zones in the single `local` value (3.0.2) | `local=/lan/home.arpa/<zone>/` is one valid line; a UCI `list local` is joined with spaces into an invalid one. Up to 3.0.1 the zones were `server=/zone/` entries — the same dnsmasq directive — but proxy add-ons such as Forkop replace the whole server list and would expose the zones upstream. A value that is not a plain domain list is left alone (warning, server-list fallback) |
 
 DNS names do not require replacing client-wide DNS. The Linux reference uses
 systemd-resolved route-only `~home.arpa` (or `~spb.internal` for that site)
