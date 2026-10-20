@@ -212,13 +212,13 @@ sh deploy-openwrt-yggdrasil.sh --yes --config /root/ygg.conf
 The equivalent command-line option is `--dns-domain spb.internal`.
 `router.spb.internal` resolves to the router's Ygg node address. Every
 reservation with a hostname and an IPv6 suffix is named under the router's
-routed `/64` — `nas.spb.internal` -> `<routed /64>::10` — whichever way it was
+routed `/64` — `nas.<zone>` -> `<routed /64>::10` — whichever way it was
 made (since deployer 3.1):
 
 | Record | Where to manage it | Result |
 | --- | --- | --- |
 | A LAN device | LuCI **Network → DHCP and DNS → Static Leases**: Hostname, MAC, IPv6-Suffix, then Save & Apply; or `--host nas=<MAC>=10`; or Pin on the status page | `nas.<zone>` at `<routed /64>::10`, rebuilt seconds after Apply and on every key or prefix change |
-| A fixed address (another node's `200::/7` address) | LuCI **Hostnames** with the full name `nas.spb.internal`; or `--dns-host nas=<ADDR>` (kept there as `ygg_name_N`) | a plain dnsmasq record |
+| A fixed address (another node's `200::/7` address) | LuCI **Hostnames** with the full name `nas.<zone>`; or `--dns-host nas=<ADDR>` (kept there as `ygg_name_N`) | a plain dnsmasq record |
 | The router | — | `router.<zone>` at the node address |
 
 A lease without an IPv6 suffix (an IPv4-only reservation) gets no Ygg name.
