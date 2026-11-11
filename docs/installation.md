@@ -242,14 +242,33 @@ The router answers both zones itself and never forwards them: since deployer
 domain — LuCI **Network → DHCP and DNS**, `option local '/lan/home.arpa/<zone>/'`.
 It is one value, not a list; keep these domains in it when you edit the field.
 Up to 3.0.1 they were `server` entries (`/home.arpa/`, `/<zone>/`); a
-rerun moves them. Proxy add-ons such as Forkop replace the whole server list
+rerun moves them. Proxy add-ons such as Forkop 1.x replace the whole server list
 with their own resolver but leave **Local server** alone, so the zones stay
-private while such an add-on runs. Forkop restores the server list it saved at its
+private while such an add-on runs. Forkop 1.x restores the server list it saved at its
 first start when it stops; if you changed the zone while it ran, that copy may
 bring the old zone back as a harmless extra local domain — delete it from the
 server list by hand. When the value is not a plain domain list
 (an address after the last `/`), the deployer leaves it untouched, warns and
 keeps the zones in the server list as before.
+
+Forkop 2.x (tested with 2.0.0) goes further: it redirects every DNS query that
+arrives on its source interfaces (`br-lan` by default) to sing-box, which hands
+back to dnsmasq only single-label names, the **Local domain** (`lan`) and
+reverse lookups. LAN clients then get no answer for the zones
+([ushan0v/forkop#171](https://github.com/ushan0v/forkop/issues/171)); queries
+that arrive over Yggdrasil are not redirected. Add a Forkop section with the
+action **DNS**, the zones in **Domains** and `127.0.0.1` as its **DNS Server**,
+first in the section list:
+
+```text
+config section 'Ygg_DNS'
+	option enabled '1'
+	option action 'dns'
+	option label 'Local zones (Yggdrasil-OpenWRT)'
+	option destinations '<zone>
+home.arpa'
+	option dns_server '127.0.0.1'
+```
 
 Changing a zone does not add trusted clients or configure their DNS.
 `--no-dns` skips DNS configuration and leaves an existing DNS module intact;

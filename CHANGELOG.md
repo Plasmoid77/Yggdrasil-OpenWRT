@@ -1,5 +1,15 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## 2026-11-12 — docs: Forkop 2.x and mwan3
+
+- Forkop 2.x sends every LAN DNS query to sing-box, which leaves the private
+  zones unanswered for LAN clients; the installation guide shows the Forkop DNS
+  section that hands them back to dnsmasq (ushan0v/forkop#171).
+- Operations notes from the SPb router (mwan3 2.12, Forkop 2.0.0): peers redial
+  over the backup uplink by themselves, and a Forkop section with a Fallback
+  (Direct, then proxy servers) keeps them up on a white-listed mobile uplink;
+  under mwan3 it matches the router's own peer connections by IP only.
+
 ## 2026-10-20 — both routers on OpenWrt 25.12.6
 
 - SPb and BLG were upgraded 25.12.5 → 25.12.6 with `owut`, keeping settings,
