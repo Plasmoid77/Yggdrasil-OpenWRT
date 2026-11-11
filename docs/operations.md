@@ -335,6 +335,31 @@ so the /64 keeps following the node key. odhcpd has no push for ordinary clients
 Reconfigure only to prefix-delegation leases). By hand: `dhcpcd -N <if>` renews at once
 (`dhcpcd -n` only confirms and adds nothing).
 
+### Uplink failover and proxy add-ons (mwan3, Forkop 2.x)
+
+Tested on the SPb router with OpenWrt's mwan3 2.12 (wired `wan` primary, LTE
+`wwan` backup, tracking by ping) and Forkop 2.0.0:
+
+- When mwan3 takes the primary uplink offline, the public peers redial over the
+  backup within seconds and the routed LAN keeps its Yggdrasil addresses. No
+  hook of this project is needed: `70-yggdrasil-peers` acts on `ifup` only, and
+  Yggdrasil redials by itself.
+- Forkop 2.x routes the router's own traffic too. To keep the peers up on an
+  uplink that lets only white-listed addresses through (a mobile carrier's
+  "white lists"), put the peers into a Forkop section whose connection is a
+  Fallback: first level **Direct**, then proxy servers that the white list
+  lets through. Normally the peers go direct; when direct fails, each new
+  connection moves on to the next level after the fallback's connect timeout
+  (5 s per failed level). With the router's uplink traffic blocked except for
+  two such servers, all six peers came back through the proxy within 90 s.
+- With mwan3 running, Forkop 2.0.0 does not redirect the router's own DNS:
+  mwan3 marks every packet the router sends, and Forkop skips marked packets.
+  Such a section therefore matches the router's peer connections only by IP
+  address. List the peers' addresses beside their names and update them when a
+  peer moves.
+- Every Forkop reload (saving its settings) drops the peers that go through
+  such a section for a moment; they redial within seconds.
+
 ### Do not use runtime host hints as an inventory repair tool
 
 If rows disappear because the backend was changed to use `getHostHints` as its inventory database, the fix is not to continuously "wake" NDP with pings. Restore the explicit lifetime model instead:
