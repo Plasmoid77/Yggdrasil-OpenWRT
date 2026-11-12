@@ -831,7 +831,12 @@ sudo /usr/local/libexec/yggdrasil-split-dns apply
 It listens on 127.0.0.2 only (`bind-interfaces`), next to systemd-resolved's
 127.0.0.53 and any libvirt instance, and has no upstream: names outside the
 zones are never sent to it. A router that is unreachable only makes its own
-zone time out. The supplied forwarder has entries for `spb.internal` and
+zone time out. The routers answer with TTL 0, so the forwarder retries a
+lost query itself after 1 s and keeps answers for a minute, then serves them
+from the cache while refreshing; without that, one UDP packet lost over
+Yggdrasil stalls a browser for the client's 5 s retry. A changed record
+reaches the client a minute later, or one lookup after that.
+The supplied forwarder has entries for `spb.internal` and
 `blg.internal`; replace both address placeholders before starting it. Add
 each extra zone to both the forwarder and the helper's `zones`. Routing the
 parent `internal` would also send every other `.internal` name to this local
