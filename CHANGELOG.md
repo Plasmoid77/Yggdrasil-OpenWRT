@@ -1,5 +1,16 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## 2026-11-13 — status: Pin/Unpin announce the dhcp change
+
+- Pin and Unpin committed dhcp and reloaded dnsmasq/odhcpd directly, so the
+  `yggdrasil-dns` reload trigger never ran and a pinned name such as
+  `<host>.blg.internal` appeared only after the next ygg0 hotplug. They now
+  send the `config.change` event LuCI's Apply sends (also after a rollback).
+- Note for devices without a DHCPv6 client (seen with NanoKVM): a reserved
+  suffix gives them no address, since only DHCPv6 hands it out. Their name
+  reaches them when the reservation's suffix is their observed EUI-64
+  interface identifier (SLAAC).
+
 ## 2026-11-12 — Yggdrasil 0.5.15 build; jumper 0.3.1 needs a shorter query delay
 
 - New release `yggdrasil-0.5.15-r1-aarch64`: Yggdrasil 0.5.15 for OpenWrt

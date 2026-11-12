@@ -429,8 +429,11 @@ without a lease it disappears. Neither operation deletes `config domain`.
 
 Persistent mutations acquire `/var/lock/yggdrasil-status-dhcp.lock` using
 exclusive nonblocking flock, refuse pending DHCP UCI edits, back up the DHCP
-file, mutate, commit and reload dnsmasq and, when DHCPv6 is served, odhcpd.
-On failure it restores the backup, reverts staged DHCP changes and reloads.
+file, mutate, commit and reload dnsmasq and, when DHCPv6 is served, odhcpd,
+then announce `config.change` for `dhcp` on ubus (best effort, as LuCI's Apply
+does) so other reload triggers on dhcp, such as `yggdrasil-dns`, follow.
+On failure it restores the backup, reverts staged DHCP changes, reloads and
+announces the change again.
 Only complete recovery returns `uci_failed`/`reload_failed` with a restoration
 message. Failed copying, reverting or reloading returns `rollback_failed`
 and retains the original `/tmp/yggdrasil-status-dhcp.<pid>.bak` for manual

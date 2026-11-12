@@ -24,7 +24,7 @@ load() {
 for fn in ipv6_prefix_awk lower normalize_mac valid_mac valid_hostname valid_ipv4 first_ipv4 lease_is_active \
     find_active_lease_by_mac match_host_section_by_mac find_host_by_mac host_section_has_extra_options \
     backup_dhcp_config restore_dhcp_config dhcp_change_failed finish_dhcp_config dhcp_has_pending_changes \
-    dhcpv6_is_served lan_dhcpv6_is_served commit_and_reload_dhcp norm_hostid valid_hostid \
+    dhcpv6_is_served lan_dhcpv6_is_served commit_and_reload_dhcp announce_dhcp_change norm_hostid valid_hostid \
     collect_taken_hostids collect_taken_hostid iid_to_addr load_ygg_prefix rpc_pin rpc_unpin; do
     load "$fn"
 done
@@ -85,6 +85,11 @@ for svc in dnsmasq odhcpd; do
     chmod 755 "$INITD/$svc"
 done
 export FAIL_dnsmasq FAIL_odhcpd   # the init scripts are separate processes
+ubus() {             # only the config.change event is recorded
+    [ "$1 $2 $3" = 'call service event' ] || return 1
+    printf '%s\n' "$4" >> "$TMP/events"
+}
+DHCP_EVENT='{"type":"config.change","data":{"package":"dhcp"}}'
 read_request() { return 0; }
 REQUEST=''
 json_get_var() { eval "$1=\$(printf '%s\n' \"\$REQUEST\" | sed -n 's/^$2=//p')"; }
@@ -111,7 +116,7 @@ dhcp.cfg01.name='printer'
 dhcp.cfg01.mac='11:22:33:44:55:66'
 dhcp.cfg01.ip='192.0.2.50'
 EOF
-    : > "$STAGE"; : > "$TMP/services"
+    : > "$STAGE"; : > "$TMP/services"; : > "$TMP/events"
     printf '%s\n' '9999 aa:bb:cc:dd:ee:ff 192.0.2.10 laptop *' > "$LEASE_FILE"
     rm -f "$TMP/dnsmasq.failed" "$TMP/odhcpd.failed"
     CODE=''; ADDR6=''; FAIL_RESTORE_COPY=0; FAIL_COMMIT=0; FAIL_dnsmasq=0; FAIL_odhcpd=0; LEASE_DUID=''
@@ -130,6 +135,8 @@ name=laptop'
     if uci -q get dhcp.ygg_status_aabbccddeeff.ip >/dev/null; then fail 'IPv4 reserved without being asked'; fi
     eq '' "$(cat "$STAGE")"
     eq "$(printf 'dnsmasq reload\nodhcpd reload')" "$(cat "$TMP/services")"
+    # the other dhcp watchers (yggdrasil-dns) are told, as LuCI's apply does
+    eq "$DHCP_EVENT" "$(cat "$TMP/events")"
     # the same device again is already persistent, and nothing changes
     cp "$STORE" "$TMP/before"
     rpc_pin
