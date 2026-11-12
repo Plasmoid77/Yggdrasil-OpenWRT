@@ -86,7 +86,8 @@ for svc in dnsmasq odhcpd; do
 done
 export FAIL_dnsmasq FAIL_odhcpd   # the init scripts are separate processes
 ubus() {             # only the config.change event is recorded
-    [ "$1 $2" = '-t 2' ] && shift 2 || fail "ubus without a short timeout: $*"
+    [ "$1 $2" = '-t 2' ] || fail "ubus without a short timeout: $*"
+    shift 2
     [ "$1 $2 $3" = 'call service event' ] || return 1
     [ "${FAIL_ubus:-0}" != 1 ] || return 1
     printf '%s\n' "$4" >> "$TMP/events"
