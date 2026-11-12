@@ -86,7 +86,9 @@ for svc in dnsmasq odhcpd; do
 done
 export FAIL_dnsmasq FAIL_odhcpd   # the init scripts are separate processes
 ubus() {             # only the config.change event is recorded
+    [ "$1 $2" = '-t 2' ] && shift 2 || fail "ubus without a short timeout: $*"
     [ "$1 $2 $3" = 'call service event' ] || return 1
+    [ "${FAIL_ubus:-0}" != 1 ] || return 1
     printf '%s\n' "$4" >> "$TMP/events"
 }
 DHCP_EVENT='{"type":"config.change","data":{"package":"dhcp"}}'
@@ -119,7 +121,7 @@ EOF
     : > "$STAGE"; : > "$TMP/services"; : > "$TMP/events"
     printf '%s\n' '9999 aa:bb:cc:dd:ee:ff 192.0.2.10 laptop *' > "$LEASE_FILE"
     rm -f "$TMP/dnsmasq.failed" "$TMP/odhcpd.failed"
-    CODE=''; ADDR6=''; FAIL_RESTORE_COPY=0; FAIL_COMMIT=0; FAIL_dnsmasq=0; FAIL_odhcpd=0; LEASE_DUID=''
+    CODE=''; ADDR6=''; FAIL_RESTORE_COPY=0; FAIL_COMMIT=0; FAIL_dnsmasq=0; FAIL_odhcpd=0; FAIL_ubus=0; LEASE_DUID=''
     PIN_SECTION_PREFIX='ygg_status_'
 }
 
@@ -188,6 +190,8 @@ name=laptop'
     eq reload_failed "$CODE"
     cmp -s "$STORE" "$TMP/before" || fail 'the previous configuration was not restored'
     eq "$(printf 'dnsmasq reload\nodhcpd reload\ndnsmasq reload\nodhcpd reload')" "$(cat "$TMP/services")"
+    # the restored file is announced too, so yggdrasil-dns rereads it
+    eq "$DHCP_EVENT" "$(cat "$TMP/events")"
     [ ! -e "/tmp/yggdrasil-status-dhcp.$$.bak" ] || fail 'backup left behind'
 }
 
@@ -205,13 +209,25 @@ reserve_ipv4=true'
     eq ygg_status_aabbccddeeff "$(view | sed -n 's/^dhcp\.\(ygg_status_[^.=]*\)=host$/\1/p')"
     REQUEST='mac=aa:bb:cc:dd:ee:ff
 confirm_static=true'
-    : > "$TMP/services"
+    : > "$TMP/services"; : > "$TMP/events"
     rpc_unpin
     eq unpinned "$CODE"
     if view | grep -q '^dhcp\.ygg_status_'; then fail 'the pin section survived Unpin'; fi
     eq printer "$(uci -q get dhcp.cfg01.name)"
     eq '' "$(cat "$STAGE")"
     eq "$(printf 'dnsmasq reload\nodhcpd reload')" "$(cat "$TMP/services")"
+    eq "$DHCP_EVENT" "$(cat "$TMP/events")"
+    # a failed announcement does not fail the change already made
+    FAIL_ubus=1
+    REQUEST='mac=aa:bb:cc:dd:ee:ff
+name=laptop'
+    rpc_pin
+    eq pinned "$CODE"
+    eq laptop "$(uci -q get dhcp.ygg_status_aabbccddeeff.name)"
+    REQUEST='mac=aa:bb:cc:dd:ee:ff'
+    rpc_unpin
+    eq unpinned "$CODE"
+    FAIL_ubus=0
     # a plain hand-made (anonymous, cfgNN) reservation goes the same way
     REQUEST='mac=11:22:33:44:55:66
 confirm_static=true'

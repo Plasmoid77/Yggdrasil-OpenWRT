@@ -1798,9 +1798,10 @@ commit_and_reload_dhcp() {
 # Other services that follow the dhcp config through a procd reload trigger
 # (such as yggdrasil-dns, which publishes reservations as names) hear of a
 # change only from a config.change event: LuCI's apply sends one, a plain
-# 'uci commit' does not. Best effort: the reservation itself is already live.
+# 'uci commit' does not. Best effort: the reservation itself is already live,
+# so a stalled procd gets 2 s, not the 30 s default that outlasts LuCI's call.
 announce_dhcp_change() {
-	ubus call service event '{"type":"config.change","data":{"package":"dhcp"}}' >/dev/null 2>&1 || :
+	ubus -t 2 call service event '{"type":"config.change","data":{"package":"dhcp"}}' >/dev/null 2>&1 || :
 }
 
 
