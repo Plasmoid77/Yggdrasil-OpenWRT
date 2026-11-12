@@ -1,5 +1,15 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## 2026-11-12 — client: local DNS forwarder retries and caches
+
+- `router.spb.internal` and `router.blg.internal` sometimes took 2–8 s in a
+  browser: the routers answer with TTL 0, so every lookup crossed Yggdrasil,
+  and a lost UDP packet waited for systemd-resolved's 5 s retry (seen in its
+  debug log, mostly towards BLG). `client/linux/dnsmasq-ygg-zones.conf` now
+  retries after 1 s (`fast-dns-retry`), caches answers and empty answers for
+  60 s (`min-cache-ttl`, `neg-ttl`) and serves expired ones while refreshing
+  (`use-stale-cache=3600`). The routers keep the OpenWrt default.
+
 ## 2026-11-12 — docs: Forkop 2.x and mwan3
 
 - Forkop 2.x sends every LAN DNS query to sing-box, which leaves the private
