@@ -439,6 +439,19 @@ the pin. A feed version installed by hand that is newer than the build is kept:
 the restore hook below brings the build back only over an older version (see
 [installation](installation.md#yggdrasil-version-the-feeds-or-this-projects-build)).
 
+Yggdrasil 0.5.15 (this project's build `yggdrasil-0.5.15-r1-aarch64`) closes an
+admin socket connection that reads nothing for 10 s. yggdrasil-jumper 0.3.1,
+the OpenWrt package, queries the socket every 10 s and does not reconnect: it
+exits with "Broken pipe" about 10 s after start. Until the feed ships a jumper
+that reconnects, make it query more often through the package's own option
+(an extra line for the generated jumper config), then restart the interface:
+
+```sh
+uci set network.ygg0.jumper_config='yggdrasilctl_query_delay = 5.0'
+uci commit network
+ubus call network.interface.ygg0 down; ubus call network.interface.ygg0 up
+```
+
 The deployer's own files live outside any package, survive package upgrades and
 are listed in `/etc/sysupgrade.conf`; a rerun atomically replaces own scripts
 when their text changes and repairs their permissions even when text is

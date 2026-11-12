@@ -1,5 +1,18 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## 2026-11-12 — Yggdrasil 0.5.15 build; jumper 0.3.1 needs a shorter query delay
+
+- New release `yggdrasil-0.5.15-r1-aarch64`: Yggdrasil 0.5.15 for OpenWrt
+  25.12 on `aarch64_cortex-a53`, same SDK and recipe as 0.5.14 (the recipe now
+  matches openwrt/packages master). SPb and BLG run it; node addresses
+  unchanged, peers up, `--ygg-edge` and the restore hook pick it up.
+- yggdrasil-jumper 0.3.1 exits 10 s after start with 0.5.15 (the new 10 s
+  admin socket read timeout meets its 10 s query delay). Workaround in the
+  operations guide: `jumper_config` with `yggdrasilctl_query_delay = 5.0`.
+- BLG (Yggdrasil-only access) was upgraded under a rollback guard rehearsed
+  on SPb first: offline downgrade to 0.5.14-r1 after 15 min unless accepted,
+  relaunched from `/etc/rc.local` after a reboot, then removed.
+
 ## 2026-11-12 — client: local DNS forwarder retries and caches
 
 - `router.spb.internal` and `router.blg.internal` sometimes took 2–8 s in a
