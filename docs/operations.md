@@ -522,13 +522,14 @@ host's own outbound connections still leave through its own node.
 
 Names and the status page:
 
-- A reservation names the routed address (`pc.<zone>`). For the node
-  address add a LuCI **Hostnames** record under a different name, for example
-  `pc-node.<zone>`. A Hostnames record with the reservation's own name makes
-  the name answer with both addresses and the status page show the node
-  address as the device's canonical IPv6 instead of the reservation.
-- The status page shows the node address in the Yggdrasil column labelled
-  "node", from the router's peer link.
+- A reservation names the routed address (`pc.<zone>`); with the policy
+  routing above that one name is enough. The status page shows the node
+  address in the Yggdrasil column labelled "node", from the router's peer
+  link. Do not add a Hostnames record with the reservation's own name: the
+  name would answer with both addresses and the status page would show the
+  node address as the device's canonical IPv6 instead of the reservation. A
+  name for the node address, if wanted, is a Hostnames record under another
+  name (`pc-node.<zone>`).
 - NetworkManager identifies the host with a DUID-UUID, which carries no MAC,
   so a reservation made by MAC alone does not reach the host. Pin records the
   DUID while the host holds a lease; otherwise copy it from
