@@ -490,6 +490,52 @@ extensions uses a temporary routed-prefix address as source toward Yggdrasil,
 not its reserved one - remote allow-lists on the reserved address match
 inbound traffic to the host, not the host's outbound connections.
 
+### A LAN host that is its own Yggdrasil node
+
+A computer that runs its own Yggdrasil daemon has two Yggdrasil addresses: its
+node address (`2xx:`, from its own key, reached through its own peers or a
+multicast peering with the router) and an address in the router's routed `/64`
+(SLAAC, or the reserved `<routed /64>::<suffix>` from DHCPv6). Inside the LAN
+both work. From Yggdrasil the routed address does not: the host answers
+through its own `200::/7` route, so the reply leaves through its own node with
+a source that node does not own and is dropped (`No route to host` or a
+timeout at the caller). Its node address always works.
+
+To make the routed address answer as well, route replies from the routed
+`/64` back through the router (policy routing on the host). With
+NetworkManager, persistent across reboots (`<ifname>` the LAN interface,
+`<routed /64>` as in `ifstatus ygg0`, the router's link-local address as in
+`ip -6 route show default` on the host):
+
+```sh
+CON="$(nmcli -g GENERAL.CONNECTION device show <ifname>)"
+sudo nmcli connection modify "$CON" ipv6.routing-rules "priority 1000 from <routed /64> table 106" ipv6.routes "200::/7 <router link-local> table=106"
+sudo nmcli device reapply <ifname>
+```
+
+Without NetworkManager the same two routes are
+`ip -6 rule add priority 1000 from <routed /64> table 106` and
+`ip -6 route add 200::/7 via <router link-local> dev <ifname> table 106`,
+made persistent the way that system configures its network. The rule follows
+the routed prefix: a new router key means a new prefix and a new rule. The
+host's own outbound connections still leave through its own node.
+
+Names and the status page:
+
+- A reservation names the routed address (`pc.<zone>`); with the policy
+  routing above that one name is enough. The status page shows the node
+  address in the Yggdrasil column labelled "node", from the router's peer
+  link. Do not add a Hostnames record with the reservation's own name: the
+  name would answer with both addresses and the status page would show the
+  node address as the device's canonical IPv6 instead of the reservation. A
+  name for the node address, if wanted, is a Hostnames record under another
+  name (`pc-node.<zone>`).
+- NetworkManager identifies the host with a DUID-UUID, which carries no MAC,
+  so a reservation made by MAC alone does not reach the host. Pin records the
+  DUID while the host holds a lease; otherwise copy it from
+  `ubus call dhcp ipv6leases` into `uci set dhcp.<section>.duid=<duid>`, then
+  `uci commit dhcp` and `/etc/init.d/odhcpd reload`.
+
 ### Post-update verification
 
 Re-run the relevant layer checks:

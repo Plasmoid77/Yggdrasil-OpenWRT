@@ -1,5 +1,15 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## 2026-11-13 — docs: a LAN host that is its own Yggdrasil node
+
+- Operations guide: such a host has a node address and a routed-prefix
+  address. From Yggdrasil the routed one answers only with policy routing on
+  the host (NetworkManager commands given). One name for the reservation is
+  enough, since the status page shows the node address. A Hostnames record
+  with the same name would make the node address canonical. Also covers the
+  DUID a NetworkManager host needs in its reservation.
+  Found on BLG (RyzenPC106).
+
 ## 2026-11-13 — status: Pin/Unpin announce the dhcp change
 
 - Pin and Unpin committed dhcp and reloaded dnsmasq/odhcpd directly, so the

@@ -150,7 +150,9 @@ Yggdrasil path MTU (1280, PMTUD via the router's ICMPv6 PTB). `--no-lan-forward`
 their own, the rule's removal does not cut them. Hosts that run their own
 Yggdrasil node keep using it: their own `200::/7` route wins over the router's
 default, so their LAN routed-prefix address is only their inbound identity -
-as in 1.x.
+as in 1.x - and answers from Yggdrasil only with policy routing on the host
+(replies from the routed `/64` back through the router; see
+[operations](operations.md#a-lan-host-that-is-its-own-yggdrasil-node)).
 
 Verification is in three classes: what the deployer wrote or requires is
 asserted (`ra`, `ra_default`, the prefix actually assigned to the LAN, an
