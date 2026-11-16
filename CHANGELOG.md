@@ -1,5 +1,12 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## 2026-11-16 — docs: mwan3 configuration moved to mwan3-preset
+
+- The detailed mwan3 tracking settings added to the operations guide earlier
+  today now live in their own repository,
+  [mwan3-preset](https://github.com/Plasmoid77/mwan3-preset). The guide keeps
+  a short note and the link.
+
 ## 2026-11-16 — docs: mwan3 tracks the primary uplink by HTTPS
 
 - Operations guide: ping tracking with `reliability 1` kept a wired uplink

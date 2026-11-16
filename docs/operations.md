@@ -359,49 +359,11 @@ Tested on the SPb router with OpenWrt's mwan3 2.12 (wired `wan` primary, LTE
   peer moves.
 - Every Forkop reload (saving its settings) drops the peers that go through
   such a section for a moment; they redial within seconds.
-- Do not track the primary uplink by ping alone. With `reliability 1` mwan3
-  tries the targets in turn until one answers, so a round fails only when all
-  of them stay silent, and `down 3` needs three such rounds in a row. A wired
-  uplink that still answered ping but carried almost no traffic stayed
-  "online" for 45 minutes. HTTPS handshakes with quality limits caught it.
-  These are stock mwan3 options plus the `httping` package (both on the SPb
-  router since 2026-11-16):
-
-  ```text
-  config interface 'wan'
-  	option enabled '1'
-  	option family 'ipv4'
-  	option initial_state 'offline'
-  	list flush_conntrack 'disconnected'
-  	option track_method 'httping'
-  	option httping_ssl '1'
-  	list track_ip '1.1.1.1'
-  	list track_ip '8.8.8.8'
-  	list track_ip '77.88.55.242'
-  	list track_ip '5.255.255.242'
-  	option reliability '2'
-  	option count '3'
-  	option timeout '3'
-  	option interval '5'
-  	option check_quality '1'
-  	option failure_loss '50'
-  	option recovery_loss '34'
-  	option failure_latency '1000'
-  	option recovery_latency '1000'
-  	option down '3'
-  	option up '6'
-  ```
-
-  A target counts as good when at most one of its three requests fails and
-  the average stays under 1 s. Two of the four targets must be good, so a
-  single blocked provider does not take the uplink down. Use targets that
-  answer HTTPS on their IP address: 77.88.8.8 does not. Return to the primary
-  takes six good rounds (about 70 s), so a flapping link does not pull the
-  traffic back after a single answer. Detecting a dead link takes 1.5 to
-  2 minutes: every failed request waits for its timeout. Keep the backup on
-  ping. With `last_resort default` a backup that is too strict sends the
-  traffic back to the main table, which means to the primary. These probes do
-  not test a proxy, the LAN's DNS or throughput.
+- How the primary uplink is tracked is outside this project. Ping tracking
+  with `reliability 1` can keep a wired uplink that answers ping but carries
+  almost no traffic "online"; the SPb router's mwan3 configuration with
+  HTTPS tracking is kept in
+  [mwan3-preset](https://github.com/Plasmoid77/mwan3-preset).
 
 ### Do not use runtime host hints as an inventory repair tool
 
