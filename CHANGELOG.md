@@ -1,5 +1,12 @@
 # CHANGELOG — OpenWrt + Yggdrasil routed LAN / LuCI Status
 
+## 2026-11-16 — docs: mwan3 tracks the primary uplink by HTTPS
+
+- Operations guide: ping tracking with `reliability 1` kept a wired uplink
+  "online" for 45 minutes while it answered ping but carried almost no
+  traffic. Added the stock mwan3 `httping` + `check_quality` settings now used
+  on the SPb router, and why the backup stays on ping.
+
 ## 2026-11-13 — docs: a LAN host that is its own Yggdrasil node
 
 - Operations guide: such a host has a node address and a routed-prefix
